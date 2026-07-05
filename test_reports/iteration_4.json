@@ -1,0 +1,43 @@
+{
+  "summary": "Iteration 4 verified the new daily-report system (worker filter + date filter + export) end-to-end. Backend: 7/7 new report tests PASSED in /app/backend/tests/test_reports.py; full regression 43/46 passing (the 3 voice-turn failures are pre-existing Mistral 429 rate-limits documented in iter-3, unrelated to reports). Report tests cover: new DailyReportOut schema (date, filter_worker_ids, workers[], total_events, total_minutes, orders_touched, narrative, generated_at), worker RBAC 403, past-date empty → 'Nessuna attività...', bad-date → 400, empty worker_ids='' → all workers, worker_ids=<id> filters correctly, and — most importantly — minutes_worked correctness: injected controlled events START T / PAUSE T+10 / RESUME T+20 / COMPLETE T+35 for a fresh worker via Mongo and confirmed the API returns exactly 25 minutes (10+15) at both aggregate and per-order levels. Frontend (390x844 mobile viewport, admin/admin123): REPORT AI tab renders date-chip-today, date-chip-yesterday, btn-select-all (TUTTI ✓ toggle), worker-chip-<id> multi-select for 3 workers, hint text ('Nessuna selezione → include TUTTI i meccanici' / '1 meccanico selezionato'), and btn-generate-report. Tapping GENERA with no selection → GET /api/reports/daily?date=YYYY-MM-DD (worker_ids param correctly omitted). Selecting IERI switches date to yesterday (verified: today=2026-07-05 → request sent with date=2026-07-04). Selecting one worker chip → GET /api/reports/daily?date=<today>&worker_ids=<uuid>; the output correctly shows exactly ONE worker card (report.workers filtered to selection). Summary KPI card (EVENTI/ORE/COMMESSE), btn-export-all, per-worker cards each with btn-export-worker-<id>, and ANALISI AI narrative (report-narrative testID) all render. Empty-report case (yesterday, no activity) shows italian 'Nessuna attività registrata...' narrative correctly. No blocking issues.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "POST /work-orders/{id}/voice-turn", "issue": "Pre-existing Mistral 429 rate-limit surfaces as HTTP 500 during rapid regression runs; see iter-3 action item. Not related to /reports/daily."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": [
+      {"component": "third-party lib", "issue": "Console warning 'props.pointerEvents is deprecated. Use style.pointerEvents' still emitted (unchanged from iter-3, benign)."}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_reports.py",
+    "/app/backend/tests/backend_test.py",
+    "/app/test_reports/pytest/pytest_reports_iter4.xml",
+    "/app/test_reports/pytest/pytest_all_iter4.xml"
+  ],
+  "action_items": [
+    "Optional (spec nuance): Frontend always includes ?date=YYYY-MM-DD even for OGGI. Review-spec phrasing 'no date=today' could suggest omitting the date param when today is selected. Behavior is functionally identical (backend defaults to today), so no fix required — flag only if the phrasing is a strict requirement.",
+    "Consider updating backend_test.py::TestLiveAndReports::test_daily_report_ai — already refreshed in this iteration to the new schema, but the docstring/class name still mentions old assumptions; safe as-is."
+  ],
+  "critical_code_review_comments": [
+    "Backend /reports/daily correctly handles: workers array only contains filtered workers when worker_ids provided; when a worker present in events but not in workers_map and filtering is active, they are skipped (line 606-608) — safe.",
+    "_worker_minutes correctly pairs START/RESUME with PAUSE/COMPLETE and ignores dangling opens (returns 0 when interval isn't closed). Verified numerically with 25min case.",
+    "Frontend reports.tsx (~325 lines) is well-structured; touch targets ≥40px; testIDs present on all interactive elements including per-worker export buttons btn-export-worker-{id}."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_reports.py (NEW — 7 tests for the new report system)",
+    "/app/backend/tests/backend_test.py (updated test_daily_report_ai to new schema)",
+    "/app/test_reports/iteration_4.json (NEW)"
+  ],
+  "success_rate": {"backend": "100% on reports (7/7 new + 21/21 backend_test.py); overall 43/46 (voice-turn 429s pre-existing)", "frontend": "100% on tested flows"},
+  "seed_data_creation": "test_reports.py creates 2 TEST workers + 1 TEST work-order per module + a dedicated TEST_min_ worker for the minutes test with 4 injected work_events (via direct Mongo insert); all cleaned up in module teardown.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Report system verified. Admin admin/admin123. BASE https://car-bay-flow.preview.emergentagent.com. Report page testIDs: date-chip-today, date-chip-yesterday, btn-select-all, worker-chip-<uuid>, btn-generate-report, report-content, btn-export-all, worker-report-<uuid>, btn-export-worker-<uuid>, report-narrative. Backend regression command: `MONGO_URL=mongodb://localhost:27017 DB_NAME=test_database python -m pytest backend/tests/ -v`. Voice-turn 3-test failure is Mistral tier 429 — unrelated. Frontend does send date=today on OGGI; if strict spec compliance ('no date=today') is required, edit reports.tsx line 57-58 to only push date when dateChoice==='yesterday'.",
+  "rca_of_issue": "N/A — no unresolved issues in the current review scope. All 7 dedicated report tests pass; frontend end-to-end verified with real API calls and DOM inspection."
+}

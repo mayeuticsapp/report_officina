@@ -227,11 +227,16 @@ class TestLiveAndReports:
         assert r.status_code == 403
 
     def test_daily_report_ai(self, session, admin_headers):
-        r = session.get(f"{API}/reports/daily", headers=admin_headers, timeout=60)
+        r = session.get(f"{API}/reports/daily", headers=admin_headers, timeout=90)
         assert r.status_code == 200
         body = r.json()
-        assert "report" in body and isinstance(body["report"], str) and len(body["report"]) > 0
-        assert body["events_count"] >= 1
+        # New schema
+        for k in ("date", "filter_worker_ids", "workers", "total_events",
+                  "total_minutes", "orders_touched", "narrative", "generated_at"):
+            assert k in body, f"missing key {k} in {body}"
+        assert isinstance(body["narrative"], str) and len(body["narrative"]) > 0
+        assert isinstance(body["workers"], list)
+        assert body["total_events"] >= 1
 
     def test_recent_events(self, session, admin_headers):
         r = session.get(f"{API}/events/recent?limit=20", headers=admin_headers)

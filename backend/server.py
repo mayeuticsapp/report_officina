@@ -506,51 +506,204 @@ async def workers_live_status(admin: dict = Depends(require_admin)):
 
 
 # ---- AI Reports ----
-@api.get("/reports/daily")
-async def daily_report(admin: dict = Depends(require_admin)):
-    """AI-generated report of today's activities."""
-    start = datetime(now_utc().year, now_utc().month, now_utc().day, tzinfo=timezone.utc)
-    events = await events_col.find(
-        {"timestamp": {"$gte": start}}, {"_id": 0}
-    ).sort("timestamp", 1).to_list(2000)
+class WorkerOrderStats(BaseModel):
+    order_id: str
+    plate: str
+    vehicle: str
+    customer: str
+    events_count: int
+    minutes_worked: int  # net minutes between START/RESUME and PAUSE/COMPLETE for this worker on this order
+    started_at: Optional[datetime] = None
+    last_event_at: Optional[datetime] = None
 
-    if not events:
-        return {"report": "Nessuna attività registrata oggi.", "events_count": 0}
 
-    # Compact events for the LLM
-    summary_lines = []
+class WorkerDailyStats(BaseModel):
+    worker_id: str
+    username: str
+    full_name: str
+    events_count: int
+    minutes_worked: int
+    orders: List[WorkerOrderStats]
+
+
+class DailyReportOut(BaseModel):
+    date: str  # YYYY-MM-DD
+    filter_worker_ids: List[str]
+    workers: List[WorkerDailyStats]
+    total_events: int
+    total_minutes: int
+    orders_touched: int
+    narrative: str
+    generated_at: datetime
+
+
+def _parse_iso_date(s: Optional[str]) -> datetime:
+    """Return the UTC midnight of the given YYYY-MM-DD, or today's UTC midnight."""
+    if not s:
+        n = now_utc()
+        return datetime(n.year, n.month, n.day, tzinfo=timezone.utc)
+    try:
+        d = datetime.strptime(s, "%Y-%m-%d")
+        return datetime(d.year, d.month, d.day, tzinfo=timezone.utc)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Formato data non valido (usa YYYY-MM-DD)")
+
+
+def _worker_minutes(events: list) -> int:
+    """Compute net worked minutes given events sorted by timestamp for a worker.
+    START/RESUME opens an interval; PAUSE/COMPLETE closes it."""
+    total = 0
+    open_at: Optional[datetime] = None
     for e in events:
         ts = e["timestamp"]
-        if isinstance(ts, datetime):
-            t = ts.strftime("%H:%M")
-        else:
-            t = str(ts)
-        reason = f" — {e['reason']}" if e.get("reason") else ""
-        summary_lines.append(f"[{t}] {e['worker_full_name']}: {e['type']}{reason}")
-    events_text = "\n".join(summary_lines)
+        if isinstance(ts, datetime) and ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        t = e["type"]
+        if t in ("START", "RESUME"):
+            if open_at is None:
+                open_at = ts
+        elif t in ("PAUSE", "COMPLETE"):
+            if open_at is not None:
+                total += max(0, int((ts - open_at).total_seconds() // 60))
+                open_at = None
+    return total
 
-    try:
-        resp = await mistral_client.chat.complete_async(
-            model=MISTRAL_TEXT_MODEL,
-            messages=[
-                {"role": "system", "content": (
-                    "Sei l'assistente AI di un capofficina. Analizza gli eventi della giornata "
-                    "e genera un REPORT strutturato in italiano con: "
-                    "1) Riepilogo generale (numero operai attivi, commesse toccate). "
-                    "2) Timeline sintetica per operaio. "
-                    "3) Anomalie o pause lunghe (>30 min). "
-                    "4) Suggerimenti operativi. "
-                    "Sii conciso, professionale, usa elenchi puntati."
-                )},
-                {"role": "user", "content": f"Eventi di oggi:\n{events_text}"},
-            ],
-            max_tokens=1500,
+
+@api.get("/reports/daily", response_model=DailyReportOut)
+async def daily_report(
+    worker_ids: Optional[str] = None,
+    date: Optional[str] = None,
+    admin: dict = Depends(require_admin),
+):
+    """
+    AI-generated daily report with per-worker breakdown.
+    Optional filters:
+      - worker_ids: comma-separated worker IDs (default: all workers)
+      - date: YYYY-MM-DD (default: today, UTC)
+    """
+    day_start = _parse_iso_date(date)
+    day_end = day_start + timedelta(days=1)
+    filter_ids = [w for w in (worker_ids.split(",") if worker_ids else []) if w.strip()]
+
+    # Fetch workers of interest
+    worker_query: dict = {"role": "worker"}
+    if filter_ids:
+        worker_query["id"] = {"$in": filter_ids}
+    workers = await users_col.find(worker_query, {"_id": 0, "password_hash": 0}).to_list(500)
+    workers_map = {w["id"]: w for w in workers}
+
+    # Fetch events in the day filtered by workers
+    events_query: dict = {"timestamp": {"$gte": day_start, "$lt": day_end}}
+    if filter_ids:
+        events_query["worker_id"] = {"$in": filter_ids}
+    events = await events_col.find(events_query, {"_id": 0}).sort("timestamp", 1).to_list(5000)
+
+    # Group events per (worker_id, order_id)
+    per_worker: dict = {w["id"]: {"events": [], "orders": {}} for w in workers}
+    for e in events:
+        wid = e["worker_id"]
+        if wid not in per_worker:
+            # Event from someone no longer in workers list — include if not filtering
+            if filter_ids:
+                continue
+            per_worker[wid] = {"events": [], "orders": {}}
+            workers_map[wid] = {"id": wid, "username": e.get("worker_username", "?"), "full_name": e.get("worker_full_name", "?")}
+        per_worker[wid]["events"].append(e)
+        oid = e["work_order_id"]
+        per_worker[wid]["orders"].setdefault(oid, []).append(e)
+
+    # Preload orders referenced
+    all_oids = {e["work_order_id"] for e in events}
+    orders_map: dict = {}
+    if all_oids:
+        for o in await work_orders_col.find({"id": {"$in": list(all_oids)}}, {"_id": 0}).to_list(1000):
+            orders_map[o["id"]] = o
+
+    workers_stats: List[WorkerDailyStats] = []
+    total_events = 0
+    total_minutes = 0
+    for wid, data in per_worker.items():
+        w = workers_map.get(wid) or {"id": wid, "username": "?", "full_name": "?"}
+        w_events = data["events"]
+        w_minutes = _worker_minutes(w_events)
+        total_events += len(w_events)
+        total_minutes += w_minutes
+        orders_stats: List[WorkerOrderStats] = []
+        for oid, evs in data["orders"].items():
+            o = orders_map.get(oid) or {"plate": "?", "vehicle": "?", "customer": "?"}
+            orders_stats.append(WorkerOrderStats(
+                order_id=oid, plate=o.get("plate", "?"), vehicle=o.get("vehicle", "?"), customer=o.get("customer", "?"),
+                events_count=len(evs),
+                minutes_worked=_worker_minutes(evs),
+                started_at=evs[0]["timestamp"],
+                last_event_at=evs[-1]["timestamp"],
+            ))
+        # Sort orders by most recent activity
+        orders_stats.sort(key=lambda x: x.last_event_at or day_start, reverse=True)
+        workers_stats.append(WorkerDailyStats(
+            worker_id=wid, username=w.get("username", "?"), full_name=w.get("full_name", "?"),
+            events_count=len(w_events), minutes_worked=w_minutes, orders=orders_stats,
+        ))
+    # Sort workers by minutes desc
+    workers_stats.sort(key=lambda w: w.minutes_worked, reverse=True)
+
+    orders_touched = len(all_oids)
+    date_str = day_start.strftime("%Y-%m-%d")
+
+    # Build narrative via Mistral
+    if not events:
+        narrative = "Nessuna attività registrata per il periodo/filtro selezionato."
+    else:
+        summary_lines = []
+        for e in events:
+            ts = e["timestamp"]
+            t = ts.strftime("%H:%M") if isinstance(ts, datetime) else str(ts)
+            reason = f" — {e['reason']}" if e.get("reason") else ""
+            o = orders_map.get(e["work_order_id"], {})
+            plate = o.get("plate", "?")
+            summary_lines.append(f"[{t}] {e['worker_full_name']} su {plate}: {e['type']}{reason}")
+        events_text = "\n".join(summary_lines)
+        selection_hint = (
+            f"Meccanici selezionati: {', '.join(w['full_name'] for w in workers)}"
+            if filter_ids and workers else "Tutti i meccanici"
         )
-        content = (resp.choices[0].message.content or "").strip()
-        return {"report": content, "events_count": len(events)}
-    except Exception as e:
-        logger.warning(f"Daily report failed: {e}")
-        return {"report": f"Errore generazione AI report. Eventi grezzi:\n{events_text}", "events_count": len(events)}
+        try:
+            resp = await mistral_client.chat.complete_async(
+                model=MISTRAL_TEXT_MODEL,
+                messages=[
+                    {"role": "system", "content": (
+                        "Sei l'assistente AI di un capofficina. Genera un REPORT professionale in italiano "
+                        "in Markdown con queste sezioni: "
+                        "**RIEPILOGO** (bullet: operai attivi, commesse toccate, ore totali), "
+                        "**PER MECCANICO** (per ogni operaio: ore lavorate, commesse su cui ha lavorato, note salienti), "
+                        "**COMMESSE COINVOLTE** (per ogni commessa: targa, operai coinvolti, avanzamento), "
+                        "**ANOMALIE** (pause >30min, sovrapposizioni, gap sospetti), "
+                        "**SUGGERIMENTI** (2-3 azioni operative concrete). "
+                        "Sii conciso, orientato all'azione."
+                    )},
+                    {"role": "user", "content": (
+                        f"Data: {date_str}\n{selection_hint}\n\n"
+                        f"Statistiche aggregate: {total_events} eventi, {total_minutes} minuti, {orders_touched} commesse.\n\n"
+                        f"Timeline eventi:\n{events_text}"
+                    )},
+                ],
+                max_tokens=1800,
+            )
+            narrative = (resp.choices[0].message.content or "").strip()
+        except Exception as e:
+            logger.warning(f"Daily narrative failed: {e}")
+            narrative = f"⚠️ Errore AI: {e}\n\nEventi grezzi:\n{events_text}"
+
+    return DailyReportOut(
+        date=date_str,
+        filter_worker_ids=filter_ids,
+        workers=workers_stats,
+        total_events=total_events,
+        total_minutes=total_minutes,
+        orders_touched=orders_touched,
+        narrative=narrative,
+        generated_at=now_utc(),
+    )
 
 
 # ---- Vision: plate OCR ----

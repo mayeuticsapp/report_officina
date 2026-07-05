@@ -125,6 +125,37 @@ export type VoiceTurnResp = {
   turn: ConversationTurn;
 };
 
+export type WorkerOrderStats = {
+  order_id: string;
+  plate: string;
+  vehicle: string;
+  customer: string;
+  events_count: number;
+  minutes_worked: number;
+  started_at?: string | null;
+  last_event_at?: string | null;
+};
+
+export type WorkerDailyStats = {
+  worker_id: string;
+  username: string;
+  full_name: string;
+  events_count: number;
+  minutes_worked: number;
+  orders: WorkerOrderStats[];
+};
+
+export type DailyReport = {
+  date: string;
+  filter_worker_ids: string[];
+  workers: WorkerDailyStats[];
+  total_events: number;
+  total_minutes: number;
+  orders_touched: number;
+  narrative: string;
+  generated_at: string;
+};
+
 /** Upload multipart audio file to /api/audio/transcribe */
 export async function transcribeAudio(uri: string, mimeType: string = "audio/m4a", filename: string = "note.m4a"): Promise<string> {
   const token = await (await import("@/src/utils/storage")).storage.secureGet<string>("officina_token", "");
