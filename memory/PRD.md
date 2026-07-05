@@ -101,3 +101,21 @@ Rimossi TUTTI i riferimenti ad Anthropic Claude e OpenAI Whisper. L'intera app o
 - Client Mistral condiviso a livello modulo (`mistral_client`)
 - Zero modifiche al frontend: contratto JSON degli endpoint invariato
 - Costi stimati per commessa completa: dialogo ~€0.002/turno, OCR ~€0.001/targa, Voxtral ~€0.001/minuto
+
+## v4 — Report giornaliero avanzato con esportazione (SHIPPED)
+
+**Backend:**
+- `GET /api/reports/daily?date=YYYY-MM-DD&worker_ids=id1,id2` (admin)
+- Nuovo schema `DailyReportOut`: date, filter_worker_ids, workers[{worker_id, full_name, events_count, minutes_worked, orders[{plate, vehicle, customer, events_count, minutes_worked}]}], total_events, total_minutes, orders_touched, narrative (Markdown AI), generated_at
+- Calcolo automatico dei minuti lavorati per operaio per commessa (accoppia START/RESUME → PAUSE/COMPLETE)
+- Narrativa AI (Mistral large) con sezioni: Riepilogo · Per Meccanico · Commesse Coinvolte · Anomalie · Suggerimenti
+- Validazione data formato YYYY-MM-DD (400 se malformata)
+
+**Frontend `(admin)/reports.tsx`:**
+- Chip selezione data OGGI / IERI
+- Chip multi-select meccanici (nessuna selezione = tutti)
+- KPI card riassunto (eventi/ore/commesse toccate)
+- Card per meccanico con dettaglio commesse (targa, veicolo, ore, eventi)
+- Bottone **ESPORTA REPORT COMPLETO** (share sheet nativo: WhatsApp/email/copia)
+- Bottone **ESPORTA** per singolo meccanico (report filtrato solo su quel meccanico)
+- Blocco narrativa AI in Markdown grezzo (leggibile)
