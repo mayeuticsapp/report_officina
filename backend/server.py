@@ -1,6 +1,6 @@
 """
 Officina Meccanica - Backend API
-FastAPI + MongoDB + JWT + Claude Sonnet 4.5 (via Emergent LLM key)
+FastAPI + MongoDB + JWT + Mistral AI (chat + OCR + Voxtral STT)
 """
 import os
 import uuid
@@ -591,7 +591,7 @@ async def ocr_plate(body: PlateOcrIn, user: dict = Depends(get_current_user)):
         return PlateOcrOut(plate=None, raw="NON_TROVATA")
 
 
-# ---- Audio: transcription (Whisper-1) ----
+# ---- Audio: transcription (Voxtral) ----
 class TranscribeOut(BaseModel):
     text: str
 
@@ -718,8 +718,11 @@ async def voice_turn(order_id: str, body: VoiceTurnIn, user: dict = Depends(get_
         )
         raw = resp.choices[0].message.content or ""
     except Exception as e:
+        # Rate limit → 429 (client can retry); everything else → 500
+        msg = str(e)
+        status_code = 429 if "429" in msg or "rate" in msg.lower() else 500
         logger.exception("voice-turn LLM failed")
-        raise HTTPException(status_code=500, detail=f"AI fallita: {e}")
+        raise HTTPException(status_code=status_code, detail=f"AI fallita: {e}")
 
     parsed = _extract_json_block(raw)
     if parsed and isinstance(parsed, dict):
