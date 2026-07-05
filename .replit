@@ -1,0 +1,17 @@
+modules = ["nodejs-20", "python-3.12", "bash"]
+[agent]
+expertMode = true
+stack = "BEST_EFFORT_FALLBACK"
+
+[nix]
+channel = "stable-25_05"
+
+[userenv]
+
+[userenv.shared]
+DB_NAME = "officina_meccanica"
+EXPO_PUBLIC_BACKEND_URL = ""
+JWT_ALGORITHM = "HS256"
+JWT_EXPIRES_DAYS = "7"
+SEED_ADMIN_USERNAME = "admin"
+SEED_ADMIN_PASSWORD = "admin123"
