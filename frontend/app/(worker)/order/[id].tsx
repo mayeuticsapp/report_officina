@@ -79,7 +79,7 @@ export default function OrderDetail() {
       return;
     }
     const res = await ImagePicker.launchImageLibraryAsync({
-      quality: 0.6, base64: true, mediaTypes: ImagePicker.MediaTypeOptions.Images,
+      quality: 0.6, base64: true, mediaTypes: ["images"],
     });
     if (!res.canceled && res.assets[0]?.base64) {
       const uri = `data:image/jpeg;base64,${res.assets[0].base64}`;
