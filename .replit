@@ -5,6 +5,7 @@ stack = "BEST_EFFORT_FALLBACK"
 
 [nix]
 channel = "stable-25_05"
+packages = ["postgresql"]
 
 [userenv]
 
@@ -28,18 +29,46 @@ author = "agent"
 task = "workflow.run"
 args = "Backend API"
 
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Start application"
+
 [[workflows.workflow]]
 name = "Backend API"
 author = "agent"
 
-[[workflows.workflow.tasks]]
-task = "shell.exec"
-args = "cd backend && uvicorn server:app --host localhost --port 8000 --reload"
-waitForPort = 8000
-
 [workflows.workflow.metadata]
 outputType = "console"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "cd backend && /home/runner/workspace/.pythonlibs/bin/python3 -m uvicorn server:app --host 0.0.0.0 --port 8000 --reload"
+waitForPort = 8000
+
+[[workflows.workflow]]
+name = "Start application"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "node proxy.js & sleep 3 && cd frontend && npx expo start --web --port 8081 --host lan"
+waitForPort = 5000
+
+[workflows.workflow.metadata]
+outputType = "webview"
+
+[[ports]]
+localPort = 5000
+externalPort = 80
 
 [[ports]]
 localPort = 8000
 externalPort = 8000
+
+[[ports]]
+localPort = 8081
+externalPort = 8081
+
+[deployment]
+deploymentTarget = "vm"
+run = ["bash", "-c", "node proxy.js & cd backend && /home/runner/workspace/.pythonlibs/bin/python3 -m uvicorn server:app --host 0.0.0.0 --port 8000 & cd ../frontend && npx expo export --platform web --output-dir ../dist && node -e \"const h=require('http'),fs=require('fs'),p=require('path');h.createServer((q,r)=>{let f=p.join(__dirname,'dist',q.url==='/'?'index.html':q.url);fs.readFile(f,(e,d)=>{if(e){fs.readFile(p.join(__dirname,'dist','index.html'),(_,d2)=>r.writeHead(200).end(d2));}else r.writeHead(200).end(d);});}).listen(5000)\""]

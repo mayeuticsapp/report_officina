@@ -1,23 +1,22 @@
 """
 Officina Meccanica - Backend API
-FastAPI + MongoDB + JWT + Mistral AI (chat + OCR + Voxtral STT)
+FastAPI + PostgreSQL (asyncpg) + JWT + Mistral AI
 """
 import os
 import uuid
 import logging
+import json
+import re
+import tempfile
+import io
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from typing import List, Optional, Literal
 
-import io
-import json
-import re
-import tempfile
-
+import asyncpg
 from fastapi import FastAPI, APIRouter, HTTPException, Depends, status, UploadFile, File
 from fastapi.security import OAuth2PasswordBearer
 from starlette.middleware.cors import CORSMiddleware
-from motor.motor_asyncio import AsyncIOMotorClient
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 import jwt
@@ -29,8 +28,7 @@ ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
 
 # ---------------- Config ----------------
-MONGO_URL = os.environ["MONGO_URL"]
-DB_NAME = os.environ["DB_NAME"]
+DATABASE_URL = os.environ["DATABASE_URL"]
 JWT_SECRET = os.environ["JWT_SECRET"]
 JWT_ALGORITHM = os.environ.get("JWT_ALGORITHM", "HS256")
 JWT_EXPIRES_DAYS = int(os.environ.get("JWT_EXPIRES_DAYS", "7"))
@@ -41,17 +39,10 @@ MISTRAL_STT_MODEL = os.environ.get("MISTRAL_STT_MODEL", "voxtral-mini-latest")
 SEED_ADMIN_USERNAME = os.environ.get("SEED_ADMIN_USERNAME", "admin")
 SEED_ADMIN_PASSWORD = os.environ.get("SEED_ADMIN_PASSWORD", "admin123")
 
-client = AsyncIOMotorClient(MONGO_URL)
-db = client[DB_NAME]
-
-# Mistral AI client (shared)
 mistral_client = Mistral(api_key=MISTRAL_API_KEY)
 
-# Collections
-users_col = db.users
-work_orders_col = db.work_orders
-events_col = db.work_events
-conversations_col = db.conversations  # one doc per work_order_id with list of turns
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logger = logging.getLogger("officina")
 
 # ---------------- App ----------------
 app = FastAPI(title="Officina Meccanica API")
@@ -67,8 +58,30 @@ app.add_middleware(
 
 oauth2 = OAuth2PasswordBearer(tokenUrl="/api/auth/login", auto_error=False)
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-logger = logging.getLogger("officina")
+# DB pool (set on startup)
+pool: asyncpg.Pool = None
+
+
+# ---------------- DB Helpers ----------------
+async def get_pool() -> asyncpg.Pool:
+    return pool
+
+
+async def fetchrow(query: str, *args) -> Optional[dict]:
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(query, *args)
+        return dict(row) if row else None
+
+
+async def fetch(query: str, *args) -> List[dict]:
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(query, *args)
+        return [dict(r) for r in rows]
+
+
+async def execute(query: str, *args):
+    async with pool.acquire() as conn:
+        await conn.execute(query, *args)
 
 
 # ---------------- Helpers ----------------
@@ -107,7 +120,10 @@ async def get_current_user(token: Optional[str] = Depends(oauth2)) -> dict:
         raise HTTPException(status_code=401, detail="Sessione scaduta")
     except jwt.InvalidTokenError:
         raise HTTPException(status_code=401, detail="Token non valido")
-    user = await users_col.find_one({"id": payload["sub"]}, {"_id": 0, "password_hash": 0})
+    user = await fetchrow(
+        "SELECT id, username, full_name, role, created_at FROM users WHERE id=$1",
+        payload["sub"]
+    )
     if not user:
         raise HTTPException(status_code=401, detail="Utente non trovato")
     return user
@@ -157,10 +173,10 @@ class LoginOut(BaseModel):
 
 
 class WorkOrderCreate(BaseModel):
-    plate: str  # targa
+    plate: str
     vin: Optional[str] = None
-    customer: str  # cliente
-    vehicle: str  # veicolo (marca modello)
+    customer: str
+    vehicle: str
     description: str
     assigned_worker_ids: List[str] = Field(default_factory=list)
 
@@ -204,7 +220,7 @@ class WorkOrder(BaseModel):
 class WorkEventCreate(BaseModel):
     type: EventType
     reason: Optional[str] = None
-    photos_base64: List[str] = Field(default_factory=list)  # ["data:image/jpeg;base64,..."]
+    photos_base64: List[str] = Field(default_factory=list)
 
 
 class WorkEvent(BaseModel):
@@ -232,27 +248,186 @@ class LiveWorkerStatus(BaseModel):
     last_reason: Optional[str] = None
 
 
-# ---------------- Startup: seed admin ----------------
+# ---- Report models ----
+class WorkerOrderStats(BaseModel):
+    order_id: str
+    plate: str
+    vehicle: str
+    customer: str
+    events_count: int
+    minutes_worked: int
+    started_at: Optional[datetime] = None
+    last_event_at: Optional[datetime] = None
+
+
+class WorkerDailyStats(BaseModel):
+    worker_id: str
+    username: str
+    full_name: str
+    events_count: int
+    minutes_worked: int
+    orders: List[WorkerOrderStats]
+
+
+class DailyReportOut(BaseModel):
+    date: str
+    filter_worker_ids: List[str]
+    workers: List[WorkerDailyStats]
+    total_events: int
+    total_minutes: int
+    orders_touched: int
+    narrative: str
+    generated_at: datetime
+
+
+# ---- Voice chat models ----
+class ConversationTurn(BaseModel):
+    role: Literal["user", "assistant"]
+    text: str
+    timestamp: datetime
+    worker_id: Optional[str] = None
+    worker_full_name: Optional[str] = None
+
+
+class VoiceTurnIn(BaseModel):
+    user_text: str
+
+
+class VoiceTurnOut(BaseModel):
+    assistant_text: str
+    scheda_tecnica: SchedaTecnica
+    turn: ConversationTurn
+
+
+class ConversationOut(BaseModel):
+    work_order_id: str
+    scheda_tecnica: SchedaTecnica
+    turns: List[ConversationTurn]
+
+
+class PlateOcrIn(BaseModel):
+    image_base64: str
+
+
+class PlateOcrOut(BaseModel):
+    plate: Optional[str] = None
+    raw: str
+
+
+class TranscribeOut(BaseModel):
+    text: str
+
+
+# ---------------- DB row helpers ----------------
+def row_to_workorder(row: dict) -> WorkOrder:
+    scheda = row.get("scheda_tecnica") or {}
+    if isinstance(scheda, str):
+        scheda = json.loads(scheda)
+    worker_ids = row.get("assigned_worker_ids") or []
+    if isinstance(worker_ids, str):
+        worker_ids = json.loads(worker_ids)
+    return WorkOrder(
+        id=row["id"],
+        plate=row["plate"],
+        vin=row.get("vin"),
+        customer=row["customer"],
+        vehicle=row["vehicle"],
+        description=row["description"],
+        assigned_worker_ids=worker_ids,
+        status=row["status"],
+        scheda_tecnica=SchedaTecnica(**scheda),
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+    )
+
+
+def row_to_event(row: dict) -> WorkEvent:
+    photos = row.get("photos_base64") or []
+    if isinstance(photos, str):
+        photos = json.loads(photos)
+    return WorkEvent(
+        id=row["id"],
+        work_order_id=row["work_order_id"],
+        worker_id=row["worker_id"],
+        worker_username=row["worker_username"],
+        worker_full_name=row["worker_full_name"],
+        type=row["type"],
+        reason=row.get("reason"),
+        photos_base64=photos,
+        timestamp=row["timestamp"],
+        ai_interpretation=row.get("ai_interpretation"),
+    )
+
+
+# ---------------- Startup ----------------
 @app.on_event("startup")
 async def startup():
-    await users_col.create_index("username", unique=True)
-    existing = await users_col.find_one({"username": SEED_ADMIN_USERNAME})
-    if not existing:
-        admin = {
-            "id": str(uuid.uuid4()),
-            "username": SEED_ADMIN_USERNAME,
-            "password_hash": hash_password(SEED_ADMIN_PASSWORD),
-            "full_name": "Titolare",
-            "role": "admin",
-            "created_at": now_utc(),
-        }
-        await users_col.insert_one(admin)
-        logger.info(f"Seeded admin user: {SEED_ADMIN_USERNAME}")
+    global pool
+    pool = await asyncpg.create_pool(DATABASE_URL, min_size=2, max_size=10)
+
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                id TEXT PRIMARY KEY,
+                username TEXT UNIQUE NOT NULL,
+                password_hash TEXT NOT NULL,
+                full_name TEXT NOT NULL,
+                role TEXT NOT NULL DEFAULT 'worker',
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS work_orders (
+                id TEXT PRIMARY KEY,
+                plate TEXT NOT NULL,
+                vin TEXT,
+                customer TEXT NOT NULL,
+                vehicle TEXT NOT NULL,
+                description TEXT NOT NULL,
+                assigned_worker_ids JSONB NOT NULL DEFAULT '[]',
+                status TEXT NOT NULL DEFAULT 'open',
+                scheda_tecnica JSONB NOT NULL DEFAULT '{}',
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS work_events (
+                id TEXT PRIMARY KEY,
+                work_order_id TEXT NOT NULL,
+                worker_id TEXT NOT NULL,
+                worker_username TEXT NOT NULL,
+                worker_full_name TEXT NOT NULL,
+                type TEXT NOT NULL,
+                reason TEXT,
+                photos_base64 JSONB NOT NULL DEFAULT '[]',
+                timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                ai_interpretation TEXT
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS conversations (
+                work_order_id TEXT PRIMARY KEY,
+                turns JSONB NOT NULL DEFAULT '[]',
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """)
+
+        existing = await conn.fetchrow("SELECT id FROM users WHERE username=$1", SEED_ADMIN_USERNAME)
+        if not existing:
+            await conn.execute(
+                "INSERT INTO users (id, username, password_hash, full_name, role, created_at) VALUES ($1,$2,$3,$4,$5,$6)",
+                str(uuid.uuid4()), SEED_ADMIN_USERNAME, hash_password(SEED_ADMIN_PASSWORD),
+                "Titolare", "admin", now_utc()
+            )
+            logger.info(f"Admin creato: {SEED_ADMIN_USERNAME}")
 
 
 @app.on_event("shutdown")
 async def shutdown():
-    client.close()
+    if pool:
+        await pool.close()
 
 
 # ---------------- Routes ----------------
@@ -264,7 +439,7 @@ async def root():
 # ---- Auth ----
 @api.post("/auth/login", response_model=LoginOut)
 async def login(body: LoginIn):
-    user = await users_col.find_one({"username": body.username})
+    user = await fetchrow("SELECT * FROM users WHERE username=$1", body.username)
     if not user or not verify_password(body.password, user["password_hash"]):
         raise HTTPException(status_code=401, detail="Credenziali non valide")
     token = create_token(user["id"], user["username"], user["role"])
@@ -280,54 +455,54 @@ async def me(user: dict = Depends(get_current_user)):
 # ---- Users (admin only) ----
 @api.get("/users", response_model=List[UserPublic])
 async def list_users(user: dict = Depends(require_admin)):
-    users = await users_col.find({}, {"_id": 0, "password_hash": 0}).sort("created_at", -1).to_list(500)
-    return [UserPublic(**u) for u in users]
+    rows = await fetch("SELECT id, username, full_name, role, created_at FROM users ORDER BY created_at DESC LIMIT 500")
+    return [UserPublic(**r) for r in rows]
 
 
 @api.post("/users", response_model=UserPublic)
 async def create_user(body: UserCreate, admin: dict = Depends(require_admin)):
-    exists = await users_col.find_one({"username": body.username})
+    exists = await fetchrow("SELECT id FROM users WHERE username=$1", body.username)
     if exists:
         raise HTTPException(status_code=400, detail="Username già in uso")
-    new_user = {
-        "id": str(uuid.uuid4()),
-        "username": body.username,
-        "password_hash": hash_password(body.password),
-        "full_name": body.full_name,
-        "role": body.role,
-        "created_at": now_utc(),
-    }
-    await users_col.insert_one(new_user)
-    return UserPublic(**{k: new_user[k] for k in ("id", "username", "full_name", "role", "created_at")})
+    new_id = str(uuid.uuid4())
+    created_at = now_utc()
+    await execute(
+        "INSERT INTO users (id, username, password_hash, full_name, role, created_at) VALUES ($1,$2,$3,$4,$5,$6)",
+        new_id, body.username, hash_password(body.password), body.full_name, body.role, created_at
+    )
+    return UserPublic(id=new_id, username=body.username, full_name=body.full_name, role=body.role, created_at=created_at)
 
 
 @api.put("/users/{user_id}", response_model=UserPublic)
 async def update_user(user_id: str, body: UserUpdate, admin: dict = Depends(require_admin)):
-    update = {}
+    parts = []
+    vals = []
+    i = 1
     if body.full_name is not None:
-        update["full_name"] = body.full_name
+        parts.append(f"full_name=${i}"); vals.append(body.full_name); i += 1
     if body.password:
-        update["password_hash"] = hash_password(body.password)
+        parts.append(f"password_hash=${i}"); vals.append(hash_password(body.password)); i += 1
     if body.role is not None:
-        update["role"] = body.role
-    if not update:
+        parts.append(f"role=${i}"); vals.append(body.role); i += 1
+    if not parts:
         raise HTTPException(status_code=400, detail="Nessun campo da aggiornare")
-    result = await users_col.find_one_and_update(
-        {"id": user_id}, {"$set": update},
-        projection={"_id": 0, "password_hash": 0},
-        return_document=True,
+    vals.append(user_id)
+    row = await fetchrow(
+        f"UPDATE users SET {', '.join(parts)} WHERE id=${i} RETURNING id, username, full_name, role, created_at",
+        *vals
     )
-    if not result:
+    if not row:
         raise HTTPException(status_code=404, detail="Utente non trovato")
-    return UserPublic(**result)
+    return UserPublic(**row)
 
 
 @api.delete("/users/{user_id}")
 async def delete_user(user_id: str, admin: dict = Depends(require_admin)):
     if user_id == admin["id"]:
         raise HTTPException(status_code=400, detail="Non puoi eliminare te stesso")
-    res = await users_col.delete_one({"id": user_id})
-    if res.deleted_count == 0:
+    async with pool.acquire() as conn:
+        res = await conn.execute("DELETE FROM users WHERE id=$1", user_id)
+    if res == "DELETE 0":
         raise HTTPException(status_code=404, detail="Utente non trovato")
     return {"ok": True}
 
@@ -335,68 +510,84 @@ async def delete_user(user_id: str, admin: dict = Depends(require_admin)):
 # ---- Work Orders ----
 @api.get("/work-orders", response_model=List[WorkOrder])
 async def list_work_orders(user: dict = Depends(get_current_user)):
-    query = {}
     if user["role"] == "worker":
-        query = {"assigned_worker_ids": user["id"]}
-    orders = await work_orders_col.find(query, {"_id": 0}).sort("created_at", -1).to_list(500)
-    return [WorkOrder(**o) for o in orders]
+        rows = await fetch(
+            "SELECT * FROM work_orders WHERE assigned_worker_ids @> $1::jsonb ORDER BY created_at DESC LIMIT 500",
+            json.dumps([user["id"]])
+        )
+    else:
+        rows = await fetch("SELECT * FROM work_orders ORDER BY created_at DESC LIMIT 500")
+    return [row_to_workorder(r) for r in rows]
 
 
 @api.post("/work-orders", response_model=WorkOrder)
 async def create_work_order(body: WorkOrderCreate, admin: dict = Depends(require_admin)):
-    order = {
-        "id": str(uuid.uuid4()),
-        "plate": body.plate,
-        "vin": body.vin,
-        "customer": body.customer,
-        "vehicle": body.vehicle,
-        "description": body.description,
-        "assigned_worker_ids": body.assigned_worker_ids,
-        "status": "open",
-        "scheda_tecnica": SchedaTecnica().model_dump(),
-        "created_at": now_utc(),
-        "updated_at": now_utc(),
-    }
-    await work_orders_col.insert_one(order)
-    return WorkOrder(**{k: order[k] for k in order if k != "_id"})
+    new_id = str(uuid.uuid4())
+    now = now_utc()
+    scheda = SchedaTecnica().model_dump()
+    await execute(
+        """INSERT INTO work_orders (id, plate, vin, customer, vehicle, description, assigned_worker_ids, status, scheda_tecnica, created_at, updated_at)
+           VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9::jsonb,$10,$11)""",
+        new_id, body.plate, body.vin, body.customer, body.vehicle, body.description,
+        json.dumps(body.assigned_worker_ids), "open", json.dumps(scheda), now, now
+    )
+    return WorkOrder(
+        id=new_id, plate=body.plate, vin=body.vin, customer=body.customer,
+        vehicle=body.vehicle, description=body.description,
+        assigned_worker_ids=body.assigned_worker_ids, status="open",
+        scheda_tecnica=SchedaTecnica(**scheda), created_at=now, updated_at=now
+    )
 
 
 @api.get("/work-orders/{order_id}", response_model=WorkOrder)
 async def get_work_order(order_id: str, user: dict = Depends(get_current_user)):
-    order = await work_orders_col.find_one({"id": order_id}, {"_id": 0})
-    if not order:
+    row = await fetchrow("SELECT * FROM work_orders WHERE id=$1", order_id)
+    if not row:
         raise HTTPException(status_code=404, detail="Commessa non trovata")
-    if user["role"] == "worker" and user["id"] not in order["assigned_worker_ids"]:
+    worker_ids = row.get("assigned_worker_ids") or []
+    if isinstance(worker_ids, str):
+        worker_ids = json.loads(worker_ids)
+    if user["role"] == "worker" and user["id"] not in worker_ids:
         raise HTTPException(status_code=403, detail="Non assegnato")
-    return WorkOrder(**order)
+    return row_to_workorder(row)
 
 
 @api.put("/work-orders/{order_id}", response_model=WorkOrder)
 async def update_work_order(order_id: str, body: WorkOrderUpdate, admin: dict = Depends(require_admin)):
-    update = {k: v for k, v in body.model_dump(exclude_unset=True).items() if v is not None}
-    if not update:
+    parts = []
+    vals = []
+    i = 1
+    data = body.model_dump(exclude_unset=True)
+    for field in ("plate", "vin", "customer", "vehicle", "description", "status"):
+        if field in data and data[field] is not None:
+            parts.append(f"{field}=${i}"); vals.append(data[field]); i += 1
+    if "assigned_worker_ids" in data and data["assigned_worker_ids"] is not None:
+        parts.append(f"assigned_worker_ids=${i}::jsonb"); vals.append(json.dumps(data["assigned_worker_ids"])); i += 1
+    if not parts:
         raise HTTPException(status_code=400, detail="Nessun campo")
-    update["updated_at"] = now_utc()
-    result = await work_orders_col.find_one_and_update(
-        {"id": order_id}, {"$set": update}, projection={"_id": 0}, return_document=True
+    parts.append(f"updated_at=${i}"); vals.append(now_utc()); i += 1
+    vals.append(order_id)
+    row = await fetchrow(
+        f"UPDATE work_orders SET {', '.join(parts)} WHERE id=${i} RETURNING *",
+        *vals
     )
-    if not result:
+    if not row:
         raise HTTPException(status_code=404, detail="Commessa non trovata")
-    return WorkOrder(**result)
+    return row_to_workorder(row)
 
 
 @api.delete("/work-orders/{order_id}")
 async def delete_work_order(order_id: str, admin: dict = Depends(require_admin)):
-    await events_col.delete_many({"work_order_id": order_id})
-    res = await work_orders_col.delete_one({"id": order_id})
-    if res.deleted_count == 0:
+    await execute("DELETE FROM work_events WHERE work_order_id=$1", order_id)
+    async with pool.acquire() as conn:
+        res = await conn.execute("DELETE FROM work_orders WHERE id=$1", order_id)
+    if res == "DELETE 0":
         raise HTTPException(status_code=404, detail="Non trovata")
     return {"ok": True}
 
 
-# ---- Work Events (worker actions) ----
+# ---- Work Events ----
 async def _ai_interpret_reason(reason: str, event_type: str) -> Optional[str]:
-    """Use Mistral to briefly interpret the pause/action reason (Italian)."""
     if not reason:
         return None
     try:
@@ -421,63 +612,73 @@ async def _ai_interpret_reason(reason: str, event_type: str) -> Optional[str]:
 
 @api.post("/work-orders/{order_id}/events", response_model=WorkEvent)
 async def add_event(order_id: str, body: WorkEventCreate, user: dict = Depends(get_current_user)):
-    order = await work_orders_col.find_one({"id": order_id})
-    if not order:
+    row = await fetchrow("SELECT * FROM work_orders WHERE id=$1", order_id)
+    if not row:
         raise HTTPException(status_code=404, detail="Commessa non trovata")
-    if user["role"] == "worker" and user["id"] not in order["assigned_worker_ids"]:
+    worker_ids = row.get("assigned_worker_ids") or []
+    if isinstance(worker_ids, str):
+        worker_ids = json.loads(worker_ids)
+    if user["role"] == "worker" and user["id"] not in worker_ids:
         raise HTTPException(status_code=403, detail="Non assegnato a questa commessa")
 
     ai_note = await _ai_interpret_reason(body.reason or "", body.type) if body.reason else None
+    event_id = str(uuid.uuid4())
+    ts = now_utc()
 
-    event = {
-        "id": str(uuid.uuid4()),
-        "work_order_id": order_id,
-        "worker_id": user["id"],
-        "worker_username": user["username"],
-        "worker_full_name": user["full_name"],
-        "type": body.type,
-        "reason": body.reason,
-        "photos_base64": body.photos_base64,
-        "timestamp": now_utc(),
-        "ai_interpretation": ai_note,
-    }
-    await events_col.insert_one(event)
-
-    # Update order status
-    new_status_map = {"START": "in_progress", "RESUME": "in_progress", "PAUSE": "paused", "COMPLETE": "completed"}
-    await work_orders_col.update_one(
-        {"id": order_id},
-        {"$set": {"status": new_status_map[body.type], "updated_at": now_utc()}},
+    await execute(
+        """INSERT INTO work_events (id, work_order_id, worker_id, worker_username, worker_full_name, type, reason, photos_base64, timestamp, ai_interpretation)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10)""",
+        event_id, order_id, user["id"], user["username"], user["full_name"],
+        body.type, body.reason, json.dumps(body.photos_base64), ts, ai_note
     )
-    return WorkEvent(**{k: event[k] for k in event if k != "_id"})
+
+    new_status_map = {"START": "in_progress", "RESUME": "in_progress", "PAUSE": "paused", "COMPLETE": "completed"}
+    await execute(
+        "UPDATE work_orders SET status=$1, updated_at=$2 WHERE id=$3",
+        new_status_map[body.type], now_utc(), order_id
+    )
+
+    return WorkEvent(
+        id=event_id, work_order_id=order_id, worker_id=user["id"],
+        worker_username=user["username"], worker_full_name=user["full_name"],
+        type=body.type, reason=body.reason, photos_base64=body.photos_base64,
+        timestamp=ts, ai_interpretation=ai_note
+    )
 
 
 @api.get("/work-orders/{order_id}/events", response_model=List[WorkEvent])
 async def list_events(order_id: str, user: dict = Depends(get_current_user)):
-    order = await work_orders_col.find_one({"id": order_id})
-    if not order:
+    row = await fetchrow("SELECT assigned_worker_ids FROM work_orders WHERE id=$1", order_id)
+    if not row:
         raise HTTPException(status_code=404, detail="Commessa non trovata")
-    if user["role"] == "worker" and user["id"] not in order["assigned_worker_ids"]:
+    worker_ids = row.get("assigned_worker_ids") or []
+    if isinstance(worker_ids, str):
+        worker_ids = json.loads(worker_ids)
+    if user["role"] == "worker" and user["id"] not in worker_ids:
         raise HTTPException(status_code=403, detail="Non assegnato")
-    events = await events_col.find({"work_order_id": order_id}, {"_id": 0}).sort("timestamp", 1).to_list(1000)
-    return [WorkEvent(**e) for e in events]
+    rows = await fetch(
+        "SELECT * FROM work_events WHERE work_order_id=$1 ORDER BY timestamp ASC LIMIT 1000",
+        order_id
+    )
+    return [row_to_event(r) for r in rows]
 
 
 @api.get("/events/recent", response_model=List[WorkEvent])
 async def recent_events(limit: int = 50, admin: dict = Depends(require_admin)):
-    events = await events_col.find({}, {"_id": 0}).sort("timestamp", -1).to_list(limit)
-    return [WorkEvent(**e) for e in events]
+    rows = await fetch(f"SELECT * FROM work_events ORDER BY timestamp DESC LIMIT {min(limit, 200)}")
+    return [row_to_event(r) for r in rows]
 
 
 # ---- Live status ----
 @api.get("/workers/live-status", response_model=List[LiveWorkerStatus])
 async def workers_live_status(admin: dict = Depends(require_admin)):
-    workers = await users_col.find({"role": "worker"}, {"_id": 0, "password_hash": 0}).to_list(500)
+    workers = await fetch("SELECT id, username, full_name FROM users WHERE role='worker' LIMIT 500")
     result: List[LiveWorkerStatus] = []
     now = now_utc()
     for w in workers:
-        last = await events_col.find_one(
-            {"worker_id": w["id"]}, {"_id": 0}, sort=[("timestamp", -1)]
+        last = await fetchrow(
+            "SELECT * FROM work_events WHERE worker_id=$1 ORDER BY timestamp DESC LIMIT 1",
+            w["id"]
         )
         if not last or last["type"] == "COMPLETE":
             result.append(LiveWorkerStatus(
@@ -486,10 +687,9 @@ async def workers_live_status(admin: dict = Depends(require_admin)):
             ))
             continue
         status_str = "working" if last["type"] in ("START", "RESUME") else "paused"
-        order = await work_orders_col.find_one({"id": last["work_order_id"]}, {"_id": 0})
+        order = await fetchrow("SELECT plate, vehicle FROM work_orders WHERE id=$1", last["work_order_id"])
         label = f"{order['plate']} - {order['vehicle']}" if order else None
         ts = last["timestamp"]
-        # Ensure tz-aware
         if ts.tzinfo is None:
             ts = ts.replace(tzinfo=timezone.utc)
         minutes = int((now - ts).total_seconds() // 60)
@@ -506,39 +706,7 @@ async def workers_live_status(admin: dict = Depends(require_admin)):
 
 
 # ---- AI Reports ----
-class WorkerOrderStats(BaseModel):
-    order_id: str
-    plate: str
-    vehicle: str
-    customer: str
-    events_count: int
-    minutes_worked: int  # net minutes between START/RESUME and PAUSE/COMPLETE for this worker on this order
-    started_at: Optional[datetime] = None
-    last_event_at: Optional[datetime] = None
-
-
-class WorkerDailyStats(BaseModel):
-    worker_id: str
-    username: str
-    full_name: str
-    events_count: int
-    minutes_worked: int
-    orders: List[WorkerOrderStats]
-
-
-class DailyReportOut(BaseModel):
-    date: str  # YYYY-MM-DD
-    filter_worker_ids: List[str]
-    workers: List[WorkerDailyStats]
-    total_events: int
-    total_minutes: int
-    orders_touched: int
-    narrative: str
-    generated_at: datetime
-
-
 def _parse_iso_date(s: Optional[str]) -> datetime:
-    """Return the UTC midnight of the given YYYY-MM-DD, or today's UTC midnight."""
     if not s:
         n = now_utc()
         return datetime(n.year, n.month, n.day, tzinfo=timezone.utc)
@@ -550,8 +718,6 @@ def _parse_iso_date(s: Optional[str]) -> datetime:
 
 
 def _worker_minutes(events: list) -> int:
-    """Compute net worked minutes given events sorted by timestamp for a worker.
-    START/RESUME opens an interval; PAUSE/COMPLETE closes it."""
     total = 0
     open_at: Optional[datetime] = None
     for e in events:
@@ -575,35 +741,31 @@ async def daily_report(
     date: Optional[str] = None,
     admin: dict = Depends(require_admin),
 ):
-    """
-    AI-generated daily report with per-worker breakdown.
-    Optional filters:
-      - worker_ids: comma-separated worker IDs (default: all workers)
-      - date: YYYY-MM-DD (default: today, UTC)
-    """
     day_start = _parse_iso_date(date)
     day_end = day_start + timedelta(days=1)
     filter_ids = [w for w in (worker_ids.split(",") if worker_ids else []) if w.strip()]
 
-    # Fetch workers of interest
-    worker_query: dict = {"role": "worker"}
     if filter_ids:
-        worker_query["id"] = {"$in": filter_ids}
-    workers = await users_col.find(worker_query, {"_id": 0, "password_hash": 0}).to_list(500)
+        workers = await fetch(
+            "SELECT id, username, full_name FROM users WHERE role='worker' AND id=ANY($1) LIMIT 500",
+            filter_ids
+        )
+        events = await fetch(
+            "SELECT * FROM work_events WHERE timestamp>=$1 AND timestamp<$2 AND worker_id=ANY($3) ORDER BY timestamp ASC LIMIT 5000",
+            day_start, day_end, filter_ids
+        )
+    else:
+        workers = await fetch("SELECT id, username, full_name FROM users WHERE role='worker' LIMIT 500")
+        events = await fetch(
+            "SELECT * FROM work_events WHERE timestamp>=$1 AND timestamp<$2 ORDER BY timestamp ASC LIMIT 5000",
+            day_start, day_end
+        )
+
     workers_map = {w["id"]: w for w in workers}
-
-    # Fetch events in the day filtered by workers
-    events_query: dict = {"timestamp": {"$gte": day_start, "$lt": day_end}}
-    if filter_ids:
-        events_query["worker_id"] = {"$in": filter_ids}
-    events = await events_col.find(events_query, {"_id": 0}).sort("timestamp", 1).to_list(5000)
-
-    # Group events per (worker_id, order_id)
     per_worker: dict = {w["id"]: {"events": [], "orders": {}} for w in workers}
     for e in events:
         wid = e["worker_id"]
         if wid not in per_worker:
-            # Event from someone no longer in workers list — include if not filtering
             if filter_ids:
                 continue
             per_worker[wid] = {"events": [], "orders": {}}
@@ -612,11 +774,11 @@ async def daily_report(
         oid = e["work_order_id"]
         per_worker[wid]["orders"].setdefault(oid, []).append(e)
 
-    # Preload orders referenced
-    all_oids = {e["work_order_id"] for e in events}
+    all_oids = list({e["work_order_id"] for e in events})
     orders_map: dict = {}
     if all_oids:
-        for o in await work_orders_col.find({"id": {"$in": list(all_oids)}}, {"_id": 0}).to_list(1000):
+        order_rows = await fetch("SELECT * FROM work_orders WHERE id=ANY($1)", all_oids)
+        for o in order_rows:
             orders_map[o["id"]] = o
 
     workers_stats: List[WorkerDailyStats] = []
@@ -633,24 +795,19 @@ async def daily_report(
             o = orders_map.get(oid) or {"plate": "?", "vehicle": "?", "customer": "?"}
             orders_stats.append(WorkerOrderStats(
                 order_id=oid, plate=o.get("plate", "?"), vehicle=o.get("vehicle", "?"), customer=o.get("customer", "?"),
-                events_count=len(evs),
-                minutes_worked=_worker_minutes(evs),
-                started_at=evs[0]["timestamp"],
-                last_event_at=evs[-1]["timestamp"],
+                events_count=len(evs), minutes_worked=_worker_minutes(evs),
+                started_at=evs[0]["timestamp"], last_event_at=evs[-1]["timestamp"],
             ))
-        # Sort orders by most recent activity
         orders_stats.sort(key=lambda x: x.last_event_at or day_start, reverse=True)
         workers_stats.append(WorkerDailyStats(
             worker_id=wid, username=w.get("username", "?"), full_name=w.get("full_name", "?"),
             events_count=len(w_events), minutes_worked=w_minutes, orders=orders_stats,
         ))
-    # Sort workers by minutes desc
-    workers_stats.sort(key=lambda w: w.minutes_worked, reverse=True)
+    workers_stats.sort(key=lambda x: x.minutes_worked, reverse=True)
 
     orders_touched = len(all_oids)
     date_str = day_start.strftime("%Y-%m-%d")
 
-    # Build narrative via Mistral
     if not events:
         narrative = "Nessuna attività registrata per il periodo/filtro selezionato."
     else:
@@ -692,66 +849,43 @@ async def daily_report(
             narrative = (resp.choices[0].message.content or "").strip()
         except Exception as e:
             logger.warning(f"Daily narrative failed: {e}")
-            narrative = f"⚠️ Errore AI: {e}\n\nEventi grezzi:\n{events_text}"
+            narrative = f"Errore AI: {e}\n\nEventi grezzi:\n{events_text}"
 
     return DailyReportOut(
-        date=date_str,
-        filter_worker_ids=filter_ids,
-        workers=workers_stats,
-        total_events=total_events,
-        total_minutes=total_minutes,
-        orders_touched=orders_touched,
-        narrative=narrative,
-        generated_at=now_utc(),
+        date=date_str, filter_worker_ids=filter_ids, workers=workers_stats,
+        total_events=total_events, total_minutes=total_minutes,
+        orders_touched=orders_touched, narrative=narrative, generated_at=now_utc(),
     )
 
 
 # ---- Vision: plate OCR ----
-class PlateOcrIn(BaseModel):
-    image_base64: str  # raw base64 (no data: prefix) or with prefix
-
-
-class PlateOcrOut(BaseModel):
-    plate: Optional[str] = None
-    raw: str
-
-
 PLATE_RE = re.compile(r"[A-Z]{2}\s?[0-9]{3}\s?[A-Z]{2}")
 
 
 @api.post("/vision/plate", response_model=PlateOcrOut)
 async def ocr_plate(body: PlateOcrIn, user: dict = Depends(get_current_user)):
-    """OCR di una targa italiana da foto usando Mistral OCR."""
     b64 = body.image_base64
     if "," in b64 and b64.startswith("data:"):
         b64 = b64.split(",", 1)[1]
     data_url = f"data:image/jpeg;base64,{b64}"
     try:
-        # Mistral OCR extracts all text as structured markdown
         ocr_resp = await mistral_client.ocr.process_async(
             model=MISTRAL_OCR_MODEL,
             document={"type": "image_url", "image_url": data_url},
         )
-        # Aggregate text from all pages
         pages_text = " ".join((p.markdown or "") for p in (ocr_resp.pages or []))
         raw = pages_text.strip().upper()
         m = PLATE_RE.search(raw.replace("-", "").replace(".", "").replace("\n", " "))
         plate = m.group(0).replace(" ", "") if m else None
         return PlateOcrOut(plate=plate, raw=(raw[:200] if raw else "NON_TROVATA"))
     except Exception as e:
-        # Provider errors (image unreadable, corrupt, too small) → soft-fail with 200
         logger.warning(f"plate ocr soft-fail: {e}")
         return PlateOcrOut(plate=None, raw="NON_TROVATA")
 
 
-# ---- Audio: transcription (Voxtral) ----
-class TranscribeOut(BaseModel):
-    text: str
-
-
+# ---- Audio: transcription ----
 @api.post("/audio/transcribe", response_model=TranscribeOut)
 async def transcribe_audio(file: UploadFile = File(...), user: dict = Depends(get_current_user)):
-    """Trascrive un file audio (m4a/mp3/wav/webm) usando Mistral Voxtral."""
     data = await file.read()
     filename = file.filename or "audio.m4a"
     try:
@@ -760,7 +894,6 @@ async def transcribe_audio(file: UploadFile = File(...), user: dict = Depends(ge
             file={"content": data, "file_name": filename},
             language="it",
         )
-        # Mistral SDK returns object with .text (transcription)
         text = getattr(resp, "text", None)
         if text is None:
             text = getattr(resp, "transcription", None)
@@ -772,31 +905,7 @@ async def transcribe_audio(file: UploadFile = File(...), user: dict = Depends(ge
         raise HTTPException(status_code=500, detail=f"Trascrizione fallita: {e}")
 
 
-# ---- AI Voice Chat (multi-turn per commessa) ----
-class VoiceTurnIn(BaseModel):
-    user_text: str  # trascritto lato client oppure via /audio/transcribe
-
-
-class ConversationTurn(BaseModel):
-    role: Literal["user", "assistant"]
-    text: str
-    timestamp: datetime
-    worker_id: Optional[str] = None
-    worker_full_name: Optional[str] = None
-
-
-class VoiceTurnOut(BaseModel):
-    assistant_text: str
-    scheda_tecnica: SchedaTecnica
-    turn: ConversationTurn
-
-
-class ConversationOut(BaseModel):
-    work_order_id: str
-    scheda_tecnica: SchedaTecnica
-    turns: List[ConversationTurn]
-
-
+# ---- AI Voice Chat ----
 AI_SYSTEM_PROMPT = (
     "Sei l'assistente AI di un'officina meccanica italiana. Parli con un OPERAIO che ha le mani "
     "occupate e ti detta note vocali sul lavoro in corso su un veicolo. "
@@ -820,7 +929,6 @@ AI_SYSTEM_PROMPT = (
 
 
 def _extract_json_block(s: str) -> Optional[dict]:
-    # Look for ```json ... ``` block first, else find first {...}
     m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", s, re.DOTALL)
     if not m:
         m = re.search(r"(\{.*\})", s, re.DOTALL)
@@ -834,33 +942,39 @@ def _extract_json_block(s: str) -> Optional[dict]:
 
 @api.post("/work-orders/{order_id}/voice-turn", response_model=VoiceTurnOut)
 async def voice_turn(order_id: str, body: VoiceTurnIn, user: dict = Depends(get_current_user)):
-    order = await work_orders_col.find_one({"id": order_id}, {"_id": 0})
-    if not order:
+    row = await fetchrow("SELECT * FROM work_orders WHERE id=$1", order_id)
+    if not row:
         raise HTTPException(status_code=404, detail="Commessa non trovata")
-    if user["role"] == "worker" and user["id"] not in order["assigned_worker_ids"]:
+    worker_ids = row.get("assigned_worker_ids") or []
+    if isinstance(worker_ids, str):
+        worker_ids = json.loads(worker_ids)
+    if user["role"] == "worker" and user["id"] not in worker_ids:
         raise HTTPException(status_code=403, detail="Non assegnato a questa commessa")
 
     user_text = body.user_text.strip()
     if not user_text:
         raise HTTPException(status_code=400, detail="Testo vuoto")
 
-    convo_doc = await conversations_col.find_one({"work_order_id": order_id}, {"_id": 0})
-    turns: list = (convo_doc or {}).get("turns", [])
-    current_scheda = order.get("scheda_tecnica") or SchedaTecnica().model_dump()
+    convo_row = await fetchrow("SELECT turns FROM conversations WHERE work_order_id=$1", order_id)
+    turns_raw = convo_row["turns"] if convo_row else []
+    if isinstance(turns_raw, str):
+        turns_raw = json.loads(turns_raw)
+    turns: list = turns_raw or []
+
+    scheda_raw = row.get("scheda_tecnica") or {}
+    if isinstance(scheda_raw, str):
+        scheda_raw = json.loads(scheda_raw)
+    current_scheda = scheda_raw
 
     try:
-        # Build message history: system + optional prior turns + current user message
         messages = [{"role": "system", "content": AI_SYSTEM_PROMPT}]
-        # Include a compact context as first user turn
         prefix = (
-            f"COMMESSA: targa={order['plate']}, veicolo={order['vehicle']}, cliente={order['customer']}\n"
+            f"COMMESSA: targa={row['plate']}, veicolo={row['vehicle']}, cliente={row['customer']}\n"
             f"SCHEDA ATTUALE: {json.dumps(current_scheda, ensure_ascii=False)}"
         )
-        # Add up to last 6 conversation turns for continuity
         for t in turns[-6:]:
             role = "user" if t["role"] == "user" else "assistant"
             messages.append({"role": role, "content": t["text"]})
-        # Prepend context to current user turn
         messages.append({"role": "user", "content": f"{prefix}\n\nOPERAIO ({user['full_name']}) dice ora: {user_text}"})
 
         resp = await mistral_client.chat.complete_async(
@@ -871,7 +985,6 @@ async def voice_turn(order_id: str, body: VoiceTurnIn, user: dict = Depends(get_
         )
         raw = resp.choices[0].message.content or ""
     except Exception as e:
-        # Rate limit → 429 (client can retry); everything else → 500
         msg = str(e)
         status_code = 429 if "429" in msg or "rate" in msg.lower() else 500
         logger.exception("voice-turn LLM failed")
@@ -881,7 +994,6 @@ async def voice_turn(order_id: str, body: VoiceTurnIn, user: dict = Depends(get_
     if parsed and isinstance(parsed, dict):
         reply = str(parsed.get("reply") or "Annotato.")
         scheda_in = parsed.get("scheda") or {}
-        # Merge: strings replaced only if non-empty; lists deduped & extended
         merged = dict(current_scheda)
         for k in ("marca", "modello", "anno", "motore", "km", "note"):
             v = scheda_in.get(k)
@@ -901,43 +1013,62 @@ async def voice_turn(order_id: str, body: VoiceTurnIn, user: dict = Depends(get_
         scheda_final = SchedaTecnica(**current_scheda)
 
     now = now_utc()
-    user_turn = {
-        "role": "user", "text": user_text, "timestamp": now,
+    user_turn_d = {
+        "role": "user", "text": user_text,
+        "timestamp": now.isoformat(),
         "worker_id": user["id"], "worker_full_name": user["full_name"],
     }
-    ai_turn = {
-        "role": "assistant", "text": reply, "timestamp": now,
-    }
+    ai_turn_d = {"role": "assistant", "text": reply, "timestamp": now.isoformat()}
+    new_turns = turns + [user_turn_d, ai_turn_d]
 
-    await conversations_col.update_one(
-        {"work_order_id": order_id},
-        {"$setOnInsert": {"work_order_id": order_id, "created_at": now},
-         "$push": {"turns": {"$each": [user_turn, ai_turn]}}},
-        upsert=True,
+    await execute(
+        """INSERT INTO conversations (work_order_id, turns, created_at, updated_at)
+           VALUES ($1, $2::jsonb, $3, $3)
+           ON CONFLICT (work_order_id) DO UPDATE SET turns=$2::jsonb, updated_at=$3""",
+        order_id, json.dumps(new_turns), now
     )
-    await work_orders_col.update_one(
-        {"id": order_id},
-        {"$set": {"scheda_tecnica": scheda_final.model_dump(), "updated_at": now}},
+    await execute(
+        "UPDATE work_orders SET scheda_tecnica=$1::jsonb, updated_at=$2 WHERE id=$3",
+        json.dumps(scheda_final.model_dump()), now, order_id
     )
 
     return VoiceTurnOut(
         assistant_text=reply,
         scheda_tecnica=scheda_final,
-        turn=ConversationTurn(**ai_turn),
+        turn=ConversationTurn(role="assistant", text=reply, timestamp=now),
     )
 
 
 @api.get("/work-orders/{order_id}/conversation", response_model=ConversationOut)
 async def get_conversation(order_id: str, user: dict = Depends(get_current_user)):
-    order = await work_orders_col.find_one({"id": order_id}, {"_id": 0})
-    if not order:
+    row = await fetchrow("SELECT * FROM work_orders WHERE id=$1", order_id)
+    if not row:
         raise HTTPException(status_code=404, detail="Commessa non trovata")
-    if user["role"] == "worker" and user["id"] not in order["assigned_worker_ids"]:
+    worker_ids = row.get("assigned_worker_ids") or []
+    if isinstance(worker_ids, str):
+        worker_ids = json.loads(worker_ids)
+    if user["role"] == "worker" and user["id"] not in worker_ids:
         raise HTTPException(status_code=403, detail="Non assegnato")
-    convo = await conversations_col.find_one({"work_order_id": order_id}, {"_id": 0})
-    turns = (convo or {}).get("turns", []) if convo else []
-    scheda = SchedaTecnica(**(order.get("scheda_tecnica") or {}))
-    return ConversationOut(work_order_id=order_id, scheda_tecnica=scheda, turns=[ConversationTurn(**t) for t in turns])
+    convo_row = await fetchrow("SELECT turns FROM conversations WHERE work_order_id=$1", order_id)
+    turns_raw = convo_row["turns"] if convo_row else []
+    if isinstance(turns_raw, str):
+        turns_raw = json.loads(turns_raw)
+    turns = turns_raw or []
+    scheda_raw = row.get("scheda_tecnica") or {}
+    if isinstance(scheda_raw, str):
+        scheda_raw = json.loads(scheda_raw)
+    scheda = SchedaTecnica(**scheda_raw)
+
+    parsed_turns = []
+    for t in turns:
+        ts = t.get("timestamp")
+        if isinstance(ts, str):
+            ts = datetime.fromisoformat(ts)
+        parsed_turns.append(ConversationTurn(
+            role=t["role"], text=t["text"], timestamp=ts,
+            worker_id=t.get("worker_id"), worker_full_name=t.get("worker_full_name")
+        ))
+    return ConversationOut(work_order_id=order_id, scheda_tecnica=scheda, turns=parsed_turns)
 
 
 app.include_router(api)
