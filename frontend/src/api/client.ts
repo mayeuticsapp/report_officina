@@ -160,9 +160,17 @@ export type DailyReport = {
 export async function transcribeAudio(uri: string, mimeType: string = "audio/m4a", filename: string = "note.m4a"): Promise<string> {
   const token = await (await import("@/src/utils/storage")).storage.secureGet<string>("officina_token", "");
   const form = new FormData();
-  // In React Native, FormData accepts { uri, name, type }
-  // @ts-expect-error RN form data typing
-  form.append("file", { uri, name: filename, type: mimeType });
+  if (uri.startsWith("blob:") || uri.startsWith("data:")) {
+    // Web: l'URI è un blob del browser — FormData vuole un Blob/File vero
+    const blob = await (await fetch(uri)).blob();
+    const type = blob.type || mimeType;
+    const ext = type.includes("webm") ? "webm" : type.includes("mp4") ? "m4a" : type.includes("wav") ? "wav" : "webm";
+    form.append("file", new File([blob], `note.${ext}`, { type }));
+  } else {
+    // Nativo (iOS/Android): FormData accetta { uri, name, type }
+    // @ts-expect-error RN form data typing
+    form.append("file", { uri, name: filename, type: mimeType });
+  }
   const res = await fetch(`${BASE_URL}/api/audio/transcribe`, {
     method: "POST",
     headers: token ? { Authorization: `Bearer ${token}` } : {},

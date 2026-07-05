@@ -101,6 +101,7 @@ export function VoiceChat({ orderId, readOnly }: Props) {
       recorder.record();
       setRecording(true);
     } catch (e: any) {
+      setRecording(false);
       Alert.alert("Errore registrazione", e?.message || "Impossibile registrare");
     }
   };
@@ -238,8 +239,7 @@ export function VoiceChat({ orderId, readOnly }: Props) {
                 <TouchableOpacity
                   testID="btn-mic"
                   style={[styles.micBtn, recording && styles.micBtnActive]}
-                  onPressIn={startRecording}
-                  onPressOut={stopRecording}
+                  onPress={recording ? stopRecording : startRecording}
                   disabled={sending || transcribing}
                 >
                   {transcribing ? (
@@ -252,7 +252,7 @@ export function VoiceChat({ orderId, readOnly }: Props) {
             )}
           </View>
           <Text style={styles.hint}>
-            {recording ? "🔴 REGISTRAZIONE... rilascia per inviare" : transcribing ? "Trascrivo..." : sending ? "AI sta rispondendo..." : "Tieni premuto il mic per dettare"}
+            {recording ? "🔴 REGISTRAZIONE... tocca di nuovo per inviare" : transcribing ? "Trascrivo..." : sending ? "AI sta rispondendo..." : "Tocca il mic per dettare"}
           </Text>
         </View>
       )}
