@@ -15,3 +15,31 @@ JWT_ALGORITHM = "HS256"
 JWT_EXPIRES_DAYS = "7"
 SEED_ADMIN_USERNAME = "admin"
 SEED_ADMIN_PASSWORD = "admin123"
+
+[workflows]
+runButton = "Project"
+
+[[workflows.workflow]]
+name = "Project"
+mode = "parallel"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Backend API"
+
+[[workflows.workflow]]
+name = "Backend API"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "cd backend && uvicorn server:app --host localhost --port 8000 --reload"
+waitForPort = 8000
+
+[workflows.workflow.metadata]
+outputType = "console"
+
+[[ports]]
+localPort = 8000
+externalPort = 8000
