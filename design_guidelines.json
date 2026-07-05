@@ -1,0 +1,100 @@
+{
+  "theme": "light",
+  "archetype": "4 (Swiss & High-Contrast)",
+  "typography": {
+    "fonts": [
+      {
+        "family": "Chivo",
+        "usage": "Headings, Display, Key Metrics",
+        "weights": ["400", "700", "900"],
+        "import_url": "https://fonts.googleapis.com/css2?family=Chivo:wght@400;700;900&display=swap"
+      },
+      {
+        "family": "IBM Plex Sans",
+        "usage": "Body, Data tables, Labels",
+        "weights": ["400", "500", "600"],
+        "import_url": "https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&display=swap"
+      }
+    ],
+    "scales": {
+      "h1": "text-4xl sm:text-5xl font-black tracking-tight",
+      "h2": "text-2xl sm:text-3xl font-bold tracking-tight",
+      "h3": "text-xl font-bold",
+      "h4": "text-lg font-bold",
+      "body": "text-base font-normal leading-relaxed",
+      "label": "text-xs font-bold uppercase tracking-[0.2em]"
+    }
+  },
+  "colors": {
+    "background": {
+      "default": "#FFFFFF",
+      "muted": "#F4F4F5",
+      "inverse": "#09090B"
+    },
+    "text": {
+      "primary": "#09090B",
+      "secondary": "#52525B",
+      "inverse": "#FFFFFF"
+    },
+    "primary": {
+      "default": "#2563EB",
+      "hover": "#1D4ED8",
+      "foreground": "#FFFFFF"
+    },
+    "status": {
+      "active": "#10B981",
+      "paused": "#FACC15",
+      "stopped": "#E11D48",
+      "idle": "#EA580C"
+    },
+    "border": "#E4E4E7"
+  },
+  "layout": {
+    "spacing_scale": "Tailwind standard. Favor generous padding (p-6, p-8) on dashboard desktop. For mobile worker views, favor massive touch targets (min-h-16) and structural p-4.",
+    "dashboard_grid": "MODE B: CONTROL ROOM. grid-cols-1 md:grid-cols-3 lg:grid-cols-4. gap-4. Every pixel utilized, h-full on children.",
+    "surfaces": "GRID BORDERS (Technical Look). Expose the skeleton. border-collapse layout or flat cards with 1px border-zinc-200, NO drop shadows. Utilitarian brutalism."
+  },
+  "components_instructions": {
+    "buttons": "Massive, high-contrast block buttons. Use 'rounded-none' or max 'rounded-sm'. Strong hover/active states.",
+    "tables": "Dense, striped rows for admin dashboard. Use sticky headers.",
+    "forms": "Use Shadcn Input, Select, Textarea. Large touch targets on mobile.",
+    "camera": "HTML <input type='file' accept='image/*' capture='environment' /> wrapped in a massive high-contrast button.",
+    "tabs": "Square, stark indicator for active tab. No soft rounded pills.",
+    "cards": "Flat, 1px solid border. Heavy padding (p-6). No shadow.",
+    "badges": "Square corners, solid background, high contrast text for statuses."
+  },
+  "pages": {
+    "worker_mobile": {
+      "login": "Simple PIN or Username/Password with giant inputs.",
+      "dashboard": "Current job context fixed on top. Massive 'START' / 'PAUSE' / 'RESUME' / 'COMPLETE' action buttons. Action-driven.",
+      "photo_capture": "Big dropzone or full-width button to take/upload engine photos via device camera."
+    },
+    "admin_dashboard": {
+      "overview": "Bento grid layout. Top metrics (Active Workers, Paused Jobs). Real-time timeline view of all workers.",
+      "worker_management": "Data table with real-time status badges.",
+      "ai_reports": "Text-heavy summary panel, monochromatic aside from alert tags. Structured data layout."
+    }
+  },
+  "media": {
+    "image_urls": [
+      {
+        "url": "https://images.unsplash.com/photo-1429772011165-0c2e054367b8",
+        "description": "Engine components placeholder",
+        "category": "placeholder_part"
+      },
+      {
+        "url": "https://images.pexels.com/photos/8478259/pexels-photo-8478259.jpeg",
+        "description": "Mechanic working on engine",
+        "category": "hero_or_auth_background"
+      },
+      {
+        "url": "https://images.pexels.com/photos/4116221/pexels-photo-4116221.jpeg",
+        "description": "Mechanic profile / generic worker",
+        "category": "worker_avatar"
+      }
+    ]
+  },
+  "icons": "lucide-react - use for all utility icons (Camera, Play, Pause, CheckCircle, AlertTriangle)",
+  "testing": "All interactive elements MUST have data-testid attributes formatted as kebab-case, role-based.",
+  "instructions_to_main_agent": "Implement a dual-interface application: a mobile-first UI layout for workers (focusing on huge touch targets, camera integration via file inputs, and clear status toggles) and a dense 'Control Room' grid for the admin dashboard. Use strict Swiss High-Contrast styling. All surfaces are flat with 1px borders, NO shadows. Text must use Chivo for headings and IBM Plex Sans for body. Apply Italian language to the UI. Do not add gamified elements. Use the provided colors exactly for semantic states (Active, Paused, Stopped). All components must use Shadcn customized to look flat and industrial."
+}
