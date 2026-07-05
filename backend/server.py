@@ -584,8 +584,9 @@ async def ocr_plate(body: PlateOcrIn, user: dict = Depends(get_current_user)):
         plate = m.group(0).replace(" ", "") if m else None
         return PlateOcrOut(plate=plate, raw=raw)
     except Exception as e:
-        logger.exception("plate ocr failed")
-        raise HTTPException(status_code=500, detail=f"OCR fallito: {e}")
+        # Provider errors (image unreadable, corrupt, too small) → soft-fail with 200
+        logger.warning(f"plate ocr soft-fail: {e}")
+        return PlateOcrOut(plate=None, raw="NON_TROVATA")
 
 
 # ---- Audio: transcription (Whisper-1) ----

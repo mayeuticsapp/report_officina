@@ -62,3 +62,25 @@ JWT + bcrypt custom. Admin seeded on startup (`admin`/`admin123`). Nessun self-s
 - Export PDF report
 - Fascia oraria + calcolo ore lavorate per operaio
 - Notifiche in-app admin quando operaio fermo >30 min
+
+## v2 — AI voice dialogue (SHIPPED)
+
+**Backend additions:**
+- `POST /api/vision/plate` — Claude Sonnet 4.5 Vision OCR di una targa italiana da foto (base64). Soft-fail 200 con `plate: null` se immagine non leggibile.
+- `POST /api/audio/transcribe` — Whisper-1 (multipart upload). Formati supportati: m4a/mp3/mp4/mpeg/mpga/wav/webm. Lingua: italiano.
+- `POST /api/work-orders/{id}/voice-turn` — Multi-turn dialogo con Claude Sonnet 4.5. Riceve testo dell'operaio, risponde brevemente, e in un JSON block emette la scheda_tecnica strutturata aggiornata (marca/modello/anno/motore/km/lavori_fatti/lavori_da_fare/ricambi_necessari/note). Il backend fa merge intelligente: stringhe sostituite solo se non-vuote, liste accumulate senza duplicati.
+- `GET /api/work-orders/{id}/conversation` — turni completi + scheda corrente.
+- Nuova collection MongoDB: `conversations` (una per commessa, `turns` array con `role/text/timestamp`).
+- Extended `WorkOrder` model con `scheda_tecnica: SchedaTecnica`.
+
+**Frontend additions:**
+- `src/components/VoiceChat.tsx` — componente riutilizzabile:
+  - Card SCHEDA TECNICA AI live (marca, modello, anno, motore, km + liste lavori fatti / da fare / ricambi).
+  - Chat bubbles operaio (nero) vs AI (grigio con etichetta AI).
+  - Input di testo + bottone invio.
+  - Bottone microfono "tieni-premuto-per-registrare" (expo-audio + Whisper-1) con animazione pulse rossa.
+  - Bottone SCAN TARGA (camera → Claude Vision → auto-invia turno "La targa è XXX").
+  - `readOnly` prop per la vista admin.
+- Integrato in `/(worker)/order/[id]` (interattivo).
+- Nuovo `/(admin)/order/[id]` — vista read-only con dettagli, scheda AI, dialogo, timeline eventi. Accessibile con bottone VEDI dalla lista commesse admin.
+- Permessi microfono aggiunti in `app.json` (iOS/Android).
