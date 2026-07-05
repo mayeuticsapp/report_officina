@@ -9,7 +9,12 @@ from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from typing import List, Optional, Literal
 
-from fastapi import FastAPI, APIRouter, HTTPException, Depends, status
+import io
+import json
+import re
+import tempfile
+
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, status, UploadFile, File
 from fastapi.security import OAuth2PasswordBearer
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -18,7 +23,8 @@ from pydantic import BaseModel, Field
 import jwt
 import bcrypt
 
-from emergentintegrations.llm.chat import LlmChat, UserMessage
+from emergentintegrations.llm.chat import LlmChat, UserMessage, ImageContent
+from emergentintegrations.llm.openai.speech_to_text import OpenAISpeechToText
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
@@ -40,6 +46,7 @@ db = client[DB_NAME]
 users_col = db.users
 work_orders_col = db.work_orders
 events_col = db.work_events
+conversations_col = db.conversations  # one doc per work_order_id with list of turns
 
 # ---------------- App ----------------
 app = FastAPI(title="Officina Meccanica API")
@@ -153,6 +160,18 @@ class WorkOrderCreate(BaseModel):
     assigned_worker_ids: List[str] = Field(default_factory=list)
 
 
+class SchedaTecnica(BaseModel):
+    marca: Optional[str] = None
+    modello: Optional[str] = None
+    anno: Optional[str] = None
+    motore: Optional[str] = None
+    km: Optional[str] = None
+    lavori_fatti: List[str] = Field(default_factory=list)
+    lavori_da_fare: List[str] = Field(default_factory=list)
+    ricambi_necessari: List[str] = Field(default_factory=list)
+    note: Optional[str] = None
+
+
 class WorkOrderUpdate(BaseModel):
     plate: Optional[str] = None
     vin: Optional[str] = None
@@ -172,6 +191,7 @@ class WorkOrder(BaseModel):
     description: str
     assigned_worker_ids: List[str]
     status: OrderStatus
+    scheda_tecnica: SchedaTecnica = Field(default_factory=SchedaTecnica)
     created_at: datetime
     updated_at: datetime
 
@@ -328,6 +348,7 @@ async def create_work_order(body: WorkOrderCreate, admin: dict = Depends(require
         "description": body.description,
         "assigned_worker_ids": body.assigned_worker_ids,
         "status": "open",
+        "scheda_tecnica": SchedaTecnica().model_dump(),
         "created_at": now_utc(),
         "updated_at": now_utc(),
     }
@@ -521,6 +542,251 @@ async def daily_report(admin: dict = Depends(require_admin)):
     except Exception as e:
         logger.warning(f"Daily report failed: {e}")
         return {"report": f"Errore generazione AI report. Eventi grezzi:\n{events_text}", "events_count": len(events)}
+
+
+# ---- Vision: plate OCR ----
+class PlateOcrIn(BaseModel):
+    image_base64: str  # raw base64 (no data: prefix) or with prefix
+
+
+class PlateOcrOut(BaseModel):
+    plate: Optional[str] = None
+    raw: str
+
+
+PLATE_RE = re.compile(r"[A-Z]{2}\s?[0-9]{3}\s?[A-Z]{2}")
+
+
+@api.post("/vision/plate", response_model=PlateOcrOut)
+async def ocr_plate(body: PlateOcrIn, user: dict = Depends(get_current_user)):
+    """OCR di una targa italiana da foto usando Claude Sonnet 4.5 Vision."""
+    b64 = body.image_base64
+    # Strip data URL prefix if present
+    if "," in b64 and b64.startswith("data:"):
+        b64 = b64.split(",", 1)[1]
+    try:
+        chat = LlmChat(
+            api_key=EMERGENT_LLM_KEY,
+            session_id=f"plate-{uuid.uuid4()}",
+            system_message=(
+                "Sei un OCR specializzato in targhe italiane. "
+                "Restituisci SOLO la targa nel formato AA123BB (senza spazi), o 'NON_TROVATA' se non riesci a leggerla. "
+                "Nessun altro testo."
+            ),
+        ).with_model("anthropic", "claude-sonnet-4-5-20250929")
+        msg = UserMessage(
+            text="Leggi la targa nell'immagine e rispondi con il solo codice targa italiano.",
+            file_contents=[ImageContent(image_base64=b64)],
+        )
+        resp = await chat.send_message(msg)
+        raw = str(resp).strip().upper()
+        m = PLATE_RE.search(raw.replace("-", "").replace(".", ""))
+        plate = m.group(0).replace(" ", "") if m else None
+        return PlateOcrOut(plate=plate, raw=raw)
+    except Exception as e:
+        logger.exception("plate ocr failed")
+        raise HTTPException(status_code=500, detail=f"OCR fallito: {e}")
+
+
+# ---- Audio: transcription (Whisper-1) ----
+class TranscribeOut(BaseModel):
+    text: str
+
+
+@api.post("/audio/transcribe", response_model=TranscribeOut)
+async def transcribe_audio(file: UploadFile = File(...), user: dict = Depends(get_current_user)):
+    """Trascrive un file audio (m4a/mp3/wav/webm) usando Whisper-1."""
+    data = await file.read()
+    # Whisper needs a file-like with a name/ext
+    ext = ".m4a"
+    if file.filename and "." in file.filename:
+        ext = "." + file.filename.rsplit(".", 1)[1].lower()
+    if ext.lstrip(".") not in {"mp3", "mp4", "mpeg", "mpga", "m4a", "wav", "webm"}:
+        ext = ".m4a"
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=ext)
+    try:
+        tmp.write(data)
+        tmp.flush()
+        tmp.close()
+        stt = OpenAISpeechToText(api_key=EMERGENT_LLM_KEY)
+        with open(tmp.name, "rb") as f:
+            resp = await stt.transcribe(file=f, model="whisper-1", language="it")
+        # LiteLLM returns a Transcription object with .text
+        text = getattr(resp, "text", None) or (resp.get("text") if isinstance(resp, dict) else str(resp))
+        return TranscribeOut(text=(text or "").strip())
+    except Exception as e:
+        logger.exception("transcribe failed")
+        raise HTTPException(status_code=500, detail=f"Trascrizione fallita: {e}")
+    finally:
+        try:
+            os.unlink(tmp.name)
+        except Exception:
+            pass
+
+
+# ---- AI Voice Chat (multi-turn per commessa) ----
+class VoiceTurnIn(BaseModel):
+    user_text: str  # trascritto lato client oppure via /audio/transcribe
+
+
+class ConversationTurn(BaseModel):
+    role: Literal["user", "assistant"]
+    text: str
+    timestamp: datetime
+    worker_id: Optional[str] = None
+    worker_full_name: Optional[str] = None
+
+
+class VoiceTurnOut(BaseModel):
+    assistant_text: str
+    scheda_tecnica: SchedaTecnica
+    turn: ConversationTurn
+
+
+class ConversationOut(BaseModel):
+    work_order_id: str
+    scheda_tecnica: SchedaTecnica
+    turns: List[ConversationTurn]
+
+
+AI_SYSTEM_PROMPT = (
+    "Sei l'assistente AI di un'officina meccanica italiana. Parli con un OPERAIO che ha le mani "
+    "occupate e ti detta note vocali sul lavoro in corso su un veicolo. "
+    "Il tuo compito duplice: "
+    "(1) rispondere all'operaio con UNA frase breve (max 20 parole) — conferma, chiedi info mancanti "
+    "(marca/modello/anno, KM, cosa fatto, cosa manca, ricambi), non ripetere ciò che ha detto. "
+    "(2) mantenere aggiornata la scheda tecnica strutturata in JSON. "
+    "Devi rispondere SEMPRE con questo formato ESATTO (nessun testo fuori dal JSON):\n"
+    "```json\n"
+    "{\n"
+    '  "reply": "risposta breve all\'operaio in italiano",\n'
+    '  "scheda": {\n'
+    '    "marca": "...", "modello": "...", "anno": "...", "motore": "...", "km": "...",\n'
+    '    "lavori_fatti": ["..."], "lavori_da_fare": ["..."], "ricambi_necessari": ["..."],\n'
+    '    "note": "..."\n'
+    "  }\n"
+    "}\n"
+    "```\n"
+    "Nella scheda usa i valori che hai già + ciò che l'operaio ha appena detto (accumula, non sovrascrivere le liste)."
+)
+
+
+def _extract_json_block(s: str) -> Optional[dict]:
+    # Look for ```json ... ``` block first, else find first {...}
+    m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", s, re.DOTALL)
+    if not m:
+        m = re.search(r"(\{.*\})", s, re.DOTALL)
+    if not m:
+        return None
+    try:
+        return json.loads(m.group(1))
+    except Exception:
+        return None
+
+
+@api.post("/work-orders/{order_id}/voice-turn", response_model=VoiceTurnOut)
+async def voice_turn(order_id: str, body: VoiceTurnIn, user: dict = Depends(get_current_user)):
+    order = await work_orders_col.find_one({"id": order_id}, {"_id": 0})
+    if not order:
+        raise HTTPException(status_code=404, detail="Commessa non trovata")
+    if user["role"] == "worker" and user["id"] not in order["assigned_worker_ids"]:
+        raise HTTPException(status_code=403, detail="Non assegnato a questa commessa")
+
+    user_text = body.user_text.strip()
+    if not user_text:
+        raise HTTPException(status_code=400, detail="Testo vuoto")
+
+    convo_doc = await conversations_col.find_one({"work_order_id": order_id}, {"_id": 0})
+    turns: list = (convo_doc or {}).get("turns", [])
+    current_scheda = order.get("scheda_tecnica") or SchedaTecnica().model_dump()
+
+    # Build context prompt
+    context = (
+        f"COMMESSA: targa={order['plate']}, veicolo={order['vehicle']}, cliente={order['customer']}\n"
+        f"SCHEDA ATTUALE: {json.dumps(current_scheda, ensure_ascii=False)}\n"
+        f"OPERAIO ({user['full_name']}) dice: {user_text}"
+    )
+
+    # Include recent history (last 6 turns) to keep context tight
+    history_text = ""
+    for t in turns[-6:]:
+        who = "OPERAIO" if t["role"] == "user" else "AI"
+        history_text += f"\n{who}: {t['text']}"
+
+    try:
+        chat = LlmChat(
+            api_key=EMERGENT_LLM_KEY,
+            session_id=f"voice-{order_id}",
+            system_message=AI_SYSTEM_PROMPT,
+        ).with_model("anthropic", "claude-sonnet-4-5-20250929")
+        prompt = (context + ("\n\nSTORICO RECENTE:" + history_text if history_text else ""))
+        resp = await chat.send_message(UserMessage(text=prompt))
+        raw = str(resp)
+    except Exception as e:
+        logger.exception("voice-turn LLM failed")
+        raise HTTPException(status_code=500, detail=f"AI fallita: {e}")
+
+    parsed = _extract_json_block(raw)
+    if parsed and isinstance(parsed, dict):
+        reply = str(parsed.get("reply") or "Annotato.")
+        scheda_in = parsed.get("scheda") or {}
+        # Merge: strings replaced only if non-empty; lists deduped & extended
+        merged = dict(current_scheda)
+        for k in ("marca", "modello", "anno", "motore", "km", "note"):
+            v = scheda_in.get(k)
+            if isinstance(v, str) and v.strip() and v.strip().lower() not in {"...", "null", "none"}:
+                merged[k] = v.strip()
+        for k in ("lavori_fatti", "lavori_da_fare", "ricambi_necessari"):
+            new_list = scheda_in.get(k) or []
+            if isinstance(new_list, list):
+                combined = list(current_scheda.get(k) or [])
+                for item in new_list:
+                    if isinstance(item, str) and item.strip() and item.strip() not in combined:
+                        combined.append(item.strip())
+                merged[k] = combined
+        scheda_final = SchedaTecnica(**merged)
+    else:
+        reply = raw.strip()
+        scheda_final = SchedaTecnica(**current_scheda)
+
+    now = now_utc()
+    user_turn = {
+        "role": "user", "text": user_text, "timestamp": now,
+        "worker_id": user["id"], "worker_full_name": user["full_name"],
+    }
+    ai_turn = {
+        "role": "assistant", "text": reply, "timestamp": now,
+    }
+
+    await conversations_col.update_one(
+        {"work_order_id": order_id},
+        {"$setOnInsert": {"work_order_id": order_id, "created_at": now},
+         "$push": {"turns": {"$each": [user_turn, ai_turn]}}},
+        upsert=True,
+    )
+    await work_orders_col.update_one(
+        {"id": order_id},
+        {"$set": {"scheda_tecnica": scheda_final.model_dump(), "updated_at": now}},
+    )
+
+    return VoiceTurnOut(
+        assistant_text=reply,
+        scheda_tecnica=scheda_final,
+        turn=ConversationTurn(**ai_turn),
+    )
+
+
+@api.get("/work-orders/{order_id}/conversation", response_model=ConversationOut)
+async def get_conversation(order_id: str, user: dict = Depends(get_current_user)):
+    order = await work_orders_col.find_one({"id": order_id}, {"_id": 0})
+    if not order:
+        raise HTTPException(status_code=404, detail="Commessa non trovata")
+    if user["role"] == "worker" and user["id"] not in order["assigned_worker_ids"]:
+        raise HTTPException(status_code=403, detail="Non assegnato")
+    convo = await conversations_col.find_one({"work_order_id": order_id}, {"_id": 0})
+    turns = (convo or {}).get("turns", []) if convo else []
+    scheda = SchedaTecnica(**(order.get("scheda_tecnica") or {}))
+    return ConversationOut(work_order_id=order_id, scheda_tecnica=scheda, turns=[ConversationTurn(**t) for t in turns])
 
 
 app.include_router(api)

@@ -92,3 +92,53 @@ export type LiveStatus = {
   minutes_since?: number | null;
   last_reason?: string | null;
 };
+
+export type SchedaTecnica = {
+  marca?: string | null;
+  modello?: string | null;
+  anno?: string | null;
+  motore?: string | null;
+  km?: string | null;
+  lavori_fatti: string[];
+  lavori_da_fare: string[];
+  ricambi_necessari: string[];
+  note?: string | null;
+};
+
+export type ConversationTurn = {
+  role: "user" | "assistant";
+  text: string;
+  timestamp: string;
+  worker_id?: string | null;
+  worker_full_name?: string | null;
+};
+
+export type Conversation = {
+  work_order_id: string;
+  scheda_tecnica: SchedaTecnica;
+  turns: ConversationTurn[];
+};
+
+export type VoiceTurnResp = {
+  assistant_text: string;
+  scheda_tecnica: SchedaTecnica;
+  turn: ConversationTurn;
+};
+
+/** Upload multipart audio file to /api/audio/transcribe */
+export async function transcribeAudio(uri: string, mimeType: string = "audio/m4a", filename: string = "note.m4a"): Promise<string> {
+  const token = await (await import("@/src/utils/storage")).storage.secureGet<string>("officina_token", "");
+  const form = new FormData();
+  // In React Native, FormData accepts { uri, name, type }
+  // @ts-expect-error RN form data typing
+  form.append("file", { uri, name: filename, type: mimeType });
+  const res = await fetch(`${BASE_URL}/api/audio/transcribe`, {
+    method: "POST",
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+    body: form,
+  });
+  const text = await res.text();
+  let data: any; try { data = JSON.parse(text); } catch { data = text; }
+  if (!res.ok) throw new Error((data && data.detail) || `Errore ${res.status}`);
+  return (data && data.text) || "";
+}

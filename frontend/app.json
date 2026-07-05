@@ -10,7 +10,12 @@
     "newArchEnabled": true,
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.emergent.carbayflow.dapsm6"
+      "bundleIdentifier": "com.emergent.carbayflow.dapsm6",
+      "infoPlist": {
+        "NSCameraUsageDescription": "Fotografa targa e componenti del veicolo",
+        "NSPhotoLibraryUsageDescription": "Allega foto ai lavori",
+        "NSMicrophoneUsageDescription": "Detta note vocali sul lavoro in corso"
+      }
     },
     "android": {
       "adaptiveIcon": {
@@ -18,7 +23,8 @@
         "backgroundColor": "#000000"
       },
       "edgeToEdgeEnabled": true,
-      "package": "com.emergent.carbayflow.dapsm6"
+      "package": "com.emergent.carbayflow.dapsm6",
+      "permissions": ["CAMERA", "RECORD_AUDIO", "READ_MEDIA_IMAGES"]
     },
     "web": {
       "bundler": "metro",
@@ -35,7 +41,8 @@
           "resizeMode": "contain",
           "backgroundColor": "#000000"
         }
-      ]
+      ],
+      "expo-audio"
     ],
     "experiments": {
       "typedRoutes": true

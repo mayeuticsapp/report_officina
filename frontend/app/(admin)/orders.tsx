@@ -5,7 +5,7 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
-import { useFocusEffect } from "expo-router";
+import { useFocusEffect, useRouter } from "expo-router";
 import { api, User, WorkOrder } from "@/src/api/client";
 import { colors, spacing } from "@/src/theme";
 
@@ -17,6 +17,7 @@ const statusMap: Record<string, { c: string; label: string }> = {
 };
 
 export default function OrdersAdmin() {
+  const router = useRouter();
   const [orders, setOrders] = useState<WorkOrder[]>([]);
   const [workers, setWorkers] = useState<User[]>([]);
   const [loading, setLoading] = useState(true);
@@ -142,6 +143,10 @@ export default function OrdersAdmin() {
                   {assigned.length ? assigned.map((w) => w.full_name).join(", ") : "Nessuno"}
                 </Text>
                 <View style={styles.actions}>
+                  <TouchableOpacity testID={`btn-view-order-${o.id}`} style={styles.iconBtn} onPress={() => router.push(`/(admin)/order/${o.id}` as any)}>
+                    <Ionicons name="eye-outline" size={18} color={colors.text} />
+                    <Text style={styles.iconBtnText}>VEDI</Text>
+                  </TouchableOpacity>
                   <TouchableOpacity testID={`btn-edit-order-${o.id}`} style={styles.iconBtn} onPress={() => openEdit(o)}>
                     <Ionicons name="create-outline" size={18} color={colors.text} />
                     <Text style={styles.iconBtnText}>MODIFICA</Text>

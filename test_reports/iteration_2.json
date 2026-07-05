@@ -1,0 +1,43 @@
+{
+  "summary": "Iteration 2 focused on new AI voice-chat feature (Claude Sonnet 4.5 + Whisper-1 + Vision plate OCR). Backend pytest: 15/16 tests passed (only edge-case failure: /api/vision/plate returns 500 instead of 200 when Claude Vision rejects an image it 'cannot process' — the endpoint should catch that specific case and return {plate: null, raw: 'NON_TROVATA'} to satisfy 'must not 500'). Verified: /audio/transcribe accepts multipart & requires auth; /voice-turn correctly extracts marca/modello/anno/km + adds 'pastiglie' to scheda from a single italian sentence; follow-up turn MERGES lavori_da_fare (tagliando + olio) without overwriting existing marca/modello; /conversation returns all turns + current scheda; unassigned worker is properly rejected with 403 on both POST /voice-turn and GET /conversation; empty text yields 400. Regression on prior iter1 endpoints still 100% green (login, users, work-orders, live-status, events/recent). Frontend E2E (390x844): admin login → COMMESSE → VEDI on order → admin order detail shows SCHEDA TECNICA AI card + DIALOGO AI section with NO input/mic/scan buttons (read-only correctly enforced). Worker login → order card tap → detail exposes all required testIDs (scheda-tecnica-card, voice-chat-input, btn-mic, btn-scan-plate, btn-send-text). Typed 'Sto lavorando su una BMW X3 del 2020, 80mila km' → tap send → after ~15s new AI bubble appeared AND SCHEDA populated with MARCA=BMW, MODELLO=X3, ANNO=2020, KM=80000. End-to-end voice→AI→scheda flow works. Deprecated packages still present (expo-image-picker deprecation warning from iter1 not yet actioned; iter2 kept it).",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "POST /api/vision/plate", "issue": "Returns HTTP 500 when Anthropic rejects the image ('Could not process image', e.g. tiny/corrupt/non-photo payload). Requirement stated 'must not 500'. Wrap Claude's BadRequestError and return PlateOcrOut(plate=None, raw='NON_TROVATA') gracefully. File: /app/backend/server.py:586-588."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": [
+      {"component": "expo-image-picker", "issue": "Both /app/frontend/src/components/VoiceChat.tsx:139 and /app/frontend/app/(worker)/order/[id].tsx:82 use the new mediaTypes: ['images'] correctly. However VoiceChat still relies on 'expo-audio' — verify that when running the app in web preview the mic permission API works (recording on locked-screen is native-only, expected). Reference: VoiceChat.tsx lines 7-10, 87-105."}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_voice_ai.py",
+    "/app/backend/tests/backend_test.py",
+    "/app/test_reports/pytest/pytest_results_iter2.xml"
+  ],
+  "action_items": [
+    "In /app/backend/server.py POST /api/vision/plate, catch the Anthropic BadRequestError (\"Could not process image\") specifically and return PlateOcrOut(plate=None, raw='NON_TROVATA') with 200 instead of raising HTTP 500. Currently the review requirement 'must not 500 on non-plate image' fails for tiny/corrupt images.",
+    "(Carry-over from iter1) Replace ImagePicker.MediaTypeOptions.Images usage if still present anywhere; iter2 files already use mediaTypes: ['images'] correctly."
+  ],
+  "critical_code_review_comments": [
+    "server.py has grown to ~793 lines; splitting into modules (auth, orders, ai) will help maintainability but not blocking.",
+    "voice_turn uses session_id=`voice-{order_id}` (stateful) BUT also manually feeds STORICO RECENTE in the prompt. This double-history is fine but slightly redundant; consider dropping session_id per turn or the manual history.",
+    "_extract_json_block second regex '(\\{.*\\})' is greedy across DOTALL; if the model puts multiple JSON objects it may capture too much. Only marginal risk given the strict system prompt.",
+    "voice-turn merge logic replaces string fields whenever new value is non-empty/non-'...' — this can still let the AI overwrite marca/modello if it hallucinates a different one. Consider only setting these fields the first time they are empty. Current test still passed because Claude preserved marca/modello on the second turn."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_voice_ai.py (created)",
+    "/app/test_reports/pytest/pytest_results_iter2.xml (generated)",
+    "/app/test_reports/iteration_2.json (created)"
+  ],
+  "success_rate": {"backend": "94% (15/16)", "frontend": "100% of tested flows"},
+  "seed_data_creation": "Each test run creates TEST_-prefixed workers + one work order (plate TEST<runid>) and cleans them up in fixture teardown. UI test also provisioned a transient worker (uitest<ts>) + order (UITST3) and deleted them at end.",
+  "retest_needed": true,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "BASE URL: https://car-bay-flow.preview.emergentagent.com. Admin: admin/admin123. Login testIDs are login-username-input/login-password-input/login-submit-button (NOT the shorter 'login-username' variant). Order cards use testID order-card-<uuid>. VoiceChat testIDs match the spec (scheda-tecnica-card, voice-chat-input, btn-mic, btn-send-text, btn-scan-plate). Bottom-tab bar testIDs are NOT prefixed with 'tab-' — navigate by visible text ('COMMESSE', 'OGGI', 'PROFILO', 'LIVE', 'OPERAI', 'REPORT AI') or add tab-* testIDs if needed. voice-turn calls take ~5-15s (Claude Sonnet). Vision plate call currently 500s on non-photo inputs — main agent must fix before re-running the fail test in test_voice_ai.py::TestVisionPlate::test_plate_ocr_non_plate_image_does_not_500.",
+  "rca_of_issue": "vision/plate 500 root cause: emergentintegrations propagates AnthropicException('Could not process image') as a plain Exception; the catch-all `except Exception` re-raises HTTPException(500). Fix: catch and detect the substring 'Could not process image' (or any Anthropic/LiteLLM BadRequestError) and return PlateOcrOut(plate=None, raw='NON_TROVATA') with 200. Reproduction: POST /api/vision/plate with a valid Bearer token and body {\"image_base64\": \"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==\"} — server responds 500 with 'OCR fallito: ... Could not process image'."
+}

@@ -8,6 +8,7 @@ import { useLocalSearchParams, useRouter, useFocusEffect } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import * as ImagePicker from "expo-image-picker";
 import { api, WorkEvent, WorkOrder, EventType } from "@/src/api/client";
+import { VoiceChat } from "@/src/components/VoiceChat";
 import { colors, spacing } from "@/src/theme";
 
 export default function OrderDetail() {
@@ -144,6 +145,9 @@ export default function OrderDetail() {
             <Text style={styles.desc}>{order.description}</Text>
           </View>
         </View>
+
+        {/* AI Voice Chat + Scheda Tecnica */}
+        <VoiceChat orderId={order.id} />
 
         {/* Timeline */}
         <Text style={styles.sectionLabel}>TIMELINE</Text>
