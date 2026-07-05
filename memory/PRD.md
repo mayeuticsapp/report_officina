@@ -63,7 +63,7 @@ JWT + bcrypt custom. Admin seeded on startup (`admin`/`admin123`). Nessun self-s
 - Fascia oraria + calcolo ore lavorate per operaio
 - Notifiche in-app admin quando operaio fermo >30 min
 
-## v2 — AI voice dialogue (SHIPPED)
+## v2 — AI voice dialogue
 
 **Backend additions:**
 - `POST /api/vision/plate` — Claude Sonnet 4.5 Vision OCR di una targa italiana da foto (base64). Soft-fail 200 con `plate: null` se immagine non leggibile.
@@ -84,3 +84,20 @@ JWT + bcrypt custom. Admin seeded on startup (`admin`/`admin123`). Nessun self-s
 - Integrato in `/(worker)/order/[id]` (interattivo).
 - Nuovo `/(admin)/order/[id]` — vista read-only con dettagli, scheda AI, dialogo, timeline eventi. Accessibile con bottone VEDI dalla lista commesse admin.
 - Permessi microfono aggiunti in `app.json` (iOS/Android).
+
+## v3 — Migrazione a Mistral AI (SHIPPED)
+
+Rimossi TUTTI i riferimenti ad Anthropic Claude e OpenAI Whisper. L'intera app ora gira su Mistral.
+
+**Modelli utilizzati:**
+- `mistral-large-latest` — dialogo AI, interpretazione motivi pausa, report giornaliero (con JSON mode per la scheda tecnica strutturata)
+- `mistral-ocr-latest` — OCR targhe italiane (via `client.ocr.process_async()`)
+- `voxtral-mini-latest` — trascrizione audio italiano (via `client.audio.transcriptions.complete_async()`)
+
+**Cambiamenti:**
+- Dipendenza `emergentintegrations` non più importata in `server.py`
+- Aggiunta `mistralai>=2.5.2` a `requirements.txt`
+- `.env`: rimosso `EMERGENT_LLM_KEY`, aggiunto `MISTRAL_API_KEY` (+ opzionali `MISTRAL_TEXT_MODEL`, `MISTRAL_OCR_MODEL`, `MISTRAL_STT_MODEL`)
+- Client Mistral condiviso a livello modulo (`mistral_client`)
+- Zero modifiche al frontend: contratto JSON degli endpoint invariato
+- Costi stimati per commessa completa: dialogo ~€0.002/turno, OCR ~€0.001/targa, Voxtral ~€0.001/minuto

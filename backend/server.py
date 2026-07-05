@@ -23,8 +23,7 @@ from pydantic import BaseModel, Field
 import jwt
 import bcrypt
 
-from emergentintegrations.llm.chat import LlmChat, UserMessage, ImageContent
-from emergentintegrations.llm.openai.speech_to_text import OpenAISpeechToText
+from mistralai.client import Mistral
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
@@ -35,12 +34,18 @@ DB_NAME = os.environ["DB_NAME"]
 JWT_SECRET = os.environ["JWT_SECRET"]
 JWT_ALGORITHM = os.environ.get("JWT_ALGORITHM", "HS256")
 JWT_EXPIRES_DAYS = int(os.environ.get("JWT_EXPIRES_DAYS", "7"))
-EMERGENT_LLM_KEY = os.environ["EMERGENT_LLM_KEY"]
+MISTRAL_API_KEY = os.environ["MISTRAL_API_KEY"]
+MISTRAL_TEXT_MODEL = os.environ.get("MISTRAL_TEXT_MODEL", "mistral-large-latest")
+MISTRAL_OCR_MODEL = os.environ.get("MISTRAL_OCR_MODEL", "mistral-ocr-latest")
+MISTRAL_STT_MODEL = os.environ.get("MISTRAL_STT_MODEL", "voxtral-mini-latest")
 SEED_ADMIN_USERNAME = os.environ.get("SEED_ADMIN_USERNAME", "admin")
 SEED_ADMIN_PASSWORD = os.environ.get("SEED_ADMIN_PASSWORD", "admin123")
 
 client = AsyncIOMotorClient(MONGO_URL)
 db = client[DB_NAME]
+
+# Mistral AI client (shared)
+mistral_client = Mistral(api_key=MISTRAL_API_KEY)
 
 # Collections
 users_col = db.users
@@ -391,23 +396,24 @@ async def delete_work_order(order_id: str, admin: dict = Depends(require_admin))
 
 # ---- Work Events (worker actions) ----
 async def _ai_interpret_reason(reason: str, event_type: str) -> Optional[str]:
-    """Use Claude to briefly interpret the pause/action reason (Italian)."""
+    """Use Mistral to briefly interpret the pause/action reason (Italian)."""
     if not reason:
         return None
     try:
-        chat = LlmChat(
-            api_key=EMERGENT_LLM_KEY,
-            session_id=f"reason-{uuid.uuid4()}",
-            system_message=(
-                "Sei un assistente per un'officina meccanica. Ricevi il motivo di un evento "
-                "(START/PAUSE/RESUME/COMPLETE) scritto in linguaggio naturale da un operaio. "
-                "Rispondi in italiano con UNA SOLA FRASE breve (max 15 parole) che riassume "
-                "l'intento dell'operaio in modo strutturato per il capofficina."
-            ),
-        ).with_model("anthropic", "claude-sonnet-4-5-20250929")
-        msg = UserMessage(text=f"Evento: {event_type}\nMotivo dell'operaio: {reason}")
-        resp = await chat.send_message(msg)
-        return str(resp).strip()
+        resp = await mistral_client.chat.complete_async(
+            model=MISTRAL_TEXT_MODEL,
+            messages=[
+                {"role": "system", "content": (
+                    "Sei un assistente per un'officina meccanica. Ricevi il motivo di un evento "
+                    "(START/PAUSE/RESUME/COMPLETE) scritto in linguaggio naturale da un operaio. "
+                    "Rispondi in italiano con UNA SOLA FRASE breve (max 15 parole) che riassume "
+                    "l'intento dell'operaio in modo strutturato per il capofficina."
+                )},
+                {"role": "user", "content": f"Evento: {event_type}\nMotivo dell'operaio: {reason}"},
+            ],
+            max_tokens=100,
+        )
+        return (resp.choices[0].message.content or "").strip() or None
     except Exception as e:
         logger.warning(f"AI interpret failed: {e}")
         return None
@@ -524,21 +530,24 @@ async def daily_report(admin: dict = Depends(require_admin)):
     events_text = "\n".join(summary_lines)
 
     try:
-        chat = LlmChat(
-            api_key=EMERGENT_LLM_KEY,
-            session_id=f"daily-{uuid.uuid4()}",
-            system_message=(
-                "Sei l'assistente AI di un capofficina. Analizza gli eventi della giornata "
-                "e genera un REPORT strutturato in italiano con: "
-                "1) Riepilogo generale (numero operai attivi, commesse toccate). "
-                "2) Timeline sintetica per operaio. "
-                "3) Anomalie o pause lunghe (>30 min). "
-                "4) Suggerimenti operativi. "
-                "Sii conciso, professionale, usa elenchi puntati."
-            ),
-        ).with_model("anthropic", "claude-sonnet-4-5-20250929")
-        resp = await chat.send_message(UserMessage(text=f"Eventi di oggi:\n{events_text}"))
-        return {"report": str(resp), "events_count": len(events)}
+        resp = await mistral_client.chat.complete_async(
+            model=MISTRAL_TEXT_MODEL,
+            messages=[
+                {"role": "system", "content": (
+                    "Sei l'assistente AI di un capofficina. Analizza gli eventi della giornata "
+                    "e genera un REPORT strutturato in italiano con: "
+                    "1) Riepilogo generale (numero operai attivi, commesse toccate). "
+                    "2) Timeline sintetica per operaio. "
+                    "3) Anomalie o pause lunghe (>30 min). "
+                    "4) Suggerimenti operativi. "
+                    "Sii conciso, professionale, usa elenchi puntati."
+                )},
+                {"role": "user", "content": f"Eventi di oggi:\n{events_text}"},
+            ],
+            max_tokens=1500,
+        )
+        content = (resp.choices[0].message.content or "").strip()
+        return {"report": content, "events_count": len(events)}
     except Exception as e:
         logger.warning(f"Daily report failed: {e}")
         return {"report": f"Errore generazione AI report. Eventi grezzi:\n{events_text}", "events_count": len(events)}
@@ -559,30 +568,23 @@ PLATE_RE = re.compile(r"[A-Z]{2}\s?[0-9]{3}\s?[A-Z]{2}")
 
 @api.post("/vision/plate", response_model=PlateOcrOut)
 async def ocr_plate(body: PlateOcrIn, user: dict = Depends(get_current_user)):
-    """OCR di una targa italiana da foto usando Claude Sonnet 4.5 Vision."""
+    """OCR di una targa italiana da foto usando Mistral OCR."""
     b64 = body.image_base64
-    # Strip data URL prefix if present
     if "," in b64 and b64.startswith("data:"):
         b64 = b64.split(",", 1)[1]
+    data_url = f"data:image/jpeg;base64,{b64}"
     try:
-        chat = LlmChat(
-            api_key=EMERGENT_LLM_KEY,
-            session_id=f"plate-{uuid.uuid4()}",
-            system_message=(
-                "Sei un OCR specializzato in targhe italiane. "
-                "Restituisci SOLO la targa nel formato AA123BB (senza spazi), o 'NON_TROVATA' se non riesci a leggerla. "
-                "Nessun altro testo."
-            ),
-        ).with_model("anthropic", "claude-sonnet-4-5-20250929")
-        msg = UserMessage(
-            text="Leggi la targa nell'immagine e rispondi con il solo codice targa italiano.",
-            file_contents=[ImageContent(image_base64=b64)],
+        # Mistral OCR extracts all text as structured markdown
+        ocr_resp = await mistral_client.ocr.process_async(
+            model=MISTRAL_OCR_MODEL,
+            document={"type": "image_url", "image_url": data_url},
         )
-        resp = await chat.send_message(msg)
-        raw = str(resp).strip().upper()
-        m = PLATE_RE.search(raw.replace("-", "").replace(".", ""))
+        # Aggregate text from all pages
+        pages_text = " ".join((p.markdown or "") for p in (ocr_resp.pages or []))
+        raw = pages_text.strip().upper()
+        m = PLATE_RE.search(raw.replace("-", "").replace(".", "").replace("\n", " "))
         plate = m.group(0).replace(" ", "") if m else None
-        return PlateOcrOut(plate=plate, raw=raw)
+        return PlateOcrOut(plate=plate, raw=(raw[:200] if raw else "NON_TROVATA"))
     except Exception as e:
         # Provider errors (image unreadable, corrupt, too small) → soft-fail with 200
         logger.warning(f"plate ocr soft-fail: {e}")
@@ -596,33 +598,25 @@ class TranscribeOut(BaseModel):
 
 @api.post("/audio/transcribe", response_model=TranscribeOut)
 async def transcribe_audio(file: UploadFile = File(...), user: dict = Depends(get_current_user)):
-    """Trascrive un file audio (m4a/mp3/wav/webm) usando Whisper-1."""
+    """Trascrive un file audio (m4a/mp3/wav/webm) usando Mistral Voxtral."""
     data = await file.read()
-    # Whisper needs a file-like with a name/ext
-    ext = ".m4a"
-    if file.filename and "." in file.filename:
-        ext = "." + file.filename.rsplit(".", 1)[1].lower()
-    if ext.lstrip(".") not in {"mp3", "mp4", "mpeg", "mpga", "m4a", "wav", "webm"}:
-        ext = ".m4a"
-    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=ext)
+    filename = file.filename or "audio.m4a"
     try:
-        tmp.write(data)
-        tmp.flush()
-        tmp.close()
-        stt = OpenAISpeechToText(api_key=EMERGENT_LLM_KEY)
-        with open(tmp.name, "rb") as f:
-            resp = await stt.transcribe(file=f, model="whisper-1", language="it")
-        # LiteLLM returns a Transcription object with .text
-        text = getattr(resp, "text", None) or (resp.get("text") if isinstance(resp, dict) else str(resp))
+        resp = await mistral_client.audio.transcriptions.complete_async(
+            model=MISTRAL_STT_MODEL,
+            file={"content": data, "file_name": filename},
+            language="it",
+        )
+        # Mistral SDK returns object with .text (transcription)
+        text = getattr(resp, "text", None)
+        if text is None:
+            text = getattr(resp, "transcription", None)
+        if text is None and isinstance(resp, dict):
+            text = resp.get("text") or resp.get("transcription")
         return TranscribeOut(text=(text or "").strip())
     except Exception as e:
         logger.exception("transcribe failed")
         raise HTTPException(status_code=500, detail=f"Trascrizione fallita: {e}")
-    finally:
-        try:
-            os.unlink(tmp.name)
-        except Exception:
-            pass
 
 
 # ---- AI Voice Chat (multi-turn per commessa) ----
@@ -656,19 +650,19 @@ AI_SYSTEM_PROMPT = (
     "Il tuo compito duplice: "
     "(1) rispondere all'operaio con UNA frase breve (max 20 parole) — conferma, chiedi info mancanti "
     "(marca/modello/anno, KM, cosa fatto, cosa manca, ricambi), non ripetere ciò che ha detto. "
-    "(2) mantenere aggiornata la scheda tecnica strutturata in JSON. "
-    "Devi rispondere SEMPRE con questo formato ESATTO (nessun testo fuori dal JSON):\n"
-    "```json\n"
+    "(2) mantenere aggiornata la scheda tecnica strutturata. "
+    "Rispondi SEMPRE con un JSON valido (senza testo intorno, senza markdown) con questa struttura ESATTA:\n"
     "{\n"
     '  "reply": "risposta breve all\'operaio in italiano",\n'
     '  "scheda": {\n'
-    '    "marca": "...", "modello": "...", "anno": "...", "motore": "...", "km": "...",\n'
+    '    "marca": "stringa o null", "modello": "stringa o null", "anno": "stringa o null",\n'
+    '    "motore": "stringa o null", "km": "stringa o null",\n'
     '    "lavori_fatti": ["..."], "lavori_da_fare": ["..."], "ricambi_necessari": ["..."],\n'
-    '    "note": "..."\n'
+    '    "note": "stringa o null"\n'
     "  }\n"
     "}\n"
-    "```\n"
-    "Nella scheda usa i valori che hai già + ciò che l'operaio ha appena detto (accumula, non sovrascrivere le liste)."
+    "Nella scheda accumula ciò che sai: mantieni i valori già presenti + aggiungi i nuovi. "
+    "Le liste devono contenere gli elementi già noti + i nuovi (deduplica)."
 )
 
 
@@ -701,28 +695,28 @@ async def voice_turn(order_id: str, body: VoiceTurnIn, user: dict = Depends(get_
     turns: list = (convo_doc or {}).get("turns", [])
     current_scheda = order.get("scheda_tecnica") or SchedaTecnica().model_dump()
 
-    # Build context prompt
-    context = (
-        f"COMMESSA: targa={order['plate']}, veicolo={order['vehicle']}, cliente={order['customer']}\n"
-        f"SCHEDA ATTUALE: {json.dumps(current_scheda, ensure_ascii=False)}\n"
-        f"OPERAIO ({user['full_name']}) dice: {user_text}"
-    )
-
-    # Include recent history (last 6 turns) to keep context tight
-    history_text = ""
-    for t in turns[-6:]:
-        who = "OPERAIO" if t["role"] == "user" else "AI"
-        history_text += f"\n{who}: {t['text']}"
-
     try:
-        chat = LlmChat(
-            api_key=EMERGENT_LLM_KEY,
-            session_id=f"voice-{order_id}",
-            system_message=AI_SYSTEM_PROMPT,
-        ).with_model("anthropic", "claude-sonnet-4-5-20250929")
-        prompt = (context + ("\n\nSTORICO RECENTE:" + history_text if history_text else ""))
-        resp = await chat.send_message(UserMessage(text=prompt))
-        raw = str(resp)
+        # Build message history: system + optional prior turns + current user message
+        messages = [{"role": "system", "content": AI_SYSTEM_PROMPT}]
+        # Include a compact context as first user turn
+        prefix = (
+            f"COMMESSA: targa={order['plate']}, veicolo={order['vehicle']}, cliente={order['customer']}\n"
+            f"SCHEDA ATTUALE: {json.dumps(current_scheda, ensure_ascii=False)}"
+        )
+        # Add up to last 6 conversation turns for continuity
+        for t in turns[-6:]:
+            role = "user" if t["role"] == "user" else "assistant"
+            messages.append({"role": role, "content": t["text"]})
+        # Prepend context to current user turn
+        messages.append({"role": "user", "content": f"{prefix}\n\nOPERAIO ({user['full_name']}) dice ora: {user_text}"})
+
+        resp = await mistral_client.chat.complete_async(
+            model=MISTRAL_TEXT_MODEL,
+            messages=messages,
+            response_format={"type": "json_object"},
+            max_tokens=800,
+        )
+        raw = resp.choices[0].message.content or ""
     except Exception as e:
         logger.exception("voice-turn LLM failed")
         raise HTTPException(status_code=500, detail=f"AI fallita: {e}")

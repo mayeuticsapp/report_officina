@@ -1,0 +1,43 @@
+{
+  "summary": "Iteration 3 verified the full migration from Claude/Whisper (+ emergentintegrations) to Mistral AI end-to-end. Backend pytest: 39/39 PASSED (100%) across test_voice_ai.py (16) + backend_test.py (23). Mistral integration verified live via the exact review-spec sentence: POST /work-orders/{id}/voice-turn with 'Audi A3 2019 60mila km motore 2.0 TDI, cambiate pastiglie freno' → scheda_tecnica.marca='Audi', modello='A3', anno='2019', motore='2.0 TDI', km='60000', lavori_fatti=['cambiate pastiglie freno'] — ALL FIVE fields correct. Multi-turn merge verified (Fiat Panda test in pytest + manual retry): follow-up 'devo fare tagliando' preserves marca/modello and appends to lavori_da_fare. /api/vision/plate now returns 200 with plate=null on non-plate (tiny PNG) images — the iter-2 500 regression is FIXED (soft-fail catch in place). /api/audio/transcribe returns 200 on a tiny WAV (empty text) using voxtral-mini-latest — no 422/500. /api/reports/daily returns 200 with italian 'report' + 'events_count'. 403 authorization holds for unassigned workers on voice-turn and conversation. Regression on iter1 (login, users CRUD, work-orders CRUD, events transitions with ai_interpretation, live-status, recent events, daily report) is 100% green. Grep of /app/backend/server.py runtime path confirms NO references to Anthropic/OpenAI/Whisper/emergentintegrations/EMERGENT_LLM_KEY — only two stale comment strings ('Claude Sonnet 4.5' in module docstring line 3 and 'Whisper-1' comment on line 594) survive; neither affects runtime. Frontend E2E (390x844): admin login → COMMESSE → VEDI opens order detail showing SCHEDA TECNICA AI card + DIALOGO AI section with NO voice-chat-input (read-only correctly enforced). Worker login → order card tap → detail exposes scheda-tecnica-card, voice-chat-input, btn-mic, btn-scan-plate. btn-send-text is conditionally rendered (appears only when input has text — normal behaviour; click succeeded after fill). Typed 'Sto lavorando su una Fiat Punto 1.2 del 2016, 75mila km' → send → after ~15s scheda populated: MARCA=Fiat, MODELLO=Punto, ANNO=2016, MOTORE=1.2, KM=75000. Full end-to-end worker → Mistral → scheda round-trip works. Deprecated packages detected: none critical in runtime path (VoiceChat.tsx uses expo-audio, expo-camera, expo-image-picker — modern APIs). One benign RN web warning ('props.pointerEvents is deprecated. Use style.pointerEvents') from a library.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "POST /api/work-orders/{id}/voice-turn", "issue": "When Mistral returns HTTP 429 (rate limit), the endpoint re-raises as HTTP 500 with 'AI fallita: ... Status 429 ... Rate limit exceeded'. Consider catching SDKError with 429 status and either retrying with backoff or returning 429 to the client so mobile UI can display a proper 'riprova tra poco' message. File: /app/backend/server.py:720-722."},
+      {"endpoint": "server.py comments", "issue": "Stale docstring/comment references to legacy providers remain (cosmetic only, no runtime impact): line 3 module docstring says 'Claude Sonnet 4.5 (via Emergent LLM key)'; line 594 comment says '# ---- Audio: transcription (Whisper-1) ----'. Update to Mistral for accuracy."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": [
+      {"component": "unknown lib (RN web)", "issue": "Console warning 'props.pointerEvents is deprecated. Use style.pointerEvents' at Expo web preview. Non-blocking; likely emitted by a third-party component. Track and migrate when the offending library releases a fix."}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_voice_ai.py",
+    "/app/backend/tests/backend_test.py",
+    "/app/test_reports/pytest/pytest_results_iter3.xml"
+  ],
+  "action_items": [
+    "(Cosmetic) Update stale comments in /app/backend/server.py — line 3 docstring and line 594 audio comment — to reference Mistral instead of Claude/Whisper.",
+    "(Nice-to-have) In /app/backend/server.py voice_turn catch mistralai SDKError with 429 status and return HTTP 429 (or retry once with backoff) instead of a generic HTTP 500 'AI fallita'."
+  ],
+  "critical_code_review_comments": [
+    "server.py is ~788 lines — approaching the 700-line threshold; consider splitting into modules (auth.py, orders.py, ai.py) for maintainability.",
+    "voice_turn merge logic still allows the AI to overwrite marca/modello/anno/motore/km on subsequent turns whenever it returns a non-empty value (line 730-733). Rate-limit and hallucination risk: consider only setting these five string fields when the current stored value is empty/None (first-write-wins).",
+    "In /api/vision/plate, the broad 'except Exception' at line 588 correctly soft-fails now — but this also masks genuine bugs (e.g. transient network errors); add debug logging of exception type for observability.",
+    "MISTRAL_API_KEY is hardcoded in /app/backend/.env in plaintext (expected for local/dev). Ensure production deployment rotates and uses a secret manager."
+  ],
+  "updated_files": [
+    "/app/test_reports/pytest/pytest_results_iter3.xml (generated)",
+    "/app/test_reports/iteration_3.json (created)"
+  ],
+  "success_rate": {"backend": "100% (39/39 pytest)", "frontend": "100% of tested flows (admin read-only + worker full round-trip)"},
+  "seed_data_creation": "Each pytest run creates two TEST_ workers + one TEST work-order and cleans them up via fixture teardown. UI test provisioned a transient worker (TEST_ui_<hex>) + order (UI<hex>) and deleted them at end.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Migration to Mistral is COMPLETE and verified. All 39 backend tests green. Admin: admin/admin123. BASE URL: https://car-bay-flow.preview.emergentagent.com. Login testIDs: login-username-input, login-password-input, login-submit-button. Order cards: order-card-<uuid>. Worker chat testIDs: scheda-tecnica-card, voice-chat-input, btn-mic, btn-send-text (conditionally rendered when input has text), btn-scan-plate. Voice-turn calls take ~5-10s (Mistral large). WATCH OUT: Mistral tier limits (429) trigger easily when running >5 voice-turns back-to-back — space calls or add a sleep between test classes. Two cosmetic stale comments in server.py remain (docstring & audio section) — non-runtime, safe to defer.",
+  "rca_of_issue": "N/A — no unresolved issues. Iter-2 blocker (POST /vision/plate 500 on non-plate) is resolved: server.py:588-591 now wraps the OCR call in try/except returning PlateOcrOut(plate=None, raw='NON_TROVATA') with 200 for any provider error. Verified by test_plate_ocr_non_plate_image_does_not_500 (PASSED)."
+}
