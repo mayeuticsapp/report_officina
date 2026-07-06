@@ -156,6 +156,55 @@ export type DailyReport = {
   generated_at: string;
 };
 
+// ---- Archivio fotografico ----
+export type OrderPhoto = {
+  id: string;
+  work_order_id: string;
+  uploaded_by: string;
+  uploaded_by_name: string;
+  content_type: string;
+  size_bytes: number;
+  created_at: string;
+};
+
+export async function listOrderPhotos(orderId: string): Promise<OrderPhoto[]> {
+  return api<OrderPhoto[]>(`/work-orders/${orderId}/photos`);
+}
+
+export async function deleteOrderPhoto(photoId: string): Promise<void> {
+  await api(`/photos/${photoId}`, { method: "DELETE" });
+}
+
+/** URL diretto del file foto (per <Image>); include il token in query. */
+export async function orderPhotoUrl(photoId: string): Promise<string> {
+  const t = await getToken();
+  return `${BASE_URL}/api/photos/${photoId}/file?token=${encodeURIComponent(t || "")}`;
+}
+
+/** Carica una foto (data: URI da ImagePicker, o file: URI su nativo). */
+export async function uploadOrderPhoto(orderId: string, uri: string): Promise<OrderPhoto> {
+  const token = await getToken();
+  const form = new FormData();
+  if (uri.startsWith("data:") || uri.startsWith("blob:")) {
+    const blob = await (await fetch(uri)).blob();
+    const type = blob.type || "image/jpeg";
+    const ext = type.includes("png") ? "png" : type.includes("webp") ? "webp" : "jpg";
+    form.append("file", new File([blob], `foto.${ext}`, { type }));
+  } else {
+    // @ts-expect-error RN form data typing
+    form.append("file", { uri, name: "foto.jpg", type: "image/jpeg" });
+  }
+  const res = await fetch(`${BASE_URL}/api/work-orders/${orderId}/photos`, {
+    method: "POST",
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+    body: form,
+  });
+  const text = await res.text();
+  let data: any; try { data = JSON.parse(text); } catch { data = text; }
+  if (!res.ok) throw new Error((data && data.detail) || `Errore ${res.status}`);
+  return data as OrderPhoto;
+}
+
 /** Upload multipart audio file to /api/audio/transcribe */
 export async function transcribeAudio(uri: string, mimeType: string = "audio/m4a", filename: string = "note.m4a"): Promise<string> {
   const token = await (await import("@/src/utils/storage")).storage.secureGet<string>("officina_token", "");

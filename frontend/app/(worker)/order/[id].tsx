@@ -10,6 +10,7 @@ import * as ImagePicker from "expo-image-picker";
 import { api, WorkEvent, WorkOrder, EventType } from "@/src/api/client";
 import { confirmDialog, showAlert } from "@/src/utils/dialog";
 import { VoiceChat } from "@/src/components/VoiceChat";
+import { PhotoArchive } from "@/src/components/PhotoArchive";
 import { colors, spacing } from "@/src/theme";
 
 export default function OrderDetail() {
@@ -146,6 +147,8 @@ export default function OrderDetail() {
 
         {/* AI Voice Chat + Scheda Tecnica */}
         <VoiceChat orderId={order.id} />
+
+        <PhotoArchive orderId={order.id} canUpload />
 
         {/* Timeline */}
         <Text style={styles.sectionLabel}>TIMELINE</Text>

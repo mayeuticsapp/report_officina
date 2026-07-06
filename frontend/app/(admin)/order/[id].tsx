@@ -5,6 +5,7 @@ import { useLocalSearchParams, useRouter, useFocusEffect } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { api, WorkOrder, WorkEvent } from "@/src/api/client";
 import { VoiceChat } from "@/src/components/VoiceChat";
+import { PhotoArchive } from "@/src/components/PhotoArchive";
 import { colors, spacing } from "@/src/theme";
 
 const statusMap: Record<string, { c: string; label: string }> = {
@@ -70,6 +71,8 @@ export default function AdminOrderDetail() {
         </View>
 
         <VoiceChat orderId={order.id} readOnly />
+
+        <PhotoArchive orderId={order.id} canDelete />
 
         <Text style={styles.section}>TIMELINE EVENTI</Text>
         {events.length === 0 ? (

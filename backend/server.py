@@ -15,6 +15,7 @@ from typing import List, Optional, Literal
 
 import asyncpg
 from fastapi import FastAPI, APIRouter, HTTPException, Depends, status, UploadFile, File
+from fastapi.responses import FileResponse
 from fastapi.security import OAuth2PasswordBearer
 from starlette.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
@@ -38,6 +39,8 @@ MISTRAL_OCR_MODEL = os.environ.get("MISTRAL_OCR_MODEL", "mistral-ocr-latest")
 MISTRAL_STT_MODEL = os.environ.get("MISTRAL_STT_MODEL", "voxtral-mini-latest")
 SEED_ADMIN_USERNAME = os.environ.get("SEED_ADMIN_USERNAME", "admin")
 SEED_ADMIN_PASSWORD = os.environ.get("SEED_ADMIN_PASSWORD", "admin123")
+UPLOADS_DIR = Path(os.environ.get("UPLOADS_DIR", str(ROOT_DIR / "uploads")))
+MAX_PHOTO_BYTES = int(os.environ.get("MAX_PHOTO_BYTES", str(15 * 1024 * 1024)))  # 15MB
 
 mistral_client = Mistral(api_key=MISTRAL_API_KEY)
 
@@ -111,7 +114,7 @@ def create_token(user_id: str, username: str, role: str) -> str:
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
 
-async def get_current_user(token: Optional[str] = Depends(oauth2)) -> dict:
+async def _user_from_token(token: Optional[str]) -> dict:
     if not token:
         raise HTTPException(status_code=401, detail="Non autenticato")
     try:
@@ -127,6 +130,10 @@ async def get_current_user(token: Optional[str] = Depends(oauth2)) -> dict:
     if not user:
         raise HTTPException(status_code=401, detail="Utente non trovato")
     return user
+
+
+async def get_current_user(token: Optional[str] = Depends(oauth2)) -> dict:
+    return await _user_from_token(token)
 
 
 async def require_admin(user: dict = Depends(get_current_user)) -> dict:
@@ -413,6 +420,21 @@ async def startup():
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             )
         """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS order_photos (
+                id TEXT PRIMARY KEY,
+                work_order_id TEXT NOT NULL,
+                uploaded_by TEXT NOT NULL,
+                uploaded_by_name TEXT NOT NULL,
+                content_type TEXT NOT NULL,
+                size_bytes INTEGER NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """)
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_order_photos_order ON order_photos (work_order_id, created_at)"
+        )
+        UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
 
         existing = await conn.fetchrow("SELECT id FROM users WHERE username=$1", SEED_ADMIN_USERNAME)
         if not existing:
@@ -579,10 +601,108 @@ async def update_work_order(order_id: str, body: WorkOrderUpdate, admin: dict = 
 @api.delete("/work-orders/{order_id}")
 async def delete_work_order(order_id: str, admin: dict = Depends(require_admin)):
     await execute("DELETE FROM work_events WHERE work_order_id=$1", order_id)
+    await execute("DELETE FROM order_photos WHERE work_order_id=$1", order_id)
+    # rimuovi anche i file su disco
+    photo_dir = UPLOADS_DIR / order_id
+    if photo_dir.is_dir():
+        for f in photo_dir.iterdir():
+            f.unlink(missing_ok=True)
+        photo_dir.rmdir()
     async with pool.acquire() as conn:
         res = await conn.execute("DELETE FROM work_orders WHERE id=$1", order_id)
     if res == "DELETE 0":
         raise HTTPException(status_code=404, detail="Non trovata")
+    return {"ok": True}
+
+
+# ---- Archivio fotografico commessa ----
+class OrderPhoto(BaseModel):
+    id: str
+    work_order_id: str
+    uploaded_by: str
+    uploaded_by_name: str
+    content_type: str
+    size_bytes: int
+    created_at: datetime
+
+
+_PHOTO_EXT = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "image/heic": "heic"}
+
+
+async def _order_or_403(order_id: str, user: dict) -> dict:
+    row = await fetchrow("SELECT * FROM work_orders WHERE id=$1", order_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Commessa non trovata")
+    worker_ids = row.get("assigned_worker_ids") or []
+    if isinstance(worker_ids, str):
+        worker_ids = json.loads(worker_ids)
+    if user["role"] == "worker" and user["id"] not in worker_ids:
+        raise HTTPException(status_code=403, detail="Non assegnato")
+    return row
+
+
+def _photo_path(order_id: str, photo_id: str, content_type: str) -> Path:
+    ext = _PHOTO_EXT.get(content_type, "bin")
+    return UPLOADS_DIR / order_id / f"{photo_id}.{ext}"
+
+
+@api.post("/work-orders/{order_id}/photos", response_model=OrderPhoto)
+async def upload_order_photo(order_id: str, file: UploadFile = File(...), user: dict = Depends(get_current_user)):
+    await _order_or_403(order_id, user)
+    content_type = (file.content_type or "").lower()
+    if content_type not in _PHOTO_EXT:
+        raise HTTPException(status_code=415, detail=f"Formato non supportato: {content_type}. Usa JPEG/PNG/WebP.")
+    data = await file.read()
+    if len(data) > MAX_PHOTO_BYTES:
+        raise HTTPException(status_code=413, detail=f"Foto troppo grande (max {MAX_PHOTO_BYTES // (1024*1024)}MB)")
+    if not data:
+        raise HTTPException(status_code=400, detail="File vuoto")
+    photo_id = str(uuid.uuid4())
+    path = _photo_path(order_id, photo_id, content_type)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
+    now = now_utc()
+    await execute(
+        """INSERT INTO order_photos (id, work_order_id, uploaded_by, uploaded_by_name, content_type, size_bytes, created_at)
+           VALUES ($1,$2,$3,$4,$5,$6,$7)""",
+        photo_id, order_id, user["id"], user["full_name"], content_type, len(data), now,
+    )
+    return OrderPhoto(
+        id=photo_id, work_order_id=order_id, uploaded_by=user["id"], uploaded_by_name=user["full_name"],
+        content_type=content_type, size_bytes=len(data), created_at=now,
+    )
+
+
+@api.get("/work-orders/{order_id}/photos", response_model=List[OrderPhoto])
+async def list_order_photos(order_id: str, user: dict = Depends(get_current_user)):
+    await _order_or_403(order_id, user)
+    rows = await fetch(
+        "SELECT * FROM order_photos WHERE work_order_id=$1 ORDER BY created_at DESC", order_id
+    )
+    return [OrderPhoto(**dict(r)) for r in rows]
+
+
+@api.get("/photos/{photo_id}/file")
+async def get_photo_file(photo_id: str, token: Optional[str] = None, bearer: Optional[str] = Depends(oauth2)):
+    # token via header (fetch) oppure via query string (tag <img> del browser)
+    user = await _user_from_token(bearer or token)
+    row = await fetchrow("SELECT * FROM order_photos WHERE id=$1", photo_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Foto non trovata")
+    await _order_or_403(row["work_order_id"], user)
+    path = _photo_path(row["work_order_id"], photo_id, row["content_type"])
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="File mancante sul server")
+    return FileResponse(path, media_type=row["content_type"])
+
+
+@api.delete("/photos/{photo_id}")
+async def delete_photo(photo_id: str, admin: dict = Depends(require_admin)):
+    row = await fetchrow("SELECT * FROM order_photos WHERE id=$1", photo_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Foto non trovata")
+    _photo_path(row["work_order_id"], photo_id, row["content_type"]).unlink(missing_ok=True)
+    await execute("DELETE FROM order_photos WHERE id=$1", photo_id)
     return {"ok": True}
 
 
