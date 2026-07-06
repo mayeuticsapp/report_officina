@@ -1,12 +1,13 @@
 import { useCallback, useState } from "react";
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity, Modal, TextInput, ActivityIndicator,
-  KeyboardAvoidingView, Platform, Alert, RefreshControl,
+  KeyboardAvoidingView, Platform, RefreshControl,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { useFocusEffect } from "expo-router";
 import { api, User } from "@/src/api/client";
+import { confirmDialog, showAlert } from "@/src/utils/dialog";
 import { colors, spacing } from "@/src/theme";
 
 export default function WorkersAdmin() {
@@ -22,7 +23,7 @@ export default function WorkersAdmin() {
     try {
       const list = await api<User[]>("/users");
       setUsers(list);
-    } catch (e: any) { Alert.alert("Errore", e.message); }
+    } catch (e: any) { showAlert("Errore", e.message); }
     finally { setLoading(false); setRefreshing(false); }
   }, []);
 
@@ -41,7 +42,7 @@ export default function WorkersAdmin() {
 
   const save = async () => {
     if (!form.full_name.trim() || (!editing && (!form.username.trim() || !form.password))) {
-      Alert.alert("Campi obbligatori", "Nome, username e password sono richiesti");
+      showAlert("Campi obbligatori", "Nome, username e password sono richiesti");
       return;
     }
     setSubmitting(true);
@@ -63,20 +64,15 @@ export default function WorkersAdmin() {
       }
       setModalOpen(false);
       await load();
-    } catch (e: any) { Alert.alert("Errore", e.message); }
+    } catch (e: any) { showAlert("Errore", e.message); }
     finally { setSubmitting(false); }
   };
 
-  const remove = (u: User) => {
-    Alert.alert("Elimina utente", `Eliminare ${u.full_name}?`, [
-      { text: "Annulla", style: "cancel" },
-      {
-        text: "Elimina", style: "destructive", onPress: async () => {
-          try { await api(`/users/${u.id}`, { method: "DELETE" }); await load(); }
-          catch (e: any) { Alert.alert("Errore", e.message); }
-        },
-      },
-    ]);
+  const remove = async (u: User) => {
+    const ok = await confirmDialog("Elimina utente", `Eliminare ${u.full_name}?`, "Elimina");
+    if (!ok) return;
+    try { await api(`/users/${u.id}`, { method: "DELETE" }); await load(); }
+    catch (e: any) { showAlert("Errore", e.message); }
   };
 
   return (

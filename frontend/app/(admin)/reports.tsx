@@ -1,11 +1,11 @@
 import { useCallback, useState } from "react";
 import {
-  View, Text, StyleSheet, ScrollView, TouchableOpacity, ActivityIndicator, Share, Alert,
-} from "react-native";
+  View, Text, StyleSheet, ScrollView, TouchableOpacity, ActivityIndicator, Share, } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { useFocusEffect } from "expo-router";
 import { api, DailyReport, User, WorkerDailyStats } from "@/src/api/client";
+import { showAlert } from "@/src/utils/dialog";
 import { colors, spacing } from "@/src/theme";
 
 type DateChoice = "today" | "yesterday";
@@ -59,7 +59,7 @@ export default function Reports() {
       const r = await api<DailyReport>(`/reports/daily?${params.toString()}`);
       setReport(r);
     } catch (e: any) {
-      Alert.alert("Errore", e?.message || "Impossibile generare il report");
+      showAlert("Errore", e?.message || "Impossibile generare il report");
     } finally { setLoading(false); }
   };
 

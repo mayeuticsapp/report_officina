@@ -1,13 +1,14 @@
 import { useCallback, useState } from "react";
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity, ActivityIndicator, Modal,
-  TextInput, KeyboardAvoidingView, Platform, Image, Alert, Linking,
+  TextInput, KeyboardAvoidingView, Platform, Image, Linking,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useLocalSearchParams, useRouter, useFocusEffect } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import * as ImagePicker from "expo-image-picker";
 import { api, WorkEvent, WorkOrder, EventType } from "@/src/api/client";
+import { confirmDialog, showAlert } from "@/src/utils/dialog";
 import { VoiceChat } from "@/src/components/VoiceChat";
 import { colors, spacing } from "@/src/theme";
 
@@ -32,7 +33,7 @@ export default function OrderDetail() {
       setOrder(o);
       setEvents(evs);
     } catch (e: any) {
-      Alert.alert("Errore", e?.message || "Impossibile caricare la commessa");
+      showAlert("Errore", e?.message || "Impossibile caricare la commessa");
     } finally { setLoading(false); }
   }, [id]);
 
@@ -54,13 +55,10 @@ export default function OrderDetail() {
     const perm = await ImagePicker.requestCameraPermissionsAsync();
     if (perm.status !== "granted") {
       if (!perm.canAskAgain) {
-        Alert.alert(
-          "Permesso fotocamera",
-          "Serve accesso alla fotocamera per allegare foto. Apri le Impostazioni per attivarlo.",
-          [{ text: "Annulla", style: "cancel" }, { text: "Impostazioni", onPress: () => Linking.openSettings() }]
-        );
+        const goSettings = await confirmDialog("Permesso fotocamera", "Serve accesso alla fotocamera per allegare foto. Apri le Impostazioni per attivarlo.", "Impostazioni");
+        if (goSettings) Linking.openSettings();
       } else {
-        Alert.alert("Permesso negato", "Non posso accedere alla fotocamera senza permesso.");
+        showAlert("Permesso negato", "Non posso accedere alla fotocamera senza permesso.");
       }
       return;
     }
@@ -76,7 +74,7 @@ export default function OrderDetail() {
   const pickFromLibrary = async () => {
     const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
     if (perm.status !== "granted") {
-      Alert.alert("Permesso galleria", "Serve accesso alla galleria per allegare foto.");
+      showAlert("Permesso galleria", "Serve accesso alla galleria per allegare foto.");
       return;
     }
     const res = await ImagePicker.launchImageLibraryAsync({
@@ -91,7 +89,7 @@ export default function OrderDetail() {
   const submitAction = async () => {
     if (!modalOpen || !order) return;
     if ((modalOpen === "PAUSE" || modalOpen === "COMPLETE") && !reason.trim()) {
-      Alert.alert("Motivo richiesto", `Inserisci un motivo per ${modalOpen === "PAUSE" ? "la sospensione" : "il completamento"}.`);
+      showAlert("Motivo richiesto", `Inserisci un motivo per ${modalOpen === "PAUSE" ? "la sospensione" : "il completamento"}.`);
       return;
     }
     setSubmitting(true);
@@ -103,7 +101,7 @@ export default function OrderDetail() {
       setModalOpen(null);
       await load();
     } catch (e: any) {
-      Alert.alert("Errore", e?.message || "Impossibile salvare");
+      showAlert("Errore", e?.message || "Impossibile salvare");
     } finally { setSubmitting(false); }
   };
 

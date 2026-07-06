@@ -1,12 +1,13 @@
 import { useCallback, useState } from "react";
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity, Modal, TextInput, ActivityIndicator,
-  KeyboardAvoidingView, Platform, Alert, RefreshControl,
+  KeyboardAvoidingView, Platform, RefreshControl,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { useFocusEffect, useRouter } from "expo-router";
 import { api, User, WorkOrder } from "@/src/api/client";
+import { confirmDialog, showAlert } from "@/src/utils/dialog";
 import { colors, spacing } from "@/src/theme";
 
 const statusMap: Record<string, { c: string; label: string }> = {
@@ -37,7 +38,7 @@ export default function OrdersAdmin() {
       ]);
       setOrders(o);
       setWorkers(u.filter((x) => x.role === "worker"));
-    } catch (e: any) { Alert.alert("Errore", e.message); }
+    } catch (e: any) { showAlert("Errore", e.message); }
     finally { setLoading(false); setRefreshing(false); }
   }, []);
 
@@ -68,7 +69,7 @@ export default function OrdersAdmin() {
 
   const save = async () => {
     if (!form.plate.trim() || !form.customer.trim() || !form.vehicle.trim()) {
-      Alert.alert("Campi obbligatori", "Targa, cliente e veicolo sono richiesti");
+      showAlert("Campi obbligatori", "Targa, cliente e veicolo sono richiesti");
       return;
     }
     setSubmitting(true);
@@ -88,18 +89,15 @@ export default function OrdersAdmin() {
       }
       setModalOpen(false);
       await load();
-    } catch (e: any) { Alert.alert("Errore", e.message); }
+    } catch (e: any) { showAlert("Errore", e.message); }
     finally { setSubmitting(false); }
   };
 
-  const remove = (o: WorkOrder) => {
-    Alert.alert("Elimina commessa", `Eliminare ${o.plate}?`, [
-      { text: "Annulla", style: "cancel" },
-      { text: "Elimina", style: "destructive", onPress: async () => {
-        try { await api(`/work-orders/${o.id}`, { method: "DELETE" }); await load(); }
-        catch (e: any) { Alert.alert("Errore", e.message); }
-      }},
-    ]);
+  const remove = async (o: WorkOrder) => {
+    const ok = await confirmDialog("Elimina commessa", `Eliminare ${o.plate}?`, "Elimina");
+    if (!ok) return;
+    try { await api(`/work-orders/${o.id}`, { method: "DELETE" }); await load(); }
+    catch (e: any) { showAlert("Errore", e.message); }
   };
 
   return (

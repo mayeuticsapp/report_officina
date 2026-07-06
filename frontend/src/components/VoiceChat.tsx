@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity, TextInput, ActivityIndicator,
-  Alert, Linking, Animated, Platform,
+  Linking, Animated, Platform,
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import * as ImagePicker from "expo-image-picker";
@@ -9,6 +9,7 @@ import {
   AudioModule, RecordingPresets, useAudioRecorder,
 } from "expo-audio";
 import { api, Conversation, ConversationTurn, SchedaTecnica, VoiceTurnResp, transcribeAudio } from "@/src/api/client";
+import { confirmDialog, showAlert } from "@/src/utils/dialog";
 import { colors, spacing } from "@/src/theme";
 
 type Props = { orderId: string; readOnly?: boolean };
@@ -68,7 +69,7 @@ export function VoiceChat({ orderId, readOnly }: Props) {
       setScheda(resp.scheda_tecnica);
       setTurns((prev) => [...prev, resp.turn]);
     } catch (e: any) {
-      Alert.alert("Errore", e?.message || "AI non disponibile");
+      showAlert("Errore", e?.message || "AI non disponibile");
       setTurns((prev) => prev.filter((t) => t !== optimistic));
     } finally {
       setSending(false);
@@ -87,13 +88,10 @@ export function VoiceChat({ orderId, readOnly }: Props) {
       const perm = await AudioModule.requestRecordingPermissionsAsync();
       if (!perm.granted) {
         if (!perm.canAskAgain) {
-          Alert.alert(
-            "Microfono",
-            "Serve il permesso microfono. Aprire le impostazioni?",
-            [{ text: "Annulla" }, { text: "Impostazioni", onPress: () => Linking.openSettings() }]
-          );
+          const goSettings = await confirmDialog("Microfono", "Serve il permesso microfono. Aprire le impostazioni?", "Impostazioni");
+          if (goSettings) Linking.openSettings();
         } else {
-          Alert.alert("Permesso negato", "Non posso registrare senza permesso microfono.");
+          showAlert("Permesso negato", "Non posso registrare senza permesso microfono.");
         }
         return;
       }
@@ -102,7 +100,7 @@ export function VoiceChat({ orderId, readOnly }: Props) {
       setRecording(true);
     } catch (e: any) {
       setRecording(false);
-      Alert.alert("Errore registrazione", e?.message || "Impossibile registrare");
+      showAlert("Errore registrazione", e?.message || "Impossibile registrare");
     }
   };
 
@@ -119,11 +117,11 @@ export function VoiceChat({ orderId, readOnly }: Props) {
       if (transcript.trim()) {
         await sendTurn(transcript);
       } else {
-        Alert.alert("Nulla trascritto", "Non ho capito niente. Riprova avvicinando il microfono.");
+        showAlert("Nulla trascritto", "Non ho capito niente. Riprova avvicinando il microfono.");
       }
     } catch (e: any) {
       setTranscribing(false);
-      Alert.alert("Errore", e?.message || "Impossibile trascrivere");
+      showAlert("Errore", e?.message || "Impossibile trascrivere");
     }
   };
 
@@ -131,10 +129,9 @@ export function VoiceChat({ orderId, readOnly }: Props) {
     const camPerm = await ImagePicker.requestCameraPermissionsAsync();
     if (!camPerm.granted) {
       if (!camPerm.canAskAgain) {
-        Alert.alert("Fotocamera", "Serve permesso fotocamera. Apri Impostazioni.", [
-          { text: "Annulla" }, { text: "Impostazioni", onPress: () => Linking.openSettings() },
-        ]);
-      } else Alert.alert("Permesso negato", "Non posso scattare senza permesso.");
+        const goSettings = await confirmDialog("Fotocamera", "Serve permesso fotocamera. Apri Impostazioni.", "Impostazioni");
+        if (goSettings) Linking.openSettings();
+      } else showAlert("Permesso negato", "Non posso scattare senza permesso.");
       return;
     }
     const res = await ImagePicker.launchCameraAsync({ quality: 0.5, base64: true, mediaTypes: ["images"] });
@@ -148,10 +145,10 @@ export function VoiceChat({ orderId, readOnly }: Props) {
       if (out.plate) {
         await sendTurn(`La targa è ${out.plate}`);
       } else {
-        Alert.alert("Targa non letta", `Risposta AI: ${out.raw}`);
+        showAlert("Targa non letta", `Risposta AI: ${out.raw}`);
       }
     } catch (e: any) {
-      Alert.alert("Errore OCR", e?.message || "Impossibile leggere targa");
+      showAlert("Errore OCR", e?.message || "Impossibile leggere targa");
     } finally { setScanning(false); }
   };
 
