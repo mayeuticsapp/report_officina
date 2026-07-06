@@ -1,11 +1,12 @@
 import { useCallback, useState } from "react";
 import {
-  View, Text, StyleSheet, ScrollView, TouchableOpacity, ActivityIndicator, Share, } from "react-native";
+  View, Text, StyleSheet, ScrollView, TouchableOpacity, ActivityIndicator, Share, Platform, } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { useFocusEffect } from "expo-router";
 import { api, DailyReport, User, WorkerDailyStats } from "@/src/api/client";
 import { showAlert } from "@/src/utils/dialog";
+import { printReport } from "@/src/utils/printReport";
 import { colors, spacing } from "@/src/theme";
 
 type DateChoice = "today" | "yesterday";
@@ -92,6 +93,13 @@ export default function Reports() {
 
   const exportReport = async (workerFilter?: WorkerDailyStats) => {
     if (!report) return;
+    // Su web: finestra di stampa (salva PDF o stampa su carta).
+    if (Platform.OS === "web") {
+      const opened = printReport(report, workerFilter);
+      if (!opened) showAlert("Popup bloccato", "Consenti i popup per questo sito per esportare il report.");
+      return;
+    }
+    // Su nativo: condivisione (WhatsApp, email, ...).
     const text = buildExportText(report, workerFilter);
     try {
       await Share.share({ message: text, title: workerFilter ? `Report ${workerFilter.full_name}` : "Report Officina" });
