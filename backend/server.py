@@ -15,7 +15,7 @@ from typing import List, Optional, Literal
 
 import asyncpg
 import httpx
-from fastapi import FastAPI, APIRouter, HTTPException, Depends, status, UploadFile, File
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, status, UploadFile, File, Header
 from fastapi.responses import FileResponse
 from fastapi.security import OAuth2PasswordBearer
 from starlette.middleware.cors import CORSMiddleware
@@ -44,6 +44,7 @@ UPLOADS_DIR = Path(os.environ.get("UPLOADS_DIR", str(ROOT_DIR / "uploads")))
 MAX_PHOTO_BYTES = int(os.environ.get("MAX_PHOTO_BYTES", str(15 * 1024 * 1024)))  # 15MB
 OPENAPI_TOKEN = os.environ.get("OPENAPI_TOKEN", "")
 OPENAPI_BASE_URL = os.environ.get("OPENAPI_BASE_URL", "https://automotive.openapi.com")
+OMNIUS_KEY = os.environ.get("OMNIUS_KEY", "")
 
 mistral_client = Mistral(api_key=MISTRAL_API_KEY)
 
@@ -437,6 +438,10 @@ async def startup():
         """)
         await conn.execute("ALTER TABLE work_orders ADD COLUMN IF NOT EXISTS created_by TEXT")
         await conn.execute("ALTER TABLE work_orders ADD COLUMN IF NOT EXISTS created_by_name TEXT")
+        await conn.execute("ALTER TABLE work_orders ADD COLUMN IF NOT EXISTS star_doc_id TEXT")
+        await conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_work_orders_star_doc_id ON work_orders (star_doc_id) WHERE star_doc_id IS NOT NULL"
+        )
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS order_photos (
                 id TEXT PRIMARY KEY,
@@ -599,6 +604,89 @@ async def propose_work_order(body: WorkOrderPropose, user: dict = Depends(get_cu
         scheda_tecnica=SchedaTecnica(**scheda), created_by=user["id"], created_by_name=user["full_name"],
         created_at=now, updated_at=now
     )
+
+
+# ---- Integrazione Omnius (STAR Magneti Marelli) ----
+async def require_omnius_key(x_omnius_key: Optional[str] = Header(None)):
+    if not OMNIUS_KEY:
+        raise HTTPException(status_code=503, detail="Integrazione Omnius non configurata")
+    if not x_omnius_key or x_omnius_key != OMNIUS_KEY:
+        raise HTTPException(status_code=401, detail="Chiave Omnius non valida")
+    return True
+
+
+class OmniusSchedaIn(BaseModel):
+    star_doc_id: str
+    plate: str
+    vin: Optional[str] = None
+    customer: Optional[str] = None
+    vehicle: Optional[str] = None
+    description: Optional[str] = None
+    note: Optional[str] = None
+    dtc_codes: List[str] = Field(default_factory=list)
+
+
+class OmniusSchedaOut(BaseModel):
+    action: Literal["created", "updated"]
+    work_order: WorkOrder
+
+
+@api.post("/v1/omnius/commesse", response_model=OmniusSchedaOut, dependencies=[Depends(require_omnius_key)])
+async def omnius_ingest_scheda(body: OmniusSchedaIn):
+    """Riceve da Omnius una scheda STAR (diagnosi/accettazione/preventivo).
+    Idempotente su star_doc_id: stesso id -> aggiorna la commessa esistente invece di duplicarla.
+    Se la commessa non esiste, la crea in stato 'pending' (appare in 'DA APPROVARE' per il titolare)."""
+    star_doc_id = body.star_doc_id.strip()
+    if not star_doc_id:
+        raise HTTPException(status_code=400, detail="star_doc_id obbligatorio")
+    plate = body.plate.strip().upper().replace(" ", "")
+    if not plate:
+        raise HTTPException(status_code=400, detail="plate obbligatoria")
+
+    note_parts = []
+    if body.note and body.note.strip():
+        note_parts.append(body.note.strip())
+    if body.dtc_codes:
+        note_parts.append("DTC: " + ", ".join(body.dtc_codes))
+    extra_note = "\n".join(note_parts) if note_parts else None
+
+    existing = await fetchrow("SELECT * FROM work_orders WHERE star_doc_id=$1", star_doc_id)
+    now = now_utc()
+
+    if existing:
+        scheda_raw = existing.get("scheda_tecnica") or {}
+        if isinstance(scheda_raw, str):
+            scheda_raw = json.loads(scheda_raw)
+        merged_scheda = dict(scheda_raw)
+        if extra_note:
+            prev = (merged_scheda.get("note") or "").strip()
+            merged_scheda["note"] = f"{prev}\n{extra_note}".strip() if prev else extra_note
+
+        parts = ["scheda_tecnica=$1::jsonb", "updated_at=$2"]
+        vals: list = [json.dumps(merged_scheda), now]
+        i = 3
+        if body.description and body.description.strip():
+            parts.append(f"description=${i}"); vals.append(body.description.strip()); i += 1
+        if body.vin and body.vin.strip():
+            parts.append(f"vin=${i}"); vals.append(body.vin.strip()); i += 1
+        vals.append(existing["id"])
+        row = await fetchrow(f"UPDATE work_orders SET {', '.join(parts)} WHERE id=${i} RETURNING *", *vals)
+        return OmniusSchedaOut(action="updated", work_order=row_to_workorder(row))
+
+    new_id = str(uuid.uuid4())
+    scheda = SchedaTecnica(note=extra_note).model_dump()
+    customer = (body.customer or "Cliente da definire").strip()
+    vehicle = (body.vehicle or "Veicolo da definire").strip()
+    description = (body.description or "Scheda ricevuta da Omnius/STAR").strip()
+    await execute(
+        """INSERT INTO work_orders
+           (id, plate, vin, customer, vehicle, description, assigned_worker_ids, status, scheda_tecnica, created_by, created_by_name, star_doc_id, created_at, updated_at)
+           VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9::jsonb,$10,$11,$12,$13,$14)""",
+        new_id, plate, body.vin, customer, vehicle, description,
+        json.dumps([]), "pending", json.dumps(scheda), "omnius", "Omnius (STAR)", star_doc_id, now, now
+    )
+    row = await fetchrow("SELECT * FROM work_orders WHERE id=$1", new_id)
+    return OmniusSchedaOut(action="created", work_order=row_to_workorder(row))
 
 
 @api.get("/work-orders/{order_id}", response_model=WorkOrder)
