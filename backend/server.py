@@ -4,6 +4,7 @@ FastAPI + PostgreSQL (asyncpg) + JWT + Mistral AI
 """
 import os
 import uuid
+import asyncio
 import logging
 import json
 import re
@@ -456,6 +457,22 @@ async def startup():
         await conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_order_photos_order ON order_photos (work_order_id, created_at)"
         )
+        # Memoria storica (RAG): estensione pgvector + tabella embeddings dei casi completati
+        try:
+            await conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS case_embeddings (
+                    work_order_id TEXT PRIMARY KEY,
+                    content TEXT NOT NULL,
+                    embedding vector(1024) NOT NULL,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """)
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_case_embeddings_vec ON case_embeddings USING hnsw (embedding vector_cosine_ops)"
+            )
+        except Exception as e:
+            logger.warning(f"pgvector non disponibile, memoria storica disattivata: {e}")
         UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
 
         existing = await conn.fetchrow("SELECT id FROM users WHERE username=$1", SEED_ADMIN_USERNAME)
@@ -466,6 +483,9 @@ async def startup():
                 "Titolare", "admin", now_utc()
             )
             logger.info(f"Admin creato: {SEED_ADMIN_USERNAME}")
+
+    # Backfill in background: indicizza i casi completati che mancano dalla memoria storica
+    asyncio.create_task(_backfill_case_embeddings())
 
 
 @app.on_event("shutdown")
@@ -730,6 +750,10 @@ async def update_work_order(order_id: str, body: WorkOrderUpdate, admin: dict = 
 async def delete_work_order(order_id: str, admin: dict = Depends(require_admin)):
     await execute("DELETE FROM work_events WHERE work_order_id=$1", order_id)
     await execute("DELETE FROM order_photos WHERE work_order_id=$1", order_id)
+    try:
+        await execute("DELETE FROM case_embeddings WHERE work_order_id=$1", order_id)
+    except Exception:
+        pass  # tabella assente se pgvector non è disponibile
     # rimuovi anche i file su disco
     photo_dir = UPLOADS_DIR / order_id
     if photo_dir.is_dir():
@@ -887,6 +911,10 @@ async def add_event(order_id: str, body: WorkEventCreate, user: dict = Depends(g
         "UPDATE work_orders SET status=$1, updated_at=$2 WHERE id=$3",
         new_status_map[body.type], now_utc(), order_id
     )
+
+    # A lavoro completato, il caso entra nella memoria storica dell'officina (in background)
+    if body.type == "COMPLETE":
+        asyncio.create_task(_upsert_case_embedding(order_id))
 
     return WorkEvent(
         id=event_id, work_order_id=order_id, worker_id=user["id"],
@@ -1287,6 +1315,120 @@ def _extract_json_block(s: str) -> Optional[dict]:
         return None
 
 
+# ---- Memoria storica dell'officina (RAG su pgvector) ----
+EMBED_MODEL = os.environ.get("MISTRAL_EMBED_MODEL", "mistral-embed")
+
+
+def _vec_literal(vec: List[float]) -> str:
+    return "[" + ",".join(f"{x:.6f}" for x in vec) + "]"
+
+
+async def _embed_text(text: str) -> Optional[str]:
+    """Testo -> literal vettore pgvector. None se l'API fallisce (soft-fail)."""
+    try:
+        resp = await mistral_client.embeddings.create_async(model=EMBED_MODEL, inputs=[text[:20000]])
+        return _vec_literal(resp.data[0].embedding)
+    except Exception as e:
+        logger.warning(f"embedding fallito: {e}")
+        return None
+
+
+def _build_case_content(row: dict, events: List[dict], turns: List[dict]) -> str:
+    """Costruisce il 'caso' testuale di una commessa: veicolo, problema, lavori, ricambi, dialogo."""
+    scheda = row.get("scheda_tecnica") or {}
+    if isinstance(scheda, str):
+        scheda = json.loads(scheda)
+    parts = [
+        f"VEICOLO: {row.get('vehicle', '')} — targa {row.get('plate', '')}",
+    ]
+    for label, key in (("MARCA", "marca"), ("MODELLO", "modello"), ("ANNO", "anno"), ("MOTORE", "motore"), ("KM", "km")):
+        if scheda.get(key):
+            parts.append(f"{label}: {scheda[key]}")
+    if row.get("description"):
+        parts.append(f"PROBLEMA/LAVORAZIONE: {row['description']}")
+    if scheda.get("lavori_fatti"):
+        parts.append("LAVORI FATTI: " + "; ".join(scheda["lavori_fatti"]))
+    if scheda.get("lavori_da_fare"):
+        parts.append("LAVORI RIMASTI: " + "; ".join(scheda["lavori_da_fare"]))
+    if scheda.get("ricambi_necessari"):
+        parts.append("RICAMBI: " + "; ".join(scheda["ricambi_necessari"]))
+    if scheda.get("note"):
+        parts.append(f"NOTE: {scheda['note']}")
+    complete_reasons = [e.get("reason") for e in events if e.get("type") == "COMPLETE" and e.get("reason")]
+    if complete_reasons:
+        parts.append("ESITO: " + " | ".join(complete_reasons))
+    dialog = " / ".join(t.get("text", "") for t in turns if t.get("role") == "user")
+    if dialog:
+        parts.append(f"DIALOGO OPERAIO: {dialog[:1500]}")
+    return "\n".join(parts)[:6000]
+
+
+async def _upsert_case_embedding(order_id: str):
+    """Indicizza (o re-indicizza) una commessa completata nella memoria storica."""
+    try:
+        row = await fetchrow("SELECT * FROM work_orders WHERE id=$1", order_id)
+        if not row:
+            return
+        events = await fetch("SELECT type, reason FROM work_events WHERE work_order_id=$1 ORDER BY timestamp ASC", order_id)
+        convo = await fetchrow("SELECT turns FROM conversations WHERE work_order_id=$1", order_id)
+        turns_raw = convo["turns"] if convo else []
+        if isinstance(turns_raw, str):
+            turns_raw = json.loads(turns_raw)
+        content = _build_case_content(row, events, turns_raw or [])
+        vec = await _embed_text(content)
+        if not vec:
+            return
+        await execute(
+            """INSERT INTO case_embeddings (work_order_id, content, embedding, updated_at)
+               VALUES ($1, $2, $3::vector, $4)
+               ON CONFLICT (work_order_id) DO UPDATE SET content=$2, embedding=$3::vector, updated_at=$4""",
+            order_id, content, vec, now_utc()
+        )
+        logger.info(f"memoria storica: indicizzata commessa {order_id}")
+    except Exception as e:
+        logger.warning(f"memoria storica: indicizzazione fallita per {order_id}: {e}")
+
+
+async def _backfill_case_embeddings():
+    """All'avvio: indicizza le commesse completate che mancano dalla memoria storica."""
+    try:
+        await asyncio.sleep(5)  # lascia finire lo startup
+        rows = await fetch(
+            """SELECT w.id FROM work_orders w
+               LEFT JOIN case_embeddings c ON c.work_order_id = w.id
+               WHERE w.status='completed' AND c.work_order_id IS NULL LIMIT 200"""
+        )
+        for r in rows:
+            await _upsert_case_embedding(r["id"])
+            await asyncio.sleep(0.3)
+        if rows:
+            logger.info(f"memoria storica: backfill di {len(rows)} commesse completato")
+    except Exception as e:
+        logger.warning(f"memoria storica: backfill fallito: {e}")
+
+
+async def _find_similar_cases(query_text: str, exclude_order_id: str, limit: int = 3) -> List[dict]:
+    """Cerca nella memoria storica i casi più simili al problema attuale."""
+    vec = await _embed_text(query_text)
+    if not vec:
+        return []
+    try:
+        rows = await fetch(
+            """SELECT c.work_order_id, c.content, w.plate, w.vehicle,
+                      1 - (c.embedding <=> $1::vector) AS similarity
+               FROM case_embeddings c
+               JOIN work_orders w ON w.id = c.work_order_id
+               WHERE c.work_order_id != $2
+               ORDER BY c.embedding <=> $1::vector
+               LIMIT $3""",
+            vec, exclude_order_id, limit
+        )
+        return [r for r in rows if r["similarity"] > 0.55]
+    except Exception as e:
+        logger.warning(f"memoria storica: ricerca fallita: {e}")
+        return []
+
+
 @api.post("/work-orders/{order_id}/voice-turn", response_model=VoiceTurnOut)
 async def voice_turn(order_id: str, body: VoiceTurnIn, user: dict = Depends(get_current_user)):
     row = await fetchrow("SELECT * FROM work_orders WHERE id=$1", order_id)
@@ -1313,11 +1455,34 @@ async def voice_turn(order_id: str, body: VoiceTurnIn, user: dict = Depends(get_
         scheda_raw = json.loads(scheda_raw)
     current_scheda = scheda_raw
 
+    # Memoria storica: cerca casi simili già risolti in questa officina
+    rag_block = ""
+    try:
+        query = " ".join(filter(None, [
+            row.get("vehicle") or "",
+            current_scheda.get("marca") or "", current_scheda.get("modello") or "",
+            current_scheda.get("motore") or "", user_text,
+        ]))
+        similar = await _find_similar_cases(query, order_id)
+        if similar:
+            casi = "\n---\n".join(
+                f"[{s['plate']} — {s['vehicle']} — somiglianza {s['similarity']:.0%}]\n{s['content'][:700]}"
+                for s in similar
+            )
+            rag_block = (
+                "\n\nCASI SIMILI GIÀ RISOLTI IN QUESTA OFFICINA "
+                "(usali solo se pertinenti; quando li richiami cita la targa del caso):\n" + casi
+            )
+            logger.info(f"memoria storica: {len(similar)} casi simili per {order_id}")
+    except Exception as e:
+        logger.warning(f"memoria storica: retrieval fallito: {e}")
+
     try:
         messages = [{"role": "system", "content": AI_SYSTEM_PROMPT}]
         prefix = (
             f"COMMESSA: targa={row['plate']}, veicolo={row['vehicle']}, cliente={row['customer']}\n"
             f"SCHEDA ATTUALE: {json.dumps(current_scheda, ensure_ascii=False)}"
+            f"{rag_block}"
         )
         for t in turns[-6:]:
             role = "user" if t["role"] == "user" else "assistant"
