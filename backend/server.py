@@ -14,6 +14,7 @@ from datetime import datetime, timezone, timedelta
 from typing import List, Optional, Literal
 
 import asyncpg
+import httpx
 from fastapi import FastAPI, APIRouter, HTTPException, Depends, status, UploadFile, File
 from fastapi.responses import FileResponse
 from fastapi.security import OAuth2PasswordBearer
@@ -41,6 +42,8 @@ SEED_ADMIN_USERNAME = os.environ.get("SEED_ADMIN_USERNAME", "admin")
 SEED_ADMIN_PASSWORD = os.environ.get("SEED_ADMIN_PASSWORD", "admin123")
 UPLOADS_DIR = Path(os.environ.get("UPLOADS_DIR", str(ROOT_DIR / "uploads")))
 MAX_PHOTO_BYTES = int(os.environ.get("MAX_PHOTO_BYTES", str(15 * 1024 * 1024)))  # 15MB
+OPENAPI_TOKEN = os.environ.get("OPENAPI_TOKEN", "")
+OPENAPI_BASE_URL = os.environ.get("OPENAPI_BASE_URL", "https://automotive.openapi.com")
 
 mistral_client = Mistral(api_key=MISTRAL_API_KEY)
 
@@ -1001,6 +1004,103 @@ async def ocr_plate(body: PlateOcrIn, user: dict = Depends(get_current_user)):
     except Exception as e:
         logger.warning(f"plate ocr soft-fail: {e}")
         return PlateOcrOut(plate=None, raw="NON_TROVATA")
+
+
+# ---- Dati veicolo ufficiali (Openapi.com — Italian Car Check) ----
+class PlateLookupOut(BaseModel):
+    found: bool
+    scheda_tecnica: SchedaTecnica
+    turn: Optional[ConversationTurn] = None
+    raw: Optional[dict] = None
+
+
+def _compose_motore(d: dict) -> Optional[str]:
+    parts = []
+    if d.get("EngineSize"):
+        parts.append(f"{d['EngineSize']}cc")
+    if d.get("FuelType"):
+        parts.append(d["FuelType"])
+    if d.get("PowerCV"):
+        parts.append(f"{d['PowerCV']}CV")
+    return " ".join(parts) if parts else None
+
+
+class PlateLookupIn(BaseModel):
+    plate: Optional[str] = None  # se assente, usa la targa già salvata sulla commessa
+
+
+@api.post("/work-orders/{order_id}/lookup-plate", response_model=PlateLookupOut)
+async def lookup_plate(order_id: str, body: PlateLookupIn = PlateLookupIn(), user: dict = Depends(get_current_user)):
+    if not OPENAPI_TOKEN:
+        raise HTTPException(status_code=503, detail="Servizio dati veicolo non configurato")
+    row = await _order_or_403(order_id, user)
+    plate = (body.plate or row.get("plate") or "").strip().upper().replace(" ", "")
+    if not plate:
+        raise HTTPException(status_code=400, detail="Nessuna targa disponibile")
+
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(
+                f"{OPENAPI_BASE_URL}/IT-car/{plate}",
+                headers={"Authorization": f"Bearer {OPENAPI_TOKEN}"},
+            )
+        payload = resp.json()
+    except Exception as e:
+        logger.warning(f"openapi lookup-plate failed: {e}")
+        raise HTTPException(status_code=502, detail="Servizio dati veicolo non raggiungibile")
+
+    if not payload.get("success") or not payload.get("data"):
+        scheda_raw = row.get("scheda_tecnica") or {}
+        if isinstance(scheda_raw, str):
+            scheda_raw = json.loads(scheda_raw)
+        return PlateLookupOut(found=False, scheda_tecnica=SchedaTecnica(**scheda_raw), raw=payload)
+
+    d = payload["data"]
+    scheda_raw = row.get("scheda_tecnica") or {}
+    if isinstance(scheda_raw, str):
+        scheda_raw = json.loads(scheda_raw)
+    merged = dict(scheda_raw)
+    if d.get("CarMake"):
+        merged["marca"] = d["CarMake"]
+    if d.get("CarModel"):
+        merged["modello"] = d["CarModel"]
+    if d.get("RegistrationYear"):
+        merged["anno"] = str(d["RegistrationYear"])
+    motore = _compose_motore(d)
+    if motore:
+        merged["motore"] = motore
+    if d.get("Version"):
+        note_prev = (merged.get("note") or "").strip()
+        version_note = f"Versione: {d['Version']}"
+        if version_note not in note_prev:
+            merged["note"] = f"{note_prev}\n{version_note}".strip()
+    scheda_final = SchedaTecnica(**merged)
+
+    now = now_utc()
+    summary = f"Targa {plate}: {merged.get('marca','')} {merged.get('modello','')} — dati ufficiali recuperati."
+    convo_row = await fetchrow("SELECT turns FROM conversations WHERE work_order_id=$1", order_id)
+    turns_raw = convo_row["turns"] if convo_row else []
+    if isinstance(turns_raw, str):
+        turns_raw = json.loads(turns_raw)
+    turns = turns_raw or []
+    ai_turn_d = {"role": "assistant", "text": summary, "timestamp": now.isoformat()}
+    new_turns = turns + [ai_turn_d]
+    await execute(
+        """INSERT INTO conversations (work_order_id, turns, created_at, updated_at)
+           VALUES ($1, $2::jsonb, $3, $3)
+           ON CONFLICT (work_order_id) DO UPDATE SET turns=$2::jsonb, updated_at=$3""",
+        order_id, json.dumps(new_turns), now
+    )
+    await execute(
+        "UPDATE work_orders SET scheda_tecnica=$1::jsonb, updated_at=$2 WHERE id=$3",
+        json.dumps(scheda_final.model_dump()), now, order_id
+    )
+
+    return PlateLookupOut(
+        found=True, scheda_tecnica=scheda_final,
+        turn=ConversationTurn(role="assistant", text=summary, timestamp=now),
+        raw=payload,
+    )
 
 
 # ---- Audio: transcription ----

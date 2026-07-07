@@ -8,7 +8,7 @@ import * as ImagePicker from "expo-image-picker";
 import {
   AudioModule, RecordingPresets, useAudioRecorder,
 } from "expo-audio";
-import { api, Conversation, ConversationTurn, SchedaTecnica, VoiceTurnResp, transcribeAudio } from "@/src/api/client";
+import { api, Conversation, ConversationTurn, SchedaTecnica, VoiceTurnResp, transcribeAudio, lookupPlate } from "@/src/api/client";
 import { confirmDialog, showAlert } from "@/src/utils/dialog";
 import { colors, spacing } from "@/src/theme";
 
@@ -143,7 +143,16 @@ export function VoiceChat({ orderId, readOnly }: Props) {
         body: { image_base64: res.assets[0].base64 },
       });
       if (out.plate) {
-        await sendTurn(`La targa è ${out.plate}`);
+        try {
+          const lookup = await lookupPlate(orderId, out.plate);
+          setScheda(lookup.scheda_tecnica);
+          if (lookup.turn) setTurns((prev) => [...prev, lookup.turn as ConversationTurn]);
+          if (!lookup.found) {
+            showAlert("Targa letta", `${out.plate} — dati ufficiali non disponibili, la aggiungo comunque alla scheda.`);
+          }
+        } catch (e: any) {
+          showAlert("Targa letta ma dati non recuperati", e?.message || `Targa: ${out.plate}`);
+        }
       } else {
         showAlert("Targa non letta", `Risposta AI: ${out.raw}`);
       }

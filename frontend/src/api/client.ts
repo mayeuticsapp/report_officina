@@ -125,6 +125,20 @@ export type VoiceTurnResp = {
   turn: ConversationTurn;
 };
 
+export type PlateLookupResp = {
+  found: boolean;
+  scheda_tecnica: SchedaTecnica;
+  turn: ConversationTurn | null;
+};
+
+/** Recupera i dati ufficiali del veicolo (marca, modello, motore, anno). Se plate è omessa, usa quella già salvata sulla commessa. */
+export async function lookupPlate(orderId: string, plate?: string): Promise<PlateLookupResp> {
+  return api<PlateLookupResp>(`/work-orders/${orderId}/lookup-plate`, {
+    method: "POST",
+    body: plate ? { plate } : {},
+  });
+}
+
 export type WorkerOrderStats = {
   order_id: string;
   plate: string;
