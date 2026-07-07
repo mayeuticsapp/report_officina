@@ -45,7 +45,7 @@ export async function api<T = any>(path: string, opts: ApiOptions = {}): Promise
 
 export type Role = "admin" | "worker";
 export type EventType = "START" | "PAUSE" | "RESUME" | "COMPLETE";
-export type OrderStatus = "open" | "in_progress" | "paused" | "completed";
+export type OrderStatus = "pending" | "open" | "in_progress" | "paused" | "completed";
 
 export type User = {
   id: string;
@@ -64,9 +64,24 @@ export type WorkOrder = {
   description: string;
   assigned_worker_ids: string[];
   status: OrderStatus;
+  created_by?: string | null;
+  created_by_name?: string | null;
   created_at: string;
   updated_at: string;
 };
+
+export type WorkOrderProposeIn = {
+  plate: string;
+  vin?: string;
+  customer: string;
+  vehicle: string;
+  description: string;
+};
+
+/** Un operaio apre di sua iniziativa una commessa: resta "pending" finché il titolare non la approva. */
+export async function proposeWorkOrder(body: WorkOrderProposeIn): Promise<WorkOrder> {
+  return api<WorkOrder>("/work-orders/propose", { method: "POST", body });
+}
 
 export type WorkEvent = {
   id: string;

@@ -11,6 +11,7 @@ import { confirmDialog, showAlert } from "@/src/utils/dialog";
 import { colors, spacing } from "@/src/theme";
 
 const statusMap: Record<string, { c: string; label: string }> = {
+  pending: { c: colors.paused, label: "IN ATTESA" },
   open: { c: colors.idle, label: "APERTA" },
   in_progress: { c: colors.active, label: "IN CORSO" },
   paused: { c: colors.paused, label: "IN PAUSA" },
@@ -100,6 +101,21 @@ export default function OrdersAdmin() {
     catch (e: any) { showAlert("Errore", e.message); }
   };
 
+  const approve = async (o: WorkOrder) => {
+    try { await api(`/work-orders/${o.id}`, { method: "PUT", body: { status: "open" } }); await load(); }
+    catch (e: any) { showAlert("Errore", e.message); }
+  };
+
+  const reject = async (o: WorkOrder) => {
+    const ok = await confirmDialog("Rifiuta commessa", `Rifiutare ed eliminare la proposta di ${o.plate}?`, "Rifiuta");
+    if (!ok) return;
+    try { await api(`/work-orders/${o.id}`, { method: "DELETE" }); await load(); }
+    catch (e: any) { showAlert("Errore", e.message); }
+  };
+
+  const pendingOrders = orders.filter((o) => o.status === "pending");
+  const otherOrders = orders.filter((o) => o.status !== "pending");
+
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
       <View style={styles.header}>
@@ -120,9 +136,43 @@ export default function OrdersAdmin() {
           contentContainerStyle={{ padding: spacing.lg }}
           refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); load(); }} />}
         >
-          {orders.length === 0 ? (
-            <View style={styles.empty}><Text style={styles.emptyText}>Nessuna commessa. Crea la prima.</Text></View>
-          ) : orders.map((o) => {
+          {pendingOrders.length > 0 && (
+            <View style={{ marginBottom: spacing.lg }}>
+              <Text style={styles.pendingSectionLabel}>DA APPROVARE ({pendingOrders.length})</Text>
+              {pendingOrders.map((o) => (
+                <View key={o.id} testID={`pending-order-${o.id}`} style={styles.pendingCard}>
+                  <View style={styles.cardTop}>
+                    <Text style={styles.plate}>{o.plate}</Text>
+                    <View style={[styles.pill, { backgroundColor: colors.paused }]}>
+                      <Text style={styles.pillText}>IN ATTESA</Text>
+                    </View>
+                  </View>
+                  <Text style={styles.vehicle}>{o.vehicle}</Text>
+                  <Text style={styles.customer}>Cliente: {o.customer}</Text>
+                  {o.description ? <Text style={styles.desc}>{o.description}</Text> : null}
+                  {o.created_by_name ? (
+                    <Text style={styles.proposedBy}>Proposta da {o.created_by_name}</Text>
+                  ) : null}
+                  <View style={styles.actions}>
+                    <TouchableOpacity testID={`btn-approve-order-${o.id}`} style={[styles.iconBtn, { borderColor: colors.active }]} onPress={() => approve(o)}>
+                      <Ionicons name="checkmark-outline" size={18} color={colors.active} />
+                      <Text style={[styles.iconBtnText, { color: colors.active }]}>APPROVA</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity testID={`btn-reject-order-${o.id}`} style={[styles.iconBtn, { borderColor: colors.stopped }]} onPress={() => reject(o)}>
+                      <Ionicons name="close-outline" size={18} color={colors.stopped} />
+                      <Text style={[styles.iconBtnText, { color: colors.stopped }]}>RIFIUTA</Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              ))}
+            </View>
+          )}
+
+          {otherOrders.length === 0 ? (
+            pendingOrders.length === 0 && (
+              <View style={styles.empty}><Text style={styles.emptyText}>Nessuna commessa. Crea la prima.</Text></View>
+            )
+          ) : otherOrders.map((o) => {
             const s = statusMap[o.status];
             const assigned = workers.filter((w) => o.assigned_worker_ids.includes(w.id));
             return (
@@ -227,6 +277,9 @@ const styles = StyleSheet.create({
   empty: { padding: spacing.lg, borderWidth: 1, borderColor: colors.border },
   emptyText: { color: colors.textSecondary },
   card: { borderWidth: 1, borderColor: colors.border, padding: spacing.md, marginBottom: spacing.sm },
+  pendingSectionLabel: { fontSize: 11, letterSpacing: 2.5, color: colors.paused, fontWeight: "900", marginBottom: spacing.sm },
+  pendingCard: { borderWidth: 2, borderColor: colors.paused, padding: spacing.md, marginBottom: spacing.sm, backgroundColor: "#FFFBEB" },
+  proposedBy: { fontSize: 12, color: colors.textSecondary, marginTop: spacing.sm, fontStyle: "italic" },
   cardTop: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
   plate: { fontSize: 22, fontWeight: "900", color: colors.text, letterSpacing: -0.5 },
   pill: { paddingHorizontal: 10, paddingVertical: 4 },

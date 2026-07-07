@@ -148,7 +148,7 @@ async def require_admin(user: dict = Depends(get_current_user)) -> dict:
 # ---------------- Models ----------------
 Role = Literal["admin", "worker"]
 EventType = Literal["START", "PAUSE", "RESUME", "COMPLETE"]
-OrderStatus = Literal["open", "in_progress", "paused", "completed"]
+OrderStatus = Literal["pending", "open", "in_progress", "paused", "completed"]
 
 
 class UserPublic(BaseModel):
@@ -191,6 +191,14 @@ class WorkOrderCreate(BaseModel):
     assigned_worker_ids: List[str] = Field(default_factory=list)
 
 
+class WorkOrderPropose(BaseModel):
+    plate: str
+    vin: Optional[str] = None
+    customer: str
+    vehicle: str
+    description: str
+
+
 class SchedaTecnica(BaseModel):
     marca: Optional[str] = None
     modello: Optional[str] = None
@@ -223,6 +231,8 @@ class WorkOrder(BaseModel):
     assigned_worker_ids: List[str]
     status: OrderStatus
     scheda_tecnica: SchedaTecnica = Field(default_factory=SchedaTecnica)
+    created_by: Optional[str] = None
+    created_by_name: Optional[str] = None
     created_at: datetime
     updated_at: datetime
 
@@ -346,6 +356,8 @@ def row_to_workorder(row: dict) -> WorkOrder:
         assigned_worker_ids=worker_ids,
         status=row["status"],
         scheda_tecnica=SchedaTecnica(**scheda),
+        created_by=row.get("created_by"),
+        created_by_name=row.get("created_by_name"),
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
@@ -423,6 +435,8 @@ async def startup():
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             )
         """)
+        await conn.execute("ALTER TABLE work_orders ADD COLUMN IF NOT EXISTS created_by TEXT")
+        await conn.execute("ALTER TABLE work_orders ADD COLUMN IF NOT EXISTS created_by_name TEXT")
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS order_photos (
                 id TEXT PRIMARY KEY,
@@ -561,6 +575,29 @@ async def create_work_order(body: WorkOrderCreate, admin: dict = Depends(require
         vehicle=body.vehicle, description=body.description,
         assigned_worker_ids=body.assigned_worker_ids, status="open",
         scheda_tecnica=SchedaTecnica(**scheda), created_at=now, updated_at=now
+    )
+
+
+@api.post("/work-orders/propose", response_model=WorkOrder)
+async def propose_work_order(body: WorkOrderPropose, user: dict = Depends(get_current_user)):
+    """Un operaio apre di sua iniziativa una scheda lavoro: resta 'pending' finché il titolare non la approva."""
+    new_id = str(uuid.uuid4())
+    now = now_utc()
+    scheda = SchedaTecnica().model_dump()
+    assigned = [user["id"]]
+    await execute(
+        """INSERT INTO work_orders
+           (id, plate, vin, customer, vehicle, description, assigned_worker_ids, status, scheda_tecnica, created_by, created_by_name, created_at, updated_at)
+           VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9::jsonb,$10,$11,$12,$13)""",
+        new_id, body.plate, body.vin, body.customer, body.vehicle, body.description,
+        json.dumps(assigned), "pending", json.dumps(scheda), user["id"], user["full_name"], now, now
+    )
+    return WorkOrder(
+        id=new_id, plate=body.plate, vin=body.vin, customer=body.customer,
+        vehicle=body.vehicle, description=body.description,
+        assigned_worker_ids=assigned, status="pending",
+        scheda_tecnica=SchedaTecnica(**scheda), created_by=user["id"], created_by_name=user["full_name"],
+        created_at=now, updated_at=now
     )
 
 
@@ -743,6 +780,8 @@ async def add_event(order_id: str, body: WorkEventCreate, user: dict = Depends(g
         worker_ids = json.loads(worker_ids)
     if user["role"] == "worker" and user["id"] not in worker_ids:
         raise HTTPException(status_code=403, detail="Non assegnato a questa commessa")
+    if row["status"] == "pending":
+        raise HTTPException(status_code=409, detail="Commessa in attesa di approvazione dal titolare")
 
     ai_note = await _ai_interpret_reason(body.reason or "", body.type) if body.reason else None
     event_id = str(uuid.uuid4())

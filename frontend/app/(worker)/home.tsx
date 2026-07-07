@@ -138,6 +138,7 @@ export default function WorkerHome() {
 
 function OrderCard({ order, onPress }: { order: WorkOrder; onPress: () => void }) {
   const statusMap: Record<string, { c: string; label: string }> = {
+    pending: { c: colors.paused, label: "IN ATTESA" },
     open: { c: colors.idle, label: "APERTA" },
     in_progress: { c: colors.active, label: "IN CORSO" },
     paused: { c: colors.paused, label: "IN PAUSA" },

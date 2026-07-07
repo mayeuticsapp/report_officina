@@ -41,7 +41,8 @@ export default function OrderDetail() {
   useFocusEffect(useCallback(() => { load(); }, [load]));
 
   const lastEvent = events[events.length - 1];
-  const canStart = !lastEvent || lastEvent.type === "COMPLETE";
+  const isPending = order?.status === "pending";
+  const canStart = !isPending && (!lastEvent || lastEvent.type === "COMPLETE");
   const canPause = lastEvent && (lastEvent.type === "START" || lastEvent.type === "RESUME");
   const canResume = lastEvent && lastEvent.type === "PAUSE";
   const canComplete = lastEvent && lastEvent.type !== "COMPLETE";
@@ -111,10 +112,10 @@ export default function OrderDetail() {
   }
 
   const statusColorMap: Record<string, string> = {
-    open: colors.idle, in_progress: colors.active, paused: colors.paused, completed: colors.textSecondary,
+    pending: colors.paused, open: colors.idle, in_progress: colors.active, paused: colors.paused, completed: colors.textSecondary,
   };
   const statusLabelMap: Record<string, string> = {
-    open: "APERTA", in_progress: "IN CORSO", paused: "IN PAUSA", completed: "COMPLETATA",
+    pending: "IN ATTESA", open: "APERTA", in_progress: "IN CORSO", paused: "IN PAUSA", completed: "COMPLETATA",
   };
 
   return (
@@ -160,6 +161,12 @@ export default function OrderDetail() {
       </ScrollView>
 
       {/* Action buttons - sticky bottom */}
+      {isPending ? (
+        <View style={styles.pendingBar}>
+          <Ionicons name="time-outline" size={18} color={colors.text} />
+          <Text style={styles.pendingBarText}>In attesa di approvazione dal titolare</Text>
+        </View>
+      ) : (
       <View style={styles.actionBar}>
         {canStart && (
           <ActionBtn testID="btn-start" label="INIZIA" color={colors.active} onPress={() => openAction("START")} />
@@ -174,6 +181,7 @@ export default function OrderDetail() {
           <ActionBtn testID="btn-complete" label="COMPLETA" color={colors.text} onPress={() => openAction("COMPLETE")} />
         )}
       </View>
+      )}
 
       {/* Modal for reason + photo */}
       <Modal visible={!!modalOpen} transparent animationType="slide" onRequestClose={() => setModalOpen(null)}>
@@ -346,6 +354,12 @@ const styles = StyleSheet.create({
     position: "absolute", left: 0, right: 0, bottom: 0, flexDirection: "row",
     borderTopWidth: 1, borderTopColor: colors.borderStrong, backgroundColor: colors.bg,
   },
+  pendingBar: {
+    position: "absolute", left: 0, right: 0, bottom: 0, flexDirection: "row", gap: 8,
+    alignItems: "center", justifyContent: "center", paddingVertical: 22,
+    borderTopWidth: 1, borderTopColor: colors.borderStrong, backgroundColor: colors.bgMuted,
+  },
+  pendingBarText: { fontSize: 13, fontWeight: "800", color: colors.text, letterSpacing: 0.5 },
   action: { flex: 1, paddingVertical: 22, alignItems: "center", justifyContent: "center", minHeight: 64 },
   actionText: { fontSize: 14, fontWeight: "900", letterSpacing: 3 },
   modalBackdrop: { flex: 1, backgroundColor: "rgba(0,0,0,0.5)", justifyContent: "flex-end" },
