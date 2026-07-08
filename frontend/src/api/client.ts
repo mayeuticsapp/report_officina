@@ -64,6 +64,7 @@ export type WorkOrder = {
   description: string;
   assigned_worker_ids: string[];
   status: OrderStatus;
+  scheda_tecnica?: SchedaTecnica;
   created_by?: string | null;
   created_by_name?: string | null;
   created_at: string;

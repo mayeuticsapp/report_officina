@@ -150,6 +150,11 @@ export default function OrdersAdmin() {
                   <Text style={styles.vehicle}>{o.vehicle}</Text>
                   <Text style={styles.customer}>Cliente: {o.customer}</Text>
                   {o.description ? <Text style={styles.desc}>{o.description}</Text> : null}
+                  {o.scheda_tecnica?.note ? (
+                    <Text testID={`pending-note-${o.id}`} style={styles.notePreview} numberOfLines={2}>
+                      {o.scheda_tecnica.note}
+                    </Text>
+                  ) : null}
                   {o.created_by_name ? (
                     <Text style={styles.proposedBy}>Proposta da {o.created_by_name}</Text>
                   ) : null}
@@ -280,6 +285,10 @@ const styles = StyleSheet.create({
   pendingSectionLabel: { fontSize: 11, letterSpacing: 2.5, color: colors.paused, fontWeight: "900", marginBottom: spacing.sm },
   pendingCard: { borderWidth: 2, borderColor: colors.paused, padding: spacing.md, marginBottom: spacing.sm, backgroundColor: "#FFFBEB" },
   proposedBy: { fontSize: 12, color: colors.textSecondary, marginTop: spacing.sm, fontStyle: "italic" },
+  notePreview: {
+    fontSize: 12, color: colors.text, marginTop: 6, paddingLeft: 8,
+    borderLeftWidth: 3, borderLeftColor: colors.paused, lineHeight: 17,
+  },
   cardTop: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
   plate: { fontSize: 22, fontWeight: "900", color: colors.text, letterSpacing: -0.5 },
   pill: { paddingHorizontal: 10, paddingVertical: 4 },
