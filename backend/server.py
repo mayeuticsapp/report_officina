@@ -471,6 +471,25 @@ async def startup():
             await conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_case_embeddings_vec ON case_embeddings USING hnsw (embedding vector_cosine_ops)"
             )
+            # Archivio Tecnico: documentazione ufficiale caricata dal titolare (manuali, tabelle, bollettini)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS knowledge_docs (
+                    id TEXT PRIMARY KEY,
+                    doc_id TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    chunk_idx INTEGER NOT NULL,
+                    content TEXT NOT NULL,
+                    embedding vector(1024) NOT NULL,
+                    created_by_name TEXT,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """)
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_knowledge_docs_vec ON knowledge_docs USING hnsw (embedding vector_cosine_ops)"
+            )
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_knowledge_docs_doc ON knowledge_docs (doc_id)"
+            )
         except Exception as e:
             logger.warning(f"pgvector non disponibile, memoria storica disattivata: {e}")
         UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
@@ -750,6 +769,10 @@ async def update_work_order(order_id: str, body: WorkOrderUpdate, admin: dict = 
 async def delete_work_order(order_id: str, admin: dict = Depends(require_admin)):
     await execute("DELETE FROM work_events WHERE work_order_id=$1", order_id)
     await execute("DELETE FROM order_photos WHERE work_order_id=$1", order_id)
+    try:
+        await execute("DELETE FROM case_embeddings WHERE work_order_id=$1", order_id)
+    except Exception:
+        pass
     try:
         await execute("DELETE FROM case_embeddings WHERE work_order_id=$1", order_id)
     except Exception:
@@ -1429,6 +1452,139 @@ async def _find_similar_cases(query_text: str, exclude_order_id: str, limit: int
         return []
 
 
+# ---- Archivio Tecnico (documentazione ufficiale dell'officina) ----
+class KnowledgeDocOut(BaseModel):
+    doc_id: str
+    title: str
+    chunks: int
+    created_by_name: Optional[str] = None
+    created_at: datetime
+
+
+class KnowledgeAddIn(BaseModel):
+    title: str
+    content: str
+
+
+def _chunk_text(text: str, max_len: int = 1200) -> List[str]:
+    """Spezza il testo in blocchi ~max_len rispettando i paragrafi."""
+    paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
+    chunks: List[str] = []
+    current = ""
+    for p in paragraphs:
+        if len(current) + len(p) + 2 <= max_len:
+            current = f"{current}\n\n{p}".strip()
+        else:
+            if current:
+                chunks.append(current)
+            # paragrafo singolo più lungo del limite: taglio duro
+            while len(p) > max_len:
+                chunks.append(p[:max_len])
+                p = p[max_len:]
+            current = p
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+async def _embed_texts(texts: List[str]) -> Optional[List[str]]:
+    """Più testi -> literal pgvector, in una sola chiamata API. None se fallisce."""
+    try:
+        resp = await mistral_client.embeddings.create_async(
+            model=EMBED_MODEL, inputs=[t[:20000] for t in texts]
+        )
+        return [_vec_literal(d.embedding) for d in resp.data]
+    except Exception as e:
+        logger.warning(f"embedding batch fallito: {e}")
+        return None
+
+
+async def _store_knowledge_doc(title: str, content: str, author: str) -> KnowledgeDocOut:
+    chunks = _chunk_text(content)
+    if not chunks:
+        raise HTTPException(status_code=400, detail="Documento vuoto")
+    if len(chunks) > 400:
+        raise HTTPException(status_code=413, detail=f"Documento troppo grande ({len(chunks)} blocchi, max 400)")
+    vecs = await _embed_texts(chunks)
+    if not vecs:
+        raise HTTPException(status_code=502, detail="Indicizzazione fallita (servizio AI non raggiungibile), riprova")
+    doc_id = str(uuid.uuid4())
+    now = now_utc()
+    for i, (chunk, vec) in enumerate(zip(chunks, vecs)):
+        await execute(
+            """INSERT INTO knowledge_docs (id, doc_id, title, chunk_idx, content, embedding, created_by_name, created_at)
+               VALUES ($1,$2,$3,$4,$5,$6::vector,$7,$8)""",
+            str(uuid.uuid4()), doc_id, title, i, chunk, vec, author, now
+        )
+    logger.info(f"archivio tecnico: '{title}' indicizzato in {len(chunks)} blocchi")
+    return KnowledgeDocOut(doc_id=doc_id, title=title, chunks=len(chunks), created_by_name=author, created_at=now)
+
+
+async def _find_knowledge(query_text: str, limit: int = 3) -> List[dict]:
+    """Cerca nell'Archivio Tecnico i blocchi più pertinenti alla domanda."""
+    vec = await _embed_text(query_text)
+    if not vec:
+        return []
+    try:
+        rows = await fetch(
+            """SELECT title, content, 1 - (embedding <=> $1::vector) AS similarity
+               FROM knowledge_docs
+               ORDER BY embedding <=> $1::vector
+               LIMIT $2""",
+            vec, limit
+        )
+        return [r for r in rows if r["similarity"] > 0.5]
+    except Exception as e:
+        logger.warning(f"archivio tecnico: ricerca fallita: {e}")
+        return []
+
+
+@api.post("/knowledge", response_model=KnowledgeDocOut)
+async def add_knowledge(body: KnowledgeAddIn, admin: dict = Depends(require_admin)):
+    title = body.title.strip()
+    if not title:
+        raise HTTPException(status_code=400, detail="Titolo obbligatorio")
+    return await _store_knowledge_doc(title, body.content, admin["full_name"])
+
+
+@api.post("/knowledge/upload", response_model=KnowledgeDocOut)
+async def upload_knowledge_pdf(file: UploadFile = File(...), admin: dict = Depends(require_admin)):
+    filename = file.filename or "documento.pdf"
+    if not filename.lower().endswith(".pdf"):
+        raise HTTPException(status_code=415, detail="Solo PDF. Per il testo usa 'Aggiungi testo'.")
+    data = await file.read()
+    if len(data) > 30 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="PDF troppo grande (max 30MB)")
+    try:
+        from pypdf import PdfReader
+        reader = PdfReader(io.BytesIO(data))
+        text = "\n\n".join((page.extract_text() or "") for page in reader.pages)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"PDF non leggibile: {e}")
+    if not text.strip():
+        raise HTTPException(status_code=400, detail="PDF senza testo estraibile (è una scansione? Serve un PDF testuale)")
+    title = filename.rsplit(".", 1)[0]
+    return await _store_knowledge_doc(title, text, admin["full_name"])
+
+
+@api.get("/knowledge", response_model=List[KnowledgeDocOut])
+async def list_knowledge(admin: dict = Depends(require_admin)):
+    rows = await fetch(
+        """SELECT doc_id, title, count(*) AS chunks, min(created_by_name) AS created_by_name, min(created_at) AS created_at
+           FROM knowledge_docs GROUP BY doc_id, title ORDER BY min(created_at) DESC"""
+    )
+    return [KnowledgeDocOut(**dict(r)) for r in rows]
+
+
+@api.delete("/knowledge/{doc_id}")
+async def delete_knowledge(doc_id: str, admin: dict = Depends(require_admin)):
+    async with pool.acquire() as conn:
+        res = await conn.execute("DELETE FROM knowledge_docs WHERE doc_id=$1", doc_id)
+    if res == "DELETE 0":
+        raise HTTPException(status_code=404, detail="Documento non trovato")
+    return {"ok": True}
+
+
 @api.post("/work-orders/{order_id}/voice-turn", response_model=VoiceTurnOut)
 async def voice_turn(order_id: str, body: VoiceTurnIn, user: dict = Depends(get_current_user)):
     row = await fetchrow("SELECT * FROM work_orders WHERE id=$1", order_id)
@@ -1455,7 +1611,7 @@ async def voice_turn(order_id: str, body: VoiceTurnIn, user: dict = Depends(get_
         scheda_raw = json.loads(scheda_raw)
     current_scheda = scheda_raw
 
-    # Memoria storica: cerca casi simili già risolti in questa officina
+    # Recupero conoscenza: 1) Archivio Tecnico (documenti ufficiali), 2) casi simili già risolti
     rag_block = ""
     try:
         query = " ".join(filter(None, [
@@ -1463,19 +1619,31 @@ async def voice_turn(order_id: str, body: VoiceTurnIn, user: dict = Depends(get_
             current_scheda.get("marca") or "", current_scheda.get("modello") or "",
             current_scheda.get("motore") or "", user_text,
         ]))
+        docs = await _find_knowledge(query)
+        if docs:
+            estratti = "\n---\n".join(
+                f"[Documento: {d['title']} — pertinenza {d['similarity']:.0%}]\n{d['content'][:800]}"
+                for d in docs
+            )
+            rag_block += (
+                "\n\nDOCUMENTAZIONE TECNICA DELL'OFFICINA — FONTE PRIORITARIA "
+                "(se il dato richiesto è qui, usa QUESTO e cita il titolo del documento; "
+                "la tua conoscenza generale viene DOPO questi documenti):\n" + estratti
+            )
+            logger.info(f"archivio tecnico: {len(docs)} documenti pertinenti per {order_id}")
         similar = await _find_similar_cases(query, order_id)
         if similar:
             casi = "\n---\n".join(
                 f"[{s['plate']} — {s['vehicle']} — somiglianza {s['similarity']:.0%}]\n{s['content'][:700]}"
                 for s in similar
             )
-            rag_block = (
+            rag_block += (
                 "\n\nCASI SIMILI GIÀ RISOLTI IN QUESTA OFFICINA "
                 "(usali solo se pertinenti; quando li richiami cita la targa del caso):\n" + casi
             )
             logger.info(f"memoria storica: {len(similar)} casi simili per {order_id}")
     except Exception as e:
-        logger.warning(f"memoria storica: retrieval fallito: {e}")
+        logger.warning(f"recupero conoscenza fallito: {e}")
 
     try:
         messages = [{"role": "system", "content": AI_SYSTEM_PROMPT}]

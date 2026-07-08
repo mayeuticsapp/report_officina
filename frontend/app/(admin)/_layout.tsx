@@ -28,6 +28,7 @@ export default function AdminLayout() {
       <Tabs.Screen name="order/[id]" options={{ href: null }} />
       <Tabs.Screen name="workers" options={{ title: "OPERAI", tabBarIcon: ({ color }) => <Ionicons name="people" size={22} color={color} /> }} />
       <Tabs.Screen name="reports" options={{ title: "REPORT AI", tabBarIcon: ({ color }) => <Ionicons name="sparkles" size={22} color={color} /> }} />
+      <Tabs.Screen name="knowledge" options={{ title: "ARCHIVIO", tabBarIcon: ({ color }) => <Ionicons name="library" size={22} color={color} /> }} />
       <Tabs.Screen name="profile" options={{ title: "PROFILO", tabBarIcon: ({ color }) => <Ionicons name="person" size={22} color={color} /> }} />
     </Tabs>
   );

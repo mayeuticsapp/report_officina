@@ -185,6 +185,49 @@ export type DailyReport = {
   generated_at: string;
 };
 
+// ---- Archivio Tecnico (documentazione ufficiale) ----
+export type KnowledgeDoc = {
+  doc_id: string;
+  title: string;
+  chunks: number;
+  created_by_name?: string | null;
+  created_at: string;
+};
+
+export async function listKnowledge(): Promise<KnowledgeDoc[]> {
+  return api<KnowledgeDoc[]>("/knowledge");
+}
+
+export async function addKnowledgeText(title: string, content: string): Promise<KnowledgeDoc> {
+  return api<KnowledgeDoc>("/knowledge", { method: "POST", body: { title, content } });
+}
+
+export async function deleteKnowledgeDoc(docId: string): Promise<void> {
+  await api(`/knowledge/${docId}`, { method: "DELETE" });
+}
+
+/** Carica un PDF nell'Archivio Tecnico (solo web/admin). */
+export async function uploadKnowledgePdf(fileUri: string, filename: string): Promise<KnowledgeDoc> {
+  const token = await getToken();
+  const form = new FormData();
+  if (fileUri.startsWith("data:") || fileUri.startsWith("blob:")) {
+    const blob = await (await fetch(fileUri)).blob();
+    form.append("file", new File([blob], filename, { type: "application/pdf" }));
+  } else {
+    // @ts-expect-error RN form data typing
+    form.append("file", { uri: fileUri, name: filename, type: "application/pdf" });
+  }
+  const res = await fetch(`${BASE_URL}/api/knowledge/upload`, {
+    method: "POST",
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+    body: form,
+  });
+  const text = await res.text();
+  let data: any; try { data = JSON.parse(text); } catch { data = text; }
+  if (!res.ok) throw new Error((data && data.detail) || `Errore ${res.status}`);
+  return data as KnowledgeDoc;
+}
+
 // ---- Archivio fotografico ----
 export type OrderPhoto = {
   id: string;
