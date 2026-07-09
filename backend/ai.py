@@ -7,6 +7,17 @@ restituisce il pezzo utile; la gestione errori/soft-fail resta nei chiamanti.
 
 Qui stanno anche TUTTI i prompt di sistema (la parte che invecchia prima),
 versionati insieme al codice.
+
+ATTENZIONE — limiti noti del "cambio in un file solo":
+1. EMBEDDINGS: cambiare EMBED_MODEL invalida TUTTI i vettori gia' salvati in
+   Postgres (case_embeddings + knowledge_docs hanno dimensione vector(1024) e
+   spazio semantico del modello vecchio). Migrazione richiesta:
+   ALTER della dimensione se diversa + re-embedding completo (TRUNCATE delle
+   due tabelle: i casi si rigenerano dal backfill allo startup, i documenti
+   dell'Archivio Tecnico vanno ricaricati o re-indicizzati da 'content').
+2. OCR e trascrizione non sono 1:1 tra provider (formati, lingue, qualita'):
+   il cambio e' facile, non indolore — serve un test di qualita' sul nuovo
+   modello prima di andare in produzione.
 """
 import os
 from pathlib import Path
