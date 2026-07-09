@@ -1,0 +1,103 @@
+"""
+ai.py — Unico punto di contatto con il modello AI (oggi Mistral).
+
+PRINCIPIO: per cambiare modello o provider (domani Claude, GPT, altro) si tocca
+SOLO questo file, non il resto dell'app. Ogni funzione fa la chiamata grezza e
+restituisce il pezzo utile; la gestione errori/soft-fail resta nei chiamanti.
+
+Qui stanno anche TUTTI i prompt di sistema (la parte che invecchia prima),
+versionati insieme al codice.
+"""
+import os
+from pathlib import Path
+from typing import List
+
+from dotenv import load_dotenv
+from mistralai.client import Mistral
+
+load_dotenv(Path(__file__).parent / ".env")
+
+# ---------------- Modelli (override via .env) ----------------
+TEXT_MODEL = os.environ.get("MISTRAL_TEXT_MODEL", "mistral-large-latest")
+OCR_MODEL = os.environ.get("MISTRAL_OCR_MODEL", "mistral-ocr-latest")
+STT_MODEL = os.environ.get("MISTRAL_STT_MODEL", "voxtral-mini-latest")
+EMBED_MODEL = os.environ.get("MISTRAL_EMBED_MODEL", "mistral-embed")
+
+_client = Mistral(api_key=os.environ["MISTRAL_API_KEY"])
+
+# ---------------- Prompt di sistema ----------------
+SYSTEM_ASSISTANT = (
+    "Sei l'assistente AI di un'officina meccanica italiana. Parli con un OPERAIO che ha le mani "
+    "occupate e ti detta note vocali sul lavoro in corso su un veicolo. "
+    "Il tuo compito duplice: "
+    "(1) rispondere all'operaio con UNA frase breve (max 20 parole) — conferma, chiedi info mancanti "
+    "(marca/modello/anno, KM, cosa fatto, cosa manca, ricambi), non ripetere ciò che ha detto. "
+    "(2) mantenere aggiornata la scheda tecnica strutturata. "
+    "Rispondi SEMPRE con un JSON valido (senza testo intorno, senza markdown) con questa struttura ESATTA:\n"
+    "{\n"
+    '  "reply": "risposta breve all\'operaio in italiano",\n'
+    '  "scheda": {\n'
+    '    "marca": "stringa o null", "modello": "stringa o null", "anno": "stringa o null",\n'
+    '    "motore": "stringa o null", "km": "stringa o null",\n'
+    '    "lavori_fatti": ["..."], "lavori_da_fare": ["..."], "ricambi_necessari": ["..."],\n'
+    '    "note": "stringa o null"\n'
+    "  }\n"
+    "}\n"
+    "Nella scheda accumula ciò che sai: mantieni i valori già presenti + aggiungi i nuovi. "
+    "Le liste devono contenere gli elementi già noti + i nuovi (deduplica)."
+)
+
+SYSTEM_EVENT_INTERPRET = (
+    "Sei un assistente per un'officina meccanica. Ricevi il motivo di un evento "
+    "(START/PAUSE/RESUME/COMPLETE) scritto in linguaggio naturale da un operaio. "
+    "Rispondi in italiano con UNA SOLA FRASE breve (max 15 parole) che riassume "
+    "l'intento dell'operaio in modo strutturato per il capofficina."
+)
+
+SYSTEM_DAILY_REPORT = (
+    "Sei l'assistente AI di un capofficina. Genera un REPORT professionale in italiano "
+    "in Markdown con queste sezioni: "
+    "**RIEPILOGO** (bullet: operai attivi, commesse toccate, ore totali), "
+    "**PER MECCANICO** (per ogni operaio: ore lavorate, commesse su cui ha lavorato, note salienti), "
+    "**COMMESSE COINVOLTE** (per ogni commessa: targa, operai coinvolti, avanzamento), "
+    "**ANOMALIE** (pause >30min, sovrapposizioni, gap sospetti), "
+    "**SUGGERIMENTI** (2-3 azioni operative concrete). "
+    "Sii conciso, orientato all'azione."
+)
+
+
+# ---------------- Wrapper (le uniche funzioni che il resto dell'app usa) ----------------
+async def chat(messages: list, *, json: bool = False, max_tokens: int = 800) -> str:
+    """Chat di testo. json=True forza una risposta JSON. Ritorna il contenuto del messaggio."""
+    kwargs = {"model": TEXT_MODEL, "messages": messages, "max_tokens": max_tokens}
+    if json:
+        kwargs["response_format"] = {"type": "json_object"}
+    resp = await _client.chat.complete_async(**kwargs)
+    return resp.choices[0].message.content or ""
+
+
+async def embed(inputs: List[str]) -> List[list]:
+    """Testi -> lista di vettori embedding (nell'ordine dato)."""
+    resp = await _client.embeddings.create_async(model=EMBED_MODEL, inputs=inputs)
+    return [d.embedding for d in resp.data]
+
+
+async def ocr_image(data_url: str) -> str:
+    """OCR di un'immagine (data: URL) -> testo estratto (markdown concatenato)."""
+    resp = await _client.ocr.process_async(
+        model=OCR_MODEL, document={"type": "image_url", "image_url": data_url}
+    )
+    return " ".join((p.markdown or "") for p in (resp.pages or []))
+
+
+async def transcribe(content: bytes, filename: str) -> str:
+    """Trascrizione audio -> testo (italiano)."""
+    resp = await _client.audio.transcriptions.complete_async(
+        model=STT_MODEL, file={"content": content, "file_name": filename}, language="it"
+    )
+    text = getattr(resp, "text", None)
+    if text is None:
+        text = getattr(resp, "transcription", None)
+    if text is None and isinstance(resp, dict):
+        text = resp.get("text") or resp.get("transcription")
+    return (text or "").strip()

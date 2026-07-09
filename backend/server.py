@@ -25,7 +25,7 @@ from pydantic import BaseModel, Field
 import jwt
 import bcrypt
 
-from mistralai.client import Mistral
+import ai  # unico punto di contatto col modello AI (vedi ai.py)
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
@@ -35,10 +35,7 @@ DATABASE_URL = os.environ["DATABASE_URL"]
 JWT_SECRET = os.environ["JWT_SECRET"]
 JWT_ALGORITHM = os.environ.get("JWT_ALGORITHM", "HS256")
 JWT_EXPIRES_DAYS = int(os.environ.get("JWT_EXPIRES_DAYS", "7"))
-MISTRAL_API_KEY = os.environ["MISTRAL_API_KEY"]
-MISTRAL_TEXT_MODEL = os.environ.get("MISTRAL_TEXT_MODEL", "mistral-large-latest")
-MISTRAL_OCR_MODEL = os.environ.get("MISTRAL_OCR_MODEL", "mistral-ocr-latest")
-MISTRAL_STT_MODEL = os.environ.get("MISTRAL_STT_MODEL", "voxtral-mini-latest")
+# Config AI (modelli, prompt, client) centralizzata in ai.py
 SEED_ADMIN_USERNAME = os.environ.get("SEED_ADMIN_USERNAME", "admin")
 SEED_ADMIN_PASSWORD = os.environ.get("SEED_ADMIN_PASSWORD", "admin123")
 UPLOADS_DIR = Path(os.environ.get("UPLOADS_DIR", str(ROOT_DIR / "uploads")))
@@ -48,7 +45,6 @@ OPENAPI_BASE_URL = os.environ.get("OPENAPI_BASE_URL", "https://automotive.openap
 OMNIUS_KEY = os.environ.get("OMNIUS_KEY", "")
 PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "https://app.autoservicevalente.it")
 
-mistral_client = Mistral(api_key=MISTRAL_API_KEY)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("officina")
@@ -1006,20 +1002,14 @@ async def _ai_interpret_reason(reason: str, event_type: str) -> Optional[str]:
     if not reason:
         return None
     try:
-        resp = await mistral_client.chat.complete_async(
-            model=MISTRAL_TEXT_MODEL,
-            messages=[
-                {"role": "system", "content": (
-                    "Sei un assistente per un'officina meccanica. Ricevi il motivo di un evento "
-                    "(START/PAUSE/RESUME/COMPLETE) scritto in linguaggio naturale da un operaio. "
-                    "Rispondi in italiano con UNA SOLA FRASE breve (max 15 parole) che riassume "
-                    "l'intento dell'operaio in modo strutturato per il capofficina."
-                )},
+        content = await ai.chat(
+            [
+                {"role": "system", "content": ai.SYSTEM_EVENT_INTERPRET},
                 {"role": "user", "content": f"Evento: {event_type}\nMotivo dell'operaio: {reason}"},
             ],
             max_tokens=100,
         )
-        return (resp.choices[0].message.content or "").strip() or None
+        return content.strip() or None
     except Exception as e:
         logger.warning(f"AI interpret failed: {e}")
         return None
@@ -1246,19 +1236,9 @@ async def daily_report(
             if filter_ids and workers else "Tutti i meccanici"
         )
         try:
-            resp = await mistral_client.chat.complete_async(
-                model=MISTRAL_TEXT_MODEL,
-                messages=[
-                    {"role": "system", "content": (
-                        "Sei l'assistente AI di un capofficina. Genera un REPORT professionale in italiano "
-                        "in Markdown con queste sezioni: "
-                        "**RIEPILOGO** (bullet: operai attivi, commesse toccate, ore totali), "
-                        "**PER MECCANICO** (per ogni operaio: ore lavorate, commesse su cui ha lavorato, note salienti), "
-                        "**COMMESSE COINVOLTE** (per ogni commessa: targa, operai coinvolti, avanzamento), "
-                        "**ANOMALIE** (pause >30min, sovrapposizioni, gap sospetti), "
-                        "**SUGGERIMENTI** (2-3 azioni operative concrete). "
-                        "Sii conciso, orientato all'azione."
-                    )},
+            narrative = (await ai.chat(
+                [
+                    {"role": "system", "content": ai.SYSTEM_DAILY_REPORT},
                     {"role": "user", "content": (
                         f"Data: {date_str}\n{selection_hint}\n\n"
                         f"Statistiche aggregate: {total_events} eventi, {total_minutes} minuti, {orders_touched} commesse.\n\n"
@@ -1266,8 +1246,7 @@ async def daily_report(
                     )},
                 ],
                 max_tokens=1800,
-            )
-            narrative = (resp.choices[0].message.content or "").strip()
+            )).strip()
         except Exception as e:
             logger.warning(f"Daily narrative failed: {e}")
             narrative = f"Errore AI: {e}\n\nEventi grezzi:\n{events_text}"
@@ -1290,11 +1269,7 @@ async def ocr_plate(body: PlateOcrIn, user: dict = Depends(get_current_user)):
         b64 = b64.split(",", 1)[1]
     data_url = f"data:image/jpeg;base64,{b64}"
     try:
-        ocr_resp = await mistral_client.ocr.process_async(
-            model=MISTRAL_OCR_MODEL,
-            document={"type": "image_url", "image_url": data_url},
-        )
-        pages_text = " ".join((p.markdown or "") for p in (ocr_resp.pages or []))
+        pages_text = await ai.ocr_image(data_url)
         raw = pages_text.strip().upper()
         m = PLATE_RE.search(raw.replace("-", "").replace(".", "").replace("\n", " "))
         plate = m.group(0).replace(" ", "") if m else None
@@ -1407,45 +1382,14 @@ async def transcribe_audio(file: UploadFile = File(...), user: dict = Depends(ge
     data = await file.read()
     filename = file.filename or "audio.m4a"
     try:
-        resp = await mistral_client.audio.transcriptions.complete_async(
-            model=MISTRAL_STT_MODEL,
-            file={"content": data, "file_name": filename},
-            language="it",
-        )
-        text = getattr(resp, "text", None)
-        if text is None:
-            text = getattr(resp, "transcription", None)
-        if text is None and isinstance(resp, dict):
-            text = resp.get("text") or resp.get("transcription")
-        return TranscribeOut(text=(text or "").strip())
+        text = await ai.transcribe(data, filename)
+        return TranscribeOut(text=text)
     except Exception as e:
         logger.exception("transcribe failed")
         raise HTTPException(status_code=500, detail=f"Trascrizione fallita: {e}")
 
 
 # ---- AI Voice Chat ----
-AI_SYSTEM_PROMPT = (
-    "Sei l'assistente AI di un'officina meccanica italiana. Parli con un OPERAIO che ha le mani "
-    "occupate e ti detta note vocali sul lavoro in corso su un veicolo. "
-    "Il tuo compito duplice: "
-    "(1) rispondere all'operaio con UNA frase breve (max 20 parole) — conferma, chiedi info mancanti "
-    "(marca/modello/anno, KM, cosa fatto, cosa manca, ricambi), non ripetere ciò che ha detto. "
-    "(2) mantenere aggiornata la scheda tecnica strutturata. "
-    "Rispondi SEMPRE con un JSON valido (senza testo intorno, senza markdown) con questa struttura ESATTA:\n"
-    "{\n"
-    '  "reply": "risposta breve all\'operaio in italiano",\n'
-    '  "scheda": {\n'
-    '    "marca": "stringa o null", "modello": "stringa o null", "anno": "stringa o null",\n'
-    '    "motore": "stringa o null", "km": "stringa o null",\n'
-    '    "lavori_fatti": ["..."], "lavori_da_fare": ["..."], "ricambi_necessari": ["..."],\n'
-    '    "note": "stringa o null"\n'
-    "  }\n"
-    "}\n"
-    "Nella scheda accumula ciò che sai: mantieni i valori già presenti + aggiungi i nuovi. "
-    "Le liste devono contenere gli elementi già noti + i nuovi (deduplica)."
-)
-
-
 def _extract_json_block(s: str) -> Optional[dict]:
     m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", s, re.DOTALL)
     if not m:
@@ -1459,9 +1403,6 @@ def _extract_json_block(s: str) -> Optional[dict]:
 
 
 # ---- Memoria storica dell'officina (RAG su pgvector) ----
-EMBED_MODEL = os.environ.get("MISTRAL_EMBED_MODEL", "mistral-embed")
-
-
 def _vec_literal(vec: List[float]) -> str:
     return "[" + ",".join(f"{x:.6f}" for x in vec) + "]"
 
@@ -1469,8 +1410,8 @@ def _vec_literal(vec: List[float]) -> str:
 async def _embed_text(text: str) -> Optional[str]:
     """Testo -> literal vettore pgvector. None se l'API fallisce (soft-fail)."""
     try:
-        resp = await mistral_client.embeddings.create_async(model=EMBED_MODEL, inputs=[text[:20000]])
-        return _vec_literal(resp.data[0].embedding)
+        vecs = await ai.embed([text[:20000]])
+        return _vec_literal(vecs[0])
     except Exception as e:
         logger.warning(f"embedding fallito: {e}")
         return None
@@ -1610,10 +1551,8 @@ def _chunk_text(text: str, max_len: int = 1200) -> List[str]:
 async def _embed_texts(texts: List[str]) -> Optional[List[str]]:
     """Più testi -> literal pgvector, in una sola chiamata API. None se fallisce."""
     try:
-        resp = await mistral_client.embeddings.create_async(
-            model=EMBED_MODEL, inputs=[t[:20000] for t in texts]
-        )
-        return [_vec_literal(d.embedding) for d in resp.data]
+        vecs = await ai.embed([t[:20000] for t in texts])
+        return [_vec_literal(v) for v in vecs]
     except Exception as e:
         logger.warning(f"embedding batch fallito: {e}")
         return None
@@ -1766,7 +1705,7 @@ async def voice_turn(order_id: str, body: VoiceTurnIn, user: dict = Depends(get_
         logger.warning(f"recupero conoscenza fallito: {e}")
 
     try:
-        messages = [{"role": "system", "content": AI_SYSTEM_PROMPT}]
+        messages = [{"role": "system", "content": ai.SYSTEM_ASSISTANT}]
         prefix = (
             f"COMMESSA: targa={row['plate']}, veicolo={row['vehicle']}, cliente={row['customer']}\n"
             f"SCHEDA ATTUALE: {json.dumps(current_scheda, ensure_ascii=False)}"
@@ -1777,13 +1716,7 @@ async def voice_turn(order_id: str, body: VoiceTurnIn, user: dict = Depends(get_
             messages.append({"role": role, "content": t["text"]})
         messages.append({"role": "user", "content": f"{prefix}\n\nOPERAIO ({user['full_name']}) dice ora: {user_text}"})
 
-        resp = await mistral_client.chat.complete_async(
-            model=MISTRAL_TEXT_MODEL,
-            messages=messages,
-            response_format={"type": "json_object"},
-            max_tokens=800,
-        )
-        raw = resp.choices[0].message.content or ""
+        raw = await ai.chat(messages, json=True, max_tokens=800)
     except Exception as e:
         msg = str(e)
         status_code = 429 if "429" in msg or "rate" in msg.lower() else 500
