@@ -46,6 +46,7 @@ MAX_PHOTO_BYTES = int(os.environ.get("MAX_PHOTO_BYTES", str(15 * 1024 * 1024))) 
 OPENAPI_TOKEN = os.environ.get("OPENAPI_TOKEN", "")
 OPENAPI_BASE_URL = os.environ.get("OPENAPI_BASE_URL", "https://automotive.openapi.com")
 OMNIUS_KEY = os.environ.get("OMNIUS_KEY", "")
+PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "https://app.autoservicevalente.it")
 
 mistral_client = Mistral(api_key=MISTRAL_API_KEY)
 
@@ -95,6 +96,15 @@ async def execute(query: str, *args):
 # ---------------- Helpers ----------------
 def now_utc() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _parse_iso_dt(s: str) -> datetime:
+    """Parse ISO8601 datetime (accetta suffisso Z). Errore 400 se malformato."""
+    try:
+        dt = datetime.fromisoformat(s.strip().replace("Z", "+00:00"))
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    except Exception:
+        raise HTTPException(status_code=400, detail=f"updated_since non valido (ISO8601 atteso): {s}")
 
 
 def hash_password(pw: str) -> str:
@@ -728,6 +738,113 @@ async def omnius_ingest_scheda(body: OmniusSchedaIn):
     return OmniusSchedaOut(action="created", work_order=row_to_workorder(row))
 
 
+# ---- Sportello di lettura report per Omnius (Fase 2) ----
+class OmniusEventOut(BaseModel):
+    type: EventType
+    timestamp: datetime
+    worker_full_name: str
+    reason: Optional[str] = None
+    ai_interpretation: Optional[str] = None
+
+
+class OmniusPhotoOut(BaseModel):
+    id: str
+    uploaded_by_name: str
+    created_at: datetime
+    url: str
+
+
+class OmniusReportItem(BaseModel):
+    star_doc_id: str
+    work_order_id: str
+    plate: str
+    vehicle: str
+    customer: str
+    status: OrderStatus
+    updated_at: datetime
+    workers: List[str]
+    minutes_worked: int
+    events: List[OmniusEventOut]
+    scheda_tecnica: SchedaTecnica
+    dialogo: List[dict]
+    photos: List[OmniusPhotoOut]
+
+
+class OmniusReportsOut(BaseModel):
+    items: List[OmniusReportItem]
+    count: int
+    has_more: bool
+    next_updated_since: Optional[datetime] = None
+
+
+@api.get("/v1/omnius/commesse", response_model=OmniusReportsOut, dependencies=[Depends(require_omnius_key)])
+async def omnius_read_reports(updated_since: Optional[str] = None, status: Optional[str] = None, limit: int = 100):
+    """Sportello di ritiro report per Omnius. Restituisce le commesse agganciate a STAR
+    (star_doc_id valorizzato) aggiornate dopo 'updated_since', con eventi, tempi, scheda,
+    dialogo e foto. Paginazione tramite next_updated_since (stile polling idempotente)."""
+    limit = max(1, min(limit, 100))
+    since = _parse_iso_dt(updated_since) if updated_since else datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+    conds = ["star_doc_id IS NOT NULL", "updated_at > $1"]
+    vals: list = [since]
+    if status:
+        conds.append(f"status = ${len(vals) + 1}")
+        vals.append(status)
+    vals.append(limit + 1)  # +1 per capire se c'è altro
+    rows = await fetch(
+        f"SELECT * FROM work_orders WHERE {' AND '.join(conds)} ORDER BY updated_at ASC, id ASC LIMIT ${len(vals)}",
+        *vals
+    )
+    has_more = len(rows) > limit
+    rows = rows[:limit]
+
+    # Nomi operai
+    user_rows = await fetch("SELECT id, full_name FROM users")
+    uname = {u["id"]: u["full_name"] for u in user_rows}
+
+    items: List[OmniusReportItem] = []
+    for row in rows:
+        oid = row["id"]
+        evs = await fetch(
+            "SELECT * FROM work_events WHERE work_order_id=$1 ORDER BY timestamp ASC", oid
+        )
+        events = [OmniusEventOut(
+            type=e["type"], timestamp=e["timestamp"], worker_full_name=e["worker_full_name"],
+            reason=e.get("reason"), ai_interpretation=e.get("ai_interpretation"),
+        ) for e in evs]
+        worker_ids = row.get("assigned_worker_ids") or []
+        if isinstance(worker_ids, str):
+            worker_ids = json.loads(worker_ids)
+        workers = sorted({uname.get(w) for w in worker_ids if uname.get(w)} |
+                         {e["worker_full_name"] for e in evs})
+        scheda_raw = row.get("scheda_tecnica") or {}
+        if isinstance(scheda_raw, str):
+            scheda_raw = json.loads(scheda_raw)
+        convo = await fetchrow("SELECT turns FROM conversations WHERE work_order_id=$1", oid)
+        turns = convo["turns"] if convo else []
+        if isinstance(turns, str):
+            turns = json.loads(turns)
+        photo_rows = await fetch(
+            "SELECT id, uploaded_by_name, created_at FROM order_photos WHERE work_order_id=$1 ORDER BY created_at ASC", oid
+        )
+        photos = [OmniusPhotoOut(
+            id=p["id"], uploaded_by_name=p["uploaded_by_name"], created_at=p["created_at"],
+            url=f"{PUBLIC_BASE_URL}/api/photos/{p['id']}/file?omnius_key={OMNIUS_KEY}",
+        ) for p in photo_rows]
+        items.append(OmniusReportItem(
+            star_doc_id=row["star_doc_id"], work_order_id=oid, plate=row["plate"],
+            vehicle=row["vehicle"], customer=row["customer"], status=row["status"],
+            updated_at=row["updated_at"], workers=list(workers), minutes_worked=_worker_minutes(evs),
+            events=events, scheda_tecnica=SchedaTecnica(**scheda_raw),
+            dialogo=turns or [], photos=photos,
+        ))
+
+    return OmniusReportsOut(
+        items=items, count=len(items), has_more=has_more,
+        next_updated_since=(items[-1].updated_at if items else since),
+    )
+
+
 @api.get("/work-orders/{order_id}", response_model=WorkOrder)
 async def get_work_order(order_id: str, user: dict = Depends(get_current_user)):
     row = await fetchrow("SELECT * FROM work_orders WHERE id=$1", order_id)
@@ -858,13 +975,16 @@ async def list_order_photos(order_id: str, user: dict = Depends(get_current_user
 
 
 @api.get("/photos/{photo_id}/file")
-async def get_photo_file(photo_id: str, token: Optional[str] = None, bearer: Optional[str] = Depends(oauth2)):
-    # token via header (fetch) oppure via query string (tag <img> del browser)
-    user = await _user_from_token(bearer or token)
+async def get_photo_file(photo_id: str, token: Optional[str] = None, omnius_key: Optional[str] = None, bearer: Optional[str] = Depends(oauth2)):
+    # Accesso: 1) token utente (header o query per i tag <img>), 2) chiave Omnius (integrazione)
     row = await fetchrow("SELECT * FROM order_photos WHERE id=$1", photo_id)
     if not row:
         raise HTTPException(status_code=404, detail="Foto non trovata")
-    await _order_or_403(row["work_order_id"], user)
+    if OMNIUS_KEY and omnius_key == OMNIUS_KEY:
+        pass  # Omnius autorizzato via chiave dedicata
+    else:
+        user = await _user_from_token(bearer or token)
+        await _order_or_403(row["work_order_id"], user)
     path = _photo_path(row["work_order_id"], photo_id, row["content_type"])
     if not path.is_file():
         raise HTTPException(status_code=404, detail="File mancante sul server")
