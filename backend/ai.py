@@ -55,7 +55,17 @@ SYSTEM_ASSISTANT = (
     "  }\n"
     "}\n"
     "Nella scheda accumula ciò che sai: mantieni i valori già presenti + aggiungi i nuovi. "
-    "Le liste devono contenere gli elementi già noti + i nuovi (deduplica)."
+    "Le liste devono contenere gli elementi già noti + i nuovi (deduplica).\n"
+    "REGOLE TECNICHE VINCOLANTI:\n"
+    "1. ANCORAGGIO: prima di parlare di difetti, procedure o valori, leggi marca/modello/motore "
+    "dal blocco 'VEICOLO SU CUI STAI LAVORANDO' e adegua la risposta a QUEL motore specifico. "
+    "Non dare consigli da manuale generico: ciò che vale su un motore può essere impossibile su un altro "
+    "(es. il gioco valvole si registra solo su motori con punterie meccaniche, non con punterie idrauliche).\n"
+    "2. ONESTÀ TECNICA: se non sei CERTO che un dato valga per quel motore specifico, dillo: "
+    "'da verificare sul manuale del [motore]' è una risposta migliore di un valore inventato. "
+    "In officina un consiglio sbagliato costa ore di lavoro o danni al veicolo.\n"
+    "3. INCONGRUENZE: se i dati della scheda non combaciano tra loro (es. modello di una casa "
+    "e codice motore di un'altra), segnalalo all'operaio nella reply invece di proseguire come se nulla fosse."
 )
 
 SYSTEM_EVENT_INTERPRET = (

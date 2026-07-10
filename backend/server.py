@@ -1977,9 +1977,16 @@ async def voice_turn(order_id: str, body: VoiceTurnIn, user: dict = Depends(get_
 
     try:
         messages = [{"role": "system", "content": ai.SYSTEM_ASSISTANT}]
+        veicolo_block = (
+            "VEICOLO SU CUI STAI LAVORANDO (dati reali, ancoraci ogni risposta tecnica):\n"
+            f"  targa: {row['plate']} | veicolo: {row['vehicle']} | cliente: {row['customer']}\n"
+            f"  marca: {current_scheda.get('marca') or '?'} | modello: {current_scheda.get('modello') or '?'} | "
+            f"anno: {current_scheda.get('anno') or '?'} | motore: {current_scheda.get('motore') or '?'} | "
+            f"km: {current_scheda.get('km') or '?'}"
+        )
         prefix = (
-            f"COMMESSA: targa={row['plate']}, veicolo={row['vehicle']}, cliente={row['customer']}\n"
-            f"SCHEDA ATTUALE: {json.dumps(current_scheda, ensure_ascii=False)}"
+            f"{veicolo_block}\n"
+            f"SCHEDA ATTUALE COMPLETA: {json.dumps(current_scheda, ensure_ascii=False)}"
             f"{rag_block}"
         )
         for t in turns[-6:]:
