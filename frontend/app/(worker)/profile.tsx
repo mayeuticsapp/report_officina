@@ -2,6 +2,7 @@ import { useState } from "react";
 import { View, Text, StyleSheet, TouchableOpacity } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useAuth } from "@/src/auth/AuthContext";
+import { NotificationToggle } from "@/src/components/NotificationToggle";
 import { colors, spacing } from "@/src/theme";
 
 export default function Profile() {
@@ -24,6 +25,8 @@ export default function Profile() {
           <Text style={[styles.label, { marginTop: spacing.md }]}>RUOLO</Text>
           <Text style={styles.value}>{user?.role === "admin" ? "Amministratore" : "Operaio"}</Text>
         </View>
+
+        <NotificationToggle />
 
         {!confirming ? (
           <TouchableOpacity testID="logout-button" style={styles.logoutBtn} onPress={() => setConfirming(true)}>

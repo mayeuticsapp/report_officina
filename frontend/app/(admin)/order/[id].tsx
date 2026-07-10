@@ -6,6 +6,7 @@ import { Ionicons } from "@expo/vector-icons";
 import { api, WorkOrder, WorkEvent } from "@/src/api/client";
 import { VoiceChat } from "@/src/components/VoiceChat";
 import { PhotoArchive } from "@/src/components/PhotoArchive";
+import { OrderMessages } from "@/src/components/OrderMessages";
 import { colors, spacing } from "@/src/theme";
 
 const statusMap: Record<string, { c: string; label: string }> = {
@@ -74,6 +75,8 @@ export default function AdminOrderDetail() {
         <VoiceChat orderId={order.id} readOnly />
 
         <PhotoArchive orderId={order.id} canDelete />
+
+        <OrderMessages orderId={order.id} />
 
         <Text style={styles.section}>TIMELINE EVENTI</Text>
         {events.length === 0 ? (

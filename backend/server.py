@@ -44,6 +44,9 @@ OPENAPI_TOKEN = os.environ.get("OPENAPI_TOKEN", "")
 OPENAPI_BASE_URL = os.environ.get("OPENAPI_BASE_URL", "https://automotive.openapi.com")
 OMNIUS_KEY = os.environ.get("OMNIUS_KEY", "")
 PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "https://app.autoservicevalente.it")
+VAPID_PRIVATE_KEY_FILE = os.environ.get("VAPID_PRIVATE_KEY_FILE", "")
+VAPID_PUBLIC_KEY = os.environ.get("VAPID_PUBLIC_KEY", "")
+VAPID_SUB = os.environ.get("VAPID_SUB", "mailto:info@example.com")
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -463,6 +466,38 @@ async def startup():
         await conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_order_photos_order ON order_photos (work_order_id, created_at)"
         )
+        # Messaggi commessa (admin <-> operai) + notifiche push
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS order_messages (
+                id TEXT PRIMARY KEY,
+                work_order_id TEXT NOT NULL,
+                sender_id TEXT NOT NULL,
+                sender_name TEXT NOT NULL,
+                sender_role TEXT NOT NULL,
+                text TEXT NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """)
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_order_messages_order ON order_messages (work_order_id, created_at)"
+        )
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS message_reads (
+                user_id TEXT NOT NULL,
+                work_order_id TEXT NOT NULL,
+                last_read_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                PRIMARY KEY (user_id, work_order_id)
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS push_subscriptions (
+                endpoint TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                p256dh TEXT NOT NULL,
+                auth TEXT NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """)
         # Memoria storica (RAG): estensione pgvector + tabella embeddings dei casi completati
         try:
             await conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
@@ -995,6 +1030,154 @@ async def delete_photo(photo_id: str, admin: dict = Depends(require_admin)):
     _photo_path(row["work_order_id"], photo_id, row["content_type"]).unlink(missing_ok=True)
     await execute("DELETE FROM order_photos WHERE id=$1", photo_id)
     return {"ok": True}
+
+
+# ---- Messaggi commessa (admin <-> operai) + notifiche push ----
+class OrderMessage(BaseModel):
+    id: str
+    work_order_id: str
+    sender_id: str
+    sender_name: str
+    sender_role: str
+    text: str
+    created_at: datetime
+
+
+class MessageIn(BaseModel):
+    text: str
+
+
+class UnreadOut(BaseModel):
+    total: int
+    by_order: dict
+
+
+def _send_webpush_sync(sub: dict, payload: str):
+    from pywebpush import webpush
+    webpush(
+        subscription_info={"endpoint": sub["endpoint"], "keys": {"p256dh": sub["p256dh"], "auth": sub["auth"]}},
+        data=payload,
+        vapid_private_key=VAPID_PRIVATE_KEY_FILE,
+        vapid_claims={"sub": VAPID_SUB},
+        ttl=3600,
+    )
+
+
+async def _push_to_users(user_ids: List[str], title: str, body: str, url: str = "/"):
+    """Invia una notifica push a tutti i dispositivi registrati degli utenti dati. Soft-fail."""
+    if not VAPID_PRIVATE_KEY_FILE or not user_ids:
+        return
+    try:
+        subs = await fetch("SELECT * FROM push_subscriptions WHERE user_id = ANY($1)", user_ids)
+        if not subs:
+            return
+        payload = json.dumps({"title": title, "body": body[:160], "url": url})
+        for sub in subs:
+            try:
+                await asyncio.to_thread(_send_webpush_sync, dict(sub), payload)
+            except Exception as e:
+                msg = str(e)
+                if "410" in msg or "404" in msg:  # iscrizione scaduta: pulizia
+                    await execute("DELETE FROM push_subscriptions WHERE endpoint=$1", sub["endpoint"])
+                else:
+                    logger.warning(f"push fallita: {e}")
+    except Exception as e:
+        logger.warning(f"push: errore invio: {e}")
+
+
+@api.get("/push/vapid-public")
+async def vapid_public(user: dict = Depends(get_current_user)):
+    if not VAPID_PUBLIC_KEY:
+        raise HTTPException(status_code=503, detail="Notifiche non configurate")
+    return {"key": VAPID_PUBLIC_KEY}
+
+
+@api.post("/push/subscribe")
+async def push_subscribe(body: dict, user: dict = Depends(get_current_user)):
+    endpoint = (body.get("endpoint") or "").strip()
+    keys = body.get("keys") or {}
+    if not endpoint or not keys.get("p256dh") or not keys.get("auth"):
+        raise HTTPException(status_code=400, detail="Iscrizione push non valida")
+    await execute(
+        """INSERT INTO push_subscriptions (endpoint, user_id, p256dh, auth, created_at)
+           VALUES ($1,$2,$3,$4,$5)
+           ON CONFLICT (endpoint) DO UPDATE SET user_id=$2, p256dh=$3, auth=$4""",
+        endpoint, user["id"], keys["p256dh"], keys["auth"], now_utc()
+    )
+    return {"ok": True}
+
+
+@api.get("/work-orders/{order_id}/messages", response_model=List[OrderMessage])
+async def list_messages(order_id: str, user: dict = Depends(get_current_user)):
+    await _order_or_403(order_id, user)
+    rows = await fetch(
+        "SELECT * FROM order_messages WHERE work_order_id=$1 ORDER BY created_at ASC LIMIT 500", order_id
+    )
+    # leggere i messaggi li marca come letti per questo utente
+    await execute(
+        """INSERT INTO message_reads (user_id, work_order_id, last_read_at) VALUES ($1,$2,$3)
+           ON CONFLICT (user_id, work_order_id) DO UPDATE SET last_read_at=$3""",
+        user["id"], order_id, now_utc()
+    )
+    return [OrderMessage(**dict(r)) for r in rows]
+
+
+@api.post("/work-orders/{order_id}/messages", response_model=OrderMessage)
+async def send_message(order_id: str, body: MessageIn, user: dict = Depends(get_current_user)):
+    row = await _order_or_403(order_id, user)
+    text = body.text.strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Messaggio vuoto")
+    if len(text) > 2000:
+        raise HTTPException(status_code=413, detail="Messaggio troppo lungo (max 2000)")
+    msg_id = str(uuid.uuid4())
+    now = now_utc()
+    await execute(
+        """INSERT INTO order_messages (id, work_order_id, sender_id, sender_name, sender_role, text, created_at)
+           VALUES ($1,$2,$3,$4,$5,$6,$7)""",
+        msg_id, order_id, user["id"], user["full_name"], user["role"], text, now
+    )
+    # chi mando a notificare: se scrive l'admin -> operai assegnati; se scrive l'operaio -> tutti gli admin
+    if user["role"] == "admin":
+        worker_ids = row.get("assigned_worker_ids") or []
+        if isinstance(worker_ids, str):
+            worker_ids = json.loads(worker_ids)
+        recipients = [w for w in worker_ids if w != user["id"]]
+    else:
+        admin_rows = await fetch("SELECT id FROM users WHERE role='admin'")
+        recipients = [a["id"] for a in admin_rows]
+    asyncio.create_task(_push_to_users(
+        recipients,
+        f"Messaggio da {user['full_name']}",
+        f"[{row['plate']}] {text}",
+    ))
+    return OrderMessage(
+        id=msg_id, work_order_id=order_id, sender_id=user["id"], sender_name=user["full_name"],
+        sender_role=user["role"], text=text, created_at=now,
+    )
+
+
+@api.get("/messages/unread", response_model=UnreadOut)
+async def unread_messages(user: dict = Depends(get_current_user)):
+    """Conteggio non letti per l'utente: messaggi altrui nelle commesse a cui ha accesso,
+    successivi al suo ultimo accesso alla chat di quella commessa."""
+    if user["role"] == "worker":
+        access_cond = "w.assigned_worker_ids @> to_jsonb(ARRAY[$1])"
+    else:
+        access_cond = "$1 = $1"  # admin: tutte
+    rows = await fetch(
+        f"""SELECT m.work_order_id, count(*) AS n
+            FROM order_messages m
+            JOIN work_orders w ON w.id = m.work_order_id
+            LEFT JOIN message_reads r ON r.work_order_id = m.work_order_id AND r.user_id = $1
+            WHERE m.sender_id != $1
+              AND {access_cond}
+              AND (r.last_read_at IS NULL OR m.created_at > r.last_read_at)
+            GROUP BY m.work_order_id""",
+        user["id"]
+    )
+    by_order = {r["work_order_id"]: r["n"] for r in rows}
+    return UnreadOut(total=sum(by_order.values()), by_order=by_order)
 
 
 # ---- Work Events ----

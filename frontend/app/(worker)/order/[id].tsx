@@ -11,6 +11,7 @@ import { api, WorkEvent, WorkOrder, EventType } from "@/src/api/client";
 import { confirmDialog, showAlert } from "@/src/utils/dialog";
 import { VoiceChat } from "@/src/components/VoiceChat";
 import { PhotoArchive } from "@/src/components/PhotoArchive";
+import { OrderMessages } from "@/src/components/OrderMessages";
 import { colors, spacing } from "@/src/theme";
 
 export default function OrderDetail() {
@@ -150,6 +151,8 @@ export default function OrderDetail() {
         <VoiceChat orderId={order.id} />
 
         <PhotoArchive orderId={order.id} canUpload />
+
+        <OrderMessages orderId={order.id} />
 
         {/* Timeline */}
         <Text style={styles.sectionLabel}>TIMELINE</Text>

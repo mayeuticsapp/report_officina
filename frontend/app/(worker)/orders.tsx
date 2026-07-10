@@ -6,7 +6,7 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { useRouter, useFocusEffect } from "expo-router";
-import { api, WorkOrder, proposeWorkOrder } from "@/src/api/client";
+import { api, WorkOrder, proposeWorkOrder, unreadMessages } from "@/src/api/client";
 import { showAlert } from "@/src/utils/dialog";
 import { colors, spacing } from "@/src/theme";
 
@@ -30,10 +30,13 @@ export default function WorkerOrders() {
   const [form, setForm] = useState(EMPTY_FORM);
   const [submitting, setSubmitting] = useState(false);
 
+  const [unread, setUnread] = useState<Record<string, number>>({});
+
   const load = useCallback(async () => {
     try {
       const list = await api<WorkOrder[]>("/work-orders");
       setOrders(list);
+      try { setUnread((await unreadMessages()).by_order); } catch { /* silenzioso */ }
     } catch (e) { console.warn(e); }
     finally { setLoading(false); setRefreshing(false); }
   }, []);
@@ -123,8 +126,16 @@ export default function WorkerOrders() {
                 >
                   <View style={styles.cardRow}>
                     <Text style={styles.plate}>{o.plate}</Text>
-                    <View style={[styles.pill, { backgroundColor: s.c }]}>
-                      <Text style={styles.pillText}>{s.label}</Text>
+                    <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+                      {unread[o.id] ? (
+                        <View style={styles.unreadBadge}>
+                          <Ionicons name="chatbubble" size={11} color={colors.textInverse} />
+                          <Text style={styles.unreadText}>{unread[o.id]}</Text>
+                        </View>
+                      ) : null}
+                      <View style={[styles.pill, { backgroundColor: s.c }]}>
+                        <Text style={styles.pillText}>{s.label}</Text>
+                      </View>
                     </View>
                   </View>
                   <Text style={styles.vehicle}>{o.vehicle}</Text>
@@ -206,6 +217,11 @@ const styles = StyleSheet.create({
   pillText: { color: colors.textInverse, fontSize: 10, fontWeight: "900", letterSpacing: 1 },
   vehicle: { fontSize: 14, color: colors.text, marginTop: 6, fontWeight: "600" },
   customer: { fontSize: 12, color: colors.textSecondary, marginTop: 2 },
+  unreadBadge: {
+    flexDirection: "row", alignItems: "center", gap: 3, backgroundColor: colors.stopped,
+    paddingHorizontal: 7, paddingVertical: 4, borderRadius: 10,
+  },
+  unreadText: { color: colors.textInverse, fontSize: 10, fontWeight: "900" },
   mBackdrop: { flex: 1, backgroundColor: "rgba(0,0,0,0.5)", justifyContent: "flex-end" },
   mSheet: { backgroundColor: colors.bg, borderTopWidth: 2, borderTopColor: colors.borderStrong, maxHeight: "92%" },
   mHeader: { padding: spacing.lg, borderBottomWidth: 1, borderBottomColor: colors.border, flexDirection: "row", justifyContent: "space-between", alignItems: "center" },

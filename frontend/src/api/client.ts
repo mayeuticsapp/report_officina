@@ -186,6 +186,40 @@ export type DailyReport = {
   generated_at: string;
 };
 
+// ---- Messaggi commessa (admin <-> operai) ----
+export type OrderMessage = {
+  id: string;
+  work_order_id: string;
+  sender_id: string;
+  sender_name: string;
+  sender_role: Role;
+  text: string;
+  created_at: string;
+};
+
+export async function listOrderMessages(orderId: string): Promise<OrderMessage[]> {
+  return api<OrderMessage[]>(`/work-orders/${orderId}/messages`);
+}
+
+export async function sendOrderMessage(orderId: string, text: string): Promise<OrderMessage> {
+  return api<OrderMessage>(`/work-orders/${orderId}/messages`, { method: "POST", body: { text } });
+}
+
+export type UnreadMessages = { total: number; by_order: Record<string, number> };
+
+export async function unreadMessages(): Promise<UnreadMessages> {
+  return api<UnreadMessages>("/messages/unread");
+}
+
+export async function getVapidPublicKey(): Promise<string> {
+  const r = await api<{ key: string }>("/push/vapid-public");
+  return r.key;
+}
+
+export async function savePushSubscription(sub: any): Promise<void> {
+  await api("/push/subscribe", { method: "POST", body: sub });
+}
+
 // ---- Archivio Tecnico (documentazione ufficiale) ----
 export type KnowledgeDoc = {
   doc_id: string;

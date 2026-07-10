@@ -6,7 +6,7 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { useFocusEffect, useRouter } from "expo-router";
-import { api, User, WorkOrder } from "@/src/api/client";
+import { api, User, WorkOrder, unreadMessages } from "@/src/api/client";
 import { confirmDialog, showAlert } from "@/src/utils/dialog";
 import { colors, spacing } from "@/src/theme";
 
@@ -30,6 +30,7 @@ export default function OrdersAdmin() {
   const [form, setForm] = useState({
     plate: "", vin: "", customer: "", vehicle: "", description: "", assigned_worker_ids: [] as string[],
   });
+  const [unread, setUnread] = useState<Record<string, number>>({});
 
   const load = useCallback(async () => {
     try {
@@ -39,6 +40,7 @@ export default function OrdersAdmin() {
       ]);
       setOrders(o);
       setWorkers(u.filter((x) => x.role === "worker"));
+      try { setUnread((await unreadMessages()).by_order); } catch { /* silenzioso */ }
     } catch (e: any) { showAlert("Errore", e.message); }
     finally { setLoading(false); setRefreshing(false); }
   }, []);
@@ -184,8 +186,16 @@ export default function OrdersAdmin() {
               <View key={o.id} testID={`admin-order-${o.id}`} style={styles.card}>
                 <View style={styles.cardTop}>
                   <Text style={styles.plate}>{o.plate}</Text>
-                  <View style={[styles.pill, { backgroundColor: s.c }]}>
-                    <Text style={styles.pillText}>{s.label}</Text>
+                  <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+                    {unread[o.id] ? (
+                      <View style={styles.unreadBadge}>
+                        <Ionicons name="chatbubble" size={11} color={colors.textInverse} />
+                        <Text style={styles.unreadText}>{unread[o.id]}</Text>
+                      </View>
+                    ) : null}
+                    <View style={[styles.pill, { backgroundColor: s.c }]}>
+                      <Text style={styles.pillText}>{s.label}</Text>
+                    </View>
                   </View>
                 </View>
                 <Text style={styles.vehicle}>{o.vehicle}</Text>
@@ -285,6 +295,11 @@ const styles = StyleSheet.create({
   pendingSectionLabel: { fontSize: 11, letterSpacing: 2.5, color: colors.paused, fontWeight: "900", marginBottom: spacing.sm },
   pendingCard: { borderWidth: 2, borderColor: colors.paused, padding: spacing.md, marginBottom: spacing.sm, backgroundColor: "#FFFBEB" },
   proposedBy: { fontSize: 12, color: colors.textSecondary, marginTop: spacing.sm, fontStyle: "italic" },
+  unreadBadge: {
+    flexDirection: "row", alignItems: "center", gap: 3, backgroundColor: colors.stopped,
+    paddingHorizontal: 7, paddingVertical: 4, borderRadius: 10,
+  },
+  unreadText: { color: colors.textInverse, fontSize: 10, fontWeight: "900" },
   notePreview: {
     fontSize: 12, color: colors.text, marginTop: 6, paddingLeft: 8,
     borderLeftWidth: 3, borderLeftColor: colors.paused, lineHeight: 17,
