@@ -1151,6 +1151,9 @@ async def send_message(order_id: str, body: MessageIn, user: dict = Depends(get_
         f"Messaggio da {user['full_name']}",
         f"[{row['plate']}] {text}",
     ))
+    # se la commessa è già completata, il nuovo messaggio aggiorna il caso nella memoria storica
+    if row["status"] == "completed":
+        asyncio.create_task(_upsert_case_embedding(order_id))
     return OrderMessage(
         id=msg_id, work_order_id=order_id, sender_id=user["id"], sender_name=user["full_name"],
         sender_role=user["role"], text=text, created_at=now,
@@ -1600,7 +1603,7 @@ async def _embed_text(text: str) -> Optional[str]:
         return None
 
 
-def _build_case_content(row: dict, events: List[dict], turns: List[dict]) -> str:
+def _build_case_content(row: dict, events: List[dict], turns: List[dict], messages: Optional[List[dict]] = None) -> str:
     """Costruisce il 'caso' testuale di una commessa: veicolo, problema, lavori, ricambi, dialogo."""
     scheda = row.get("scheda_tecnica") or {}
     if isinstance(scheda, str):
@@ -1627,7 +1630,12 @@ def _build_case_content(row: dict, events: List[dict], turns: List[dict]) -> str
     dialog = " / ".join(t.get("text", "") for t in turns if t.get("role") == "user")
     if dialog:
         parts.append(f"DIALOGO OPERAIO: {dialog[:1500]}")
-    return "\n".join(parts)[:6000]
+    if messages:
+        # Gli scambi tra officina e operai contengono spesso la vera diagnosi:
+        # entrano nel caso così l'AI impara anche dalle conversazioni.
+        scambi = " / ".join(f"{m['sender_name']}: {m['text']}" for m in messages)
+        parts.append(f"SCAMBI OFFICINA (messaggi): {scambi[:1500]}")
+    return "\n".join(parts)[:7000]
 
 
 async def _upsert_case_embedding(order_id: str):
@@ -1641,7 +1649,11 @@ async def _upsert_case_embedding(order_id: str):
         turns_raw = convo["turns"] if convo else []
         if isinstance(turns_raw, str):
             turns_raw = json.loads(turns_raw)
-        content = _build_case_content(row, events, turns_raw or [])
+        messages = await fetch(
+            "SELECT sender_name, text FROM order_messages WHERE work_order_id=$1 ORDER BY created_at ASC LIMIT 200",
+            order_id
+        )
+        content = _build_case_content(row, events, turns_raw or [], messages)
         vec = await _embed_text(content)
         if not vec:
             return
