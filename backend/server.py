@@ -15,7 +15,6 @@ from datetime import datetime, timezone, timedelta
 from typing import List, Optional, Literal
 
 import asyncpg
-import httpx
 from fastapi import FastAPI, APIRouter, HTTPException, Depends, status, UploadFile, File, Header
 from fastapi.responses import FileResponse
 from fastapi.security import OAuth2PasswordBearer
@@ -40,6 +39,7 @@ SEED_ADMIN_USERNAME = os.environ.get("SEED_ADMIN_USERNAME", "admin")
 SEED_ADMIN_PASSWORD = os.environ.get("SEED_ADMIN_PASSWORD", "admin123")
 UPLOADS_DIR = Path(os.environ.get("UPLOADS_DIR", str(ROOT_DIR / "uploads")))
 MAX_PHOTO_BYTES = int(os.environ.get("MAX_PHOTO_BYTES", str(15 * 1024 * 1024)))  # 15MB
+# Openapi.com: riserva futura per targhe fuori anagrafica STAR (token sandbox in .env, non usato)
 OPENAPI_TOKEN = os.environ.get("OPENAPI_TOKEN", "")
 OPENAPI_BASE_URL = os.environ.get("OPENAPI_BASE_URL", "https://automotive.openapi.com")
 OMNIUS_KEY = os.environ.get("OMNIUS_KEY", "")
@@ -449,6 +449,20 @@ async def startup():
         await conn.execute("ALTER TABLE work_orders ADD COLUMN IF NOT EXISTS created_by TEXT")
         await conn.execute("ALTER TABLE work_orders ADD COLUMN IF NOT EXISTS created_by_name TEXT")
         await conn.execute("ALTER TABLE work_orders ADD COLUMN IF NOT EXISTS star_doc_id TEXT")
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS plate_lookup_requests (
+                id TEXT PRIMARY KEY,
+                work_order_id TEXT NOT NULL,
+                plate TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                requested_by_name TEXT,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                answered_at TIMESTAMPTZ
+            )
+        """)
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_plate_lookup_pending ON plate_lookup_requests (status, created_at)"
+        )
         await conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_work_orders_star_doc_id ON work_orders (star_doc_id) WHERE star_doc_id IS NOT NULL"
         )
@@ -1465,101 +1479,154 @@ async def ocr_plate(body: PlateOcrIn, user: dict = Depends(get_current_user)):
         return PlateOcrOut(plate=None, raw="NON_TROVATA")
 
 
-# ---- Dati veicolo ufficiali (Openapi.com — Italian Car Check) ----
-class PlateLookupOut(BaseModel):
-    found: bool
-    scheda_tecnica: SchedaTecnica
-    turn: Optional[ConversationTurn] = None
-    raw: Optional[dict] = None
-
-
-def _compose_motore(d: dict) -> Optional[str]:
-    parts = []
-    if d.get("EngineSize"):
-        parts.append(f"{d['EngineSize']}cc")
-    if d.get("FuelType"):
-        parts.append(d["FuelType"])
-    if d.get("PowerCV"):
-        parts.append(f"{d['PowerCV']}CV")
-    return " ".join(parts) if parts else None
-
-
-class PlateLookupIn(BaseModel):
-    plate: Optional[str] = None  # se assente, usa la targa già salvata sulla commessa
-
-
-@api.post("/work-orders/{order_id}/lookup-plate", response_model=PlateLookupOut)
-async def lookup_plate(order_id: str, body: PlateLookupIn = PlateLookupIn(), user: dict = Depends(get_current_user)):
-    if not OPENAPI_TOKEN:
-        raise HTTPException(status_code=503, detail="Servizio dati veicolo non configurato")
-    row = await _order_or_403(order_id, user)
-    plate = (body.plate or row.get("plate") or "").strip().upper().replace(" ", "")
-    if not plate:
-        raise HTTPException(status_code=400, detail="Nessuna targa disponibile")
-
-    try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.get(
-                f"{OPENAPI_BASE_URL}/IT-car/{plate}",
-                headers={"Authorization": f"Bearer {OPENAPI_TOKEN}"},
-            )
-        payload = resp.json()
-    except Exception as e:
-        logger.warning(f"openapi lookup-plate failed: {e}")
-        raise HTTPException(status_code=502, detail="Servizio dati veicolo non raggiungibile")
-
-    if not payload.get("success") or not payload.get("data"):
-        scheda_raw = row.get("scheda_tecnica") or {}
-        if isinstance(scheda_raw, str):
-            scheda_raw = json.loads(scheda_raw)
-        return PlateLookupOut(found=False, scheda_tecnica=SchedaTecnica(**scheda_raw), raw=payload)
-
-    d = payload["data"]
-    scheda_raw = row.get("scheda_tecnica") or {}
-    if isinstance(scheda_raw, str):
-        scheda_raw = json.loads(scheda_raw)
-    merged = dict(scheda_raw)
-    if d.get("CarMake"):
-        merged["marca"] = d["CarMake"]
-    if d.get("CarModel"):
-        merged["modello"] = d["CarModel"]
-    if d.get("RegistrationYear"):
-        merged["anno"] = str(d["RegistrationYear"])
-    motore = _compose_motore(d)
-    if motore:
-        merged["motore"] = motore
-    if d.get("Version"):
-        note_prev = (merged.get("note") or "").strip()
-        version_note = f"Versione: {d['Version']}"
-        if version_note not in note_prev:
-            merged["note"] = f"{note_prev}\n{version_note}".strip()
-    scheda_final = SchedaTecnica(**merged)
-
+# ---- Dati veicolo dalla targa (via STAR/Omnius, coda di richieste) ----
+async def _append_ai_turn(order_id: str, text: str) -> None:
+    """Aggiunge un turno 'assistant' alla conversazione della commessa."""
     now = now_utc()
-    summary = f"Targa {plate}: {merged.get('marca','')} {merged.get('modello','')} — dati ufficiali recuperati."
     convo_row = await fetchrow("SELECT turns FROM conversations WHERE work_order_id=$1", order_id)
     turns_raw = convo_row["turns"] if convo_row else []
     if isinstance(turns_raw, str):
         turns_raw = json.loads(turns_raw)
-    turns = turns_raw or []
-    ai_turn_d = {"role": "assistant", "text": summary, "timestamp": now.isoformat()}
-    new_turns = turns + [ai_turn_d]
+    new_turns = (turns_raw or []) + [{"role": "assistant", "text": text, "timestamp": now.isoformat()}]
     await execute(
         """INSERT INTO conversations (work_order_id, turns, created_at, updated_at)
            VALUES ($1, $2::jsonb, $3, $3)
            ON CONFLICT (work_order_id) DO UPDATE SET turns=$2::jsonb, updated_at=$3""",
         order_id, json.dumps(new_turns), now
     )
-    await execute(
-        "UPDATE work_orders SET scheda_tecnica=$1::jsonb, updated_at=$2 WHERE id=$3",
-        json.dumps(scheda_final.model_dump()), now, order_id
-    )
 
-    return PlateLookupOut(
-        found=True, scheda_tecnica=scheda_final,
-        turn=ConversationTurn(role="assistant", text=summary, timestamp=now),
-        raw=payload,
+
+async def _apply_vehicle_data(order_id: str, plate: str, *, marca: Optional[str], modello: Optional[str],
+                              anno: Optional[str], motore: Optional[str], vin: Optional[str],
+                              note_extra: Optional[str], source: str) -> SchedaTecnica:
+    """Scrive i dati veicolo nella scheda tecnica e annota la provenienza in conversazione."""
+    row = await fetchrow("SELECT * FROM work_orders WHERE id=$1", order_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Commessa non trovata")
+    scheda_raw = row.get("scheda_tecnica") or {}
+    if isinstance(scheda_raw, str):
+        scheda_raw = json.loads(scheda_raw)
+    merged = dict(scheda_raw)
+    if marca:
+        merged["marca"] = marca
+    if modello:
+        merged["modello"] = modello
+    if anno:
+        merged["anno"] = str(anno)
+    if motore:
+        merged["motore"] = motore
+    if note_extra:
+        prev = (merged.get("note") or "").strip()
+        if note_extra not in prev:
+            merged["note"] = f"{prev}\n{note_extra}".strip()
+    scheda_final = SchedaTecnica(**merged)
+    now = now_utc()
+    parts = ["UPDATE work_orders SET scheda_tecnica=$1::jsonb, updated_at=$2"]
+    vals: list = [json.dumps(scheda_final.model_dump()), now]
+    if vin:
+        parts.append(", vin=$3")
+        vals.append(vin)
+    vals.append(order_id)
+    await execute(f"{''.join(parts)} WHERE id=${len(vals)}", *vals)
+    await _append_ai_turn(order_id, f"Targa {plate}: {merged.get('marca','')} {merged.get('modello','')} — dati da {source}.")
+    return scheda_final
+
+
+class PlateLookupIn(BaseModel):
+    plate: Optional[str] = None  # se assente, usa la targa già salvata sulla commessa
+
+
+class PlateLookupQueuedOut(BaseModel):
+    queued: bool
+    request_id: Optional[str] = None
+    message: str
+
+
+@api.post("/work-orders/{order_id}/lookup-plate", response_model=PlateLookupQueuedOut)
+async def lookup_plate(order_id: str, body: PlateLookupIn = PlateLookupIn(), user: dict = Depends(get_current_user)):
+    """Mette in coda la richiesta dati veicolo: il fattorino di Omnius la ritira,
+    interroga l'anagrafica STAR e riporta la risposta su /v1/omnius/lookup-results."""
+    if not OMNIUS_KEY:
+        raise HTTPException(status_code=503, detail="Integrazione STAR non configurata")
+    await _order_or_403(order_id, user)
+    row = await fetchrow("SELECT plate FROM work_orders WHERE id=$1", order_id)
+    plate = (body.plate or row.get("plate") or "").strip().upper().replace(" ", "")
+    if not plate:
+        raise HTTPException(status_code=400, detail="Nessuna targa disponibile")
+
+    # dedupe: una sola richiesta pendente per commessa+targa
+    existing = await fetchrow(
+        "SELECT id FROM plate_lookup_requests WHERE work_order_id=$1 AND plate=$2 AND status='pending'",
+        order_id, plate
     )
+    if existing:
+        return PlateLookupQueuedOut(queued=True, request_id=existing["id"],
+                                    message="Richiesta già in coda, dati in arrivo da STAR")
+    req_id = str(uuid.uuid4())
+    await execute(
+        """INSERT INTO plate_lookup_requests (id, work_order_id, plate, status, requested_by_name, created_at)
+           VALUES ($1,$2,$3,'pending',$4,$5)""",
+        req_id, order_id, plate, user["full_name"], now_utc()
+    )
+    return PlateLookupQueuedOut(queued=True, request_id=req_id, message="Richiesta inviata, dati in arrivo da STAR")
+
+
+class OmniusLookupRequestOut(BaseModel):
+    request_id: str
+    work_order_id: str
+    plate: str
+    created_at: datetime
+
+
+@api.get("/v1/omnius/lookup-requests", response_model=List[OmniusLookupRequestOut], dependencies=[Depends(require_omnius_key)])
+async def omnius_lookup_requests():
+    """Le richieste targa in attesa. Il fattorino le ritira, chiede a STAR e risponde su lookup-results."""
+    rows = await fetch(
+        "SELECT id, work_order_id, plate, created_at FROM plate_lookup_requests WHERE status='pending' ORDER BY created_at ASC LIMIT 50"
+    )
+    return [OmniusLookupRequestOut(request_id=r["id"], work_order_id=r["work_order_id"],
+                                   plate=r["plate"], created_at=r["created_at"]) for r in rows]
+
+
+class OmniusLookupResultIn(BaseModel):
+    request_id: str
+    found: bool
+    make: Optional[str] = None
+    model: Optional[str] = None
+    year: Optional[str] = None
+    engine: Optional[str] = None       # descrizione libera es. "1.3 Multijet 1248cc Diesel 95CV"
+    vin: Optional[str] = None
+    customer: Optional[str] = None     # se STAR ha l'anagrafica
+    note: Optional[str] = None         # extra (versione, allestimento...)
+
+
+@api.post("/v1/omnius/lookup-results", dependencies=[Depends(require_omnius_key)])
+async def omnius_lookup_result(body: OmniusLookupResultIn):
+    req = await fetchrow("SELECT * FROM plate_lookup_requests WHERE id=$1", body.request_id)
+    if not req:
+        raise HTTPException(status_code=404, detail="Richiesta non trovata")
+    if req["status"] != "pending":
+        return {"ok": True, "note": "richiesta già evasa"}
+    order_id, plate = req["work_order_id"], req["plate"]
+
+    if not body.found:
+        await execute("UPDATE plate_lookup_requests SET status='failed', answered_at=$1 WHERE id=$2", now_utc(), body.request_id)
+        await _append_ai_turn(order_id, f"Targa {plate}: dati non trovati in STAR. Compila la scheda a voce o a mano.")
+        return {"ok": True, "found": False}
+
+    await _apply_vehicle_data(
+        order_id, plate,
+        marca=body.make, modello=body.model, anno=body.year, motore=body.engine,
+        vin=body.vin, note_extra=body.note, source="STAR",
+    )
+    # aggiorna anche il cliente se STAR lo conosce e da noi è un segnaposto
+    if body.customer and body.customer.strip():
+        row = await fetchrow("SELECT customer FROM work_orders WHERE id=$1", order_id)
+        if row and (row["customer"] or "").strip().upper() in ("", "DA INSERIRE", "CLIENTE DA DEFINIRE"):
+            await execute("UPDATE work_orders SET customer=$1, updated_at=$2 WHERE id=$3",
+                          body.customer.strip(), now_utc(), order_id)
+    await execute("UPDATE plate_lookup_requests SET status='answered', answered_at=$1 WHERE id=$2", now_utc(), body.request_id)
+    return {"ok": True, "found": True}
 
 
 # ---- Audio: transcription ----

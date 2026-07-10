@@ -144,14 +144,34 @@ export function VoiceChat({ orderId, readOnly }: Props) {
       });
       if (out.plate) {
         try {
-          const lookup = await lookupPlate(orderId, out.plate);
-          setScheda(lookup.scheda_tecnica);
-          if (lookup.turn) setTurns((prev) => [...prev, lookup.turn as ConversationTurn]);
-          if (!lookup.found) {
-            showAlert("Targa letta", `${out.plate} — dati ufficiali non disponibili, la aggiungo comunque alla scheda.`);
-          }
+          await lookupPlate(orderId, out.plate);
+          // Messaggio locale di attesa; la risposta vera arriva da STAR via Omnius
+          setTurns((prev) => [...prev, {
+            role: "assistant",
+            text: `Targa ${out.plate} letta — chiedo i dati del veicolo a STAR...`,
+            timestamp: new Date().toISOString(),
+          } as ConversationTurn]);
+          // Attendi la risposta: ricontrolla la conversazione ogni 5s (max ~75s)
+          const plate = out.plate;
+          let tries = 0;
+          const poll = setInterval(async () => {
+            tries++;
+            try {
+              const c = await api<Conversation>(`/work-orders/${orderId}/conversation`);
+              const answered = c.turns.some(
+                (t) => t.role === "assistant" && t.text.startsWith(`Targa ${plate}:`)
+              );
+              if (answered || tries >= 15) {
+                clearInterval(poll);
+                if (answered) {
+                  setScheda(c.scheda_tecnica);
+                  setTurns(c.turns);
+                }
+              }
+            } catch { if (tries >= 15) clearInterval(poll); }
+          }, 5000);
         } catch (e: any) {
-          showAlert("Targa letta ma dati non recuperati", e?.message || `Targa: ${out.plate}`);
+          showAlert("Targa letta ma richiesta non inviata", e?.message || `Targa: ${out.plate}`);
         }
       } else {
         showAlert("Targa non letta", `Risposta AI: ${out.raw}`);

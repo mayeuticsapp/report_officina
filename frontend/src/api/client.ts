@@ -141,15 +141,15 @@ export type VoiceTurnResp = {
   turn: ConversationTurn;
 };
 
-export type PlateLookupResp = {
-  found: boolean;
-  scheda_tecnica: SchedaTecnica;
-  turn: ConversationTurn | null;
+export type PlateLookupQueued = {
+  queued: boolean;
+  request_id: string | null;
+  message: string;
 };
 
-/** Recupera i dati ufficiali del veicolo (marca, modello, motore, anno). Se plate è omessa, usa quella già salvata sulla commessa. */
-export async function lookupPlate(orderId: string, plate?: string): Promise<PlateLookupResp> {
-  return api<PlateLookupResp>(`/work-orders/${orderId}/lookup-plate`, {
+/** Mette in coda la richiesta dati veicolo: Omnius la ritira da STAR e la risposta arriva nella scheda (10-60s). */
+export async function lookupPlate(orderId: string, plate?: string): Promise<PlateLookupQueued> {
+  return api<PlateLookupQueued>(`/work-orders/${orderId}/lookup-plate`, {
     method: "POST",
     body: plate ? { plate } : {},
   });
