@@ -6,7 +6,8 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { useRouter, useFocusEffect } from "expo-router";
-import { api, WorkOrder, proposeWorkOrder, unreadMessages } from "@/src/api/client";
+import * as ImagePicker from "expo-image-picker";
+import { api, WorkOrder, proposeWorkOrder, lookupPlate, unreadMessages } from "@/src/api/client";
 import { showAlert } from "@/src/utils/dialog";
 import { colors, spacing } from "@/src/theme";
 
@@ -18,7 +19,7 @@ const statusMap: Record<string, { c: string; label: string }> = {
   completed: { c: colors.textSecondary, label: "COMPLETATA" },
 };
 
-const EMPTY_FORM = { plate: "", vin: "", customer: "", vehicle: "", description: "" };
+const EMPTY_FORM = { plate: "", description: "" };
 
 export default function WorkerOrders() {
   const router = useRouter();
@@ -49,25 +50,54 @@ export default function WorkerOrders() {
     return o.status !== "completed";
   });
 
-  const openNew = () => { setForm(EMPTY_FORM); setModalOpen(true); };
-
-  const submitPropose = async () => {
-    if (!form.plate.trim() || !form.customer.trim() || !form.vehicle.trim()) {
-      showAlert("Campi obbligatori", "Targa, cliente e veicolo sono richiesti");
+  // NUOVA: parte direttamente la fotocamera sulla targa. Cliente e modello arrivano da STAR.
+  const openNew = async () => {
+    const perm = await ImagePicker.requestCameraPermissionsAsync();
+    if (perm.status !== "granted") {
+      // niente fotocamera: apri comunque il form, targa a mano
+      setForm(EMPTY_FORM);
+      setModalOpen(true);
+      return;
+    }
+    const res = await ImagePicker.launchCameraAsync({ quality: 0.5, base64: true, mediaTypes: ["images"] });
+    if (res.canceled || !res.assets[0]?.base64) {
+      setForm(EMPTY_FORM);
+      setModalOpen(true);
       return;
     }
     setSubmitting(true);
     try {
-      await proposeWorkOrder({
+      const out = await api<{ plate: string | null; raw: string }>("/vision/plate", {
+        method: "POST",
+        body: { image_base64: res.assets[0].base64 },
+      });
+      setForm({ plate: out.plate || "", description: "" });
+      if (!out.plate) showAlert("Targa non letta", "Scrivila a mano nel campo TARGA.");
+    } catch {
+      setForm(EMPTY_FORM);
+      showAlert("Targa non letta", "Scrivila a mano nel campo TARGA.");
+    } finally {
+      setSubmitting(false);
+      setModalOpen(true);
+    }
+  };
+
+  const submitPropose = async () => {
+    if (!form.plate.trim() || !form.description.trim()) {
+      showAlert("Campi obbligatori", "Servono la targa e il problema/lavoro da fare");
+      return;
+    }
+    setSubmitting(true);
+    try {
+      const order = await proposeWorkOrder({
         plate: form.plate.trim().toUpperCase(),
-        vin: form.vin.trim() || undefined,
-        customer: form.customer.trim(),
-        vehicle: form.vehicle.trim(),
         description: form.description.trim(),
       });
+      // chiedi subito i dati veicolo a STAR (arrivano via Omnius)
+      try { await lookupPlate(order.id, order.plate); } catch { /* non bloccare */ }
       setModalOpen(false);
       await load();
-      showAlert("Inviata", "La commessa è stata inviata al titolare per l'approvazione.");
+      showAlert("Inviata", "Commessa inviata al titolare. I dati del veicolo arrivano da STAR.");
     } catch (e: any) {
       showAlert("Errore", e?.message || "Impossibile inviare la commessa");
     } finally { setSubmitting(false); }
@@ -77,8 +107,12 @@ export default function WorkerOrders() {
     <SafeAreaView style={styles.safe} edges={["top"]}>
       <View style={styles.header}>
         <Text style={styles.title}>COMMESSE</Text>
-        <TouchableOpacity testID="btn-propose-order" style={styles.addBtn} onPress={openNew}>
-          <Ionicons name="add" size={20} color={colors.textInverse} />
+        <TouchableOpacity testID="btn-propose-order" style={styles.addBtn} onPress={openNew} disabled={submitting}>
+          {submitting && !modalOpen ? (
+            <ActivityIndicator size="small" color={colors.textInverse} />
+          ) : (
+            <Ionicons name="camera" size={20} color={colors.textInverse} />
+          )}
           <Text style={styles.addBtnText}>NUOVA</Text>
         </TouchableOpacity>
       </View>
@@ -155,26 +189,18 @@ export default function WorkerOrders() {
               <Text style={styles.mTitle}>NUOVA COMMESSA</Text>
               <TouchableOpacity onPress={() => setModalOpen(false)}><Ionicons name="close" size={26} color={colors.text} /></TouchableOpacity>
             </View>
-            <Text style={styles.mHint}>Verrà inviata al titolare, che dovrà approvarla prima che tu possa iniziare a lavorarci.</Text>
+            <Text style={styles.mHint}>Cliente e modello arrivano da soli da STAR. Tu conferma la targa e scrivi il problema — poi il titolare approva.</Text>
             <ScrollView contentContainerStyle={{ padding: spacing.lg }} keyboardShouldPersistTaps="handled">
-              <Text style={styles.label}>TARGA</Text>
-              <TextInput testID="input-propose-plate" style={styles.input} value={form.plate} onChangeText={(v) => setForm({ ...form, plate: v })} autoCapitalize="characters" />
+              <Text style={styles.label}>TARGA (letta dalla foto — correggila se serve)</Text>
+              <TextInput testID="input-propose-plate" style={[styles.input, styles.plateInput]} value={form.plate} onChangeText={(v) => setForm({ ...form, plate: v })} autoCapitalize="characters" placeholder="AA123BB" placeholderTextColor={colors.textSecondary} />
 
-              <Text style={[styles.label, { marginTop: spacing.md }]}>VIN (facoltativo)</Text>
-              <TextInput testID="input-propose-vin" style={styles.input} value={form.vin} onChangeText={(v) => setForm({ ...form, vin: v })} autoCapitalize="characters" />
-
-              <Text style={[styles.label, { marginTop: spacing.md }]}>CLIENTE</Text>
-              <TextInput testID="input-propose-customer" style={styles.input} value={form.customer} onChangeText={(v) => setForm({ ...form, customer: v })} />
-
-              <Text style={[styles.label, { marginTop: spacing.md }]}>VEICOLO</Text>
-              <TextInput testID="input-propose-vehicle" style={styles.input} value={form.vehicle} onChangeText={(v) => setForm({ ...form, vehicle: v })} placeholder="es. BMW 320d 2018" placeholderTextColor={colors.textSecondary} />
-
-              <Text style={[styles.label, { marginTop: spacing.md }]}>LAVORAZIONE</Text>
+              <Text style={[styles.label, { marginTop: spacing.md }]}>PROBLEMA / LAVORO DA FARE</Text>
               <TextInput
-                testID="input-propose-description" style={[styles.input, { minHeight: 80, textAlignVertical: "top" }]}
+                testID="input-propose-description" style={[styles.input, { minHeight: 110, textAlignVertical: "top" }]}
                 value={form.description} onChangeText={(v) => setForm({ ...form, description: v })} multiline
-                placeholder="Cosa devi fare su questa macchina"
+                placeholder="es. Rumore alla sospensione anteriore destra / tagliando completo"
                 placeholderTextColor={colors.textSecondary}
+                autoFocus={!!form.plate}
               />
             </ScrollView>
             <View style={{ padding: spacing.lg, borderTopWidth: 1, borderTopColor: colors.border }}>
@@ -198,6 +224,7 @@ const styles = StyleSheet.create({
   title: { fontSize: 28, fontWeight: "900", color: colors.text, letterSpacing: -0.5 },
   addBtn: { flexDirection: "row", alignItems: "center", gap: 6, backgroundColor: colors.text, paddingHorizontal: 14, paddingVertical: 12 },
   addBtnText: { color: colors.textInverse, fontWeight: "900", letterSpacing: 2, fontSize: 12 },
+  plateInput: { fontSize: 22, fontWeight: "900", letterSpacing: 2, textAlign: "center" },
   chipScroller: { maxHeight: 56, borderBottomWidth: 1, borderBottomColor: colors.border },
   chipRow: { paddingHorizontal: spacing.lg, gap: 8, alignItems: "center", paddingVertical: 10 },
   chip: {

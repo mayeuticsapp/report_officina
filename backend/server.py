@@ -205,8 +205,8 @@ class WorkOrderCreate(BaseModel):
 class WorkOrderPropose(BaseModel):
     plate: str
     vin: Optional[str] = None
-    customer: str
-    vehicle: str
+    customer: Optional[str] = None   # il meccanico spesso non lo sa: arriva da STAR
+    vehicle: Optional[str] = None    # idem
     description: str
 
 
@@ -684,16 +684,19 @@ async def propose_work_order(body: WorkOrderPropose, user: dict = Depends(get_cu
     now = now_utc()
     scheda = SchedaTecnica().model_dump()
     assigned = [user["id"]]
+    customer = (body.customer or "").strip() or "DA INSERIRE"
+    vehicle = (body.vehicle or "").strip() or "Da identificare"
+    plate = body.plate.strip().upper().replace(" ", "")
     await execute(
         """INSERT INTO work_orders
            (id, plate, vin, customer, vehicle, description, assigned_worker_ids, status, scheda_tecnica, created_by, created_by_name, created_at, updated_at)
            VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9::jsonb,$10,$11,$12,$13)""",
-        new_id, body.plate, body.vin, body.customer, body.vehicle, body.description,
+        new_id, plate, body.vin, customer, vehicle, body.description,
         json.dumps(assigned), "pending", json.dumps(scheda), user["id"], user["full_name"], now, now
     )
     return WorkOrder(
-        id=new_id, plate=body.plate, vin=body.vin, customer=body.customer,
-        vehicle=body.vehicle, description=body.description,
+        id=new_id, plate=plate, vin=body.vin, customer=customer,
+        vehicle=vehicle, description=body.description,
         assigned_worker_ids=assigned, status="pending",
         scheda_tecnica=SchedaTecnica(**scheda), created_by=user["id"], created_by_name=user["full_name"],
         created_at=now, updated_at=now
@@ -1619,12 +1622,18 @@ async def omnius_lookup_result(body: OmniusLookupResultIn):
         marca=body.make, modello=body.model, anno=body.year, motore=body.engine,
         vin=body.vin, note_extra=body.note, source="STAR",
     )
-    # aggiorna anche il cliente se STAR lo conosce e da noi è un segnaposto
-    if body.customer and body.customer.strip():
-        row = await fetchrow("SELECT customer FROM work_orders WHERE id=$1", order_id)
-        if row and (row["customer"] or "").strip().upper() in ("", "DA INSERIRE", "CLIENTE DA DEFINIRE"):
+    # aggiorna cliente e veicolo se STAR li conosce e da noi sono segnaposto
+    row = await fetchrow("SELECT customer, vehicle FROM work_orders WHERE id=$1", order_id)
+    if row:
+        if body.customer and body.customer.strip() and \
+           (row["customer"] or "").strip().upper() in ("", "DA INSERIRE", "CLIENTE DA DEFINIRE"):
             await execute("UPDATE work_orders SET customer=$1, updated_at=$2 WHERE id=$3",
                           body.customer.strip(), now_utc(), order_id)
+        vehicle_label = " ".join(filter(None, [body.make, body.model, body.year and f"({body.year})"]))
+        if vehicle_label and \
+           (row["vehicle"] or "").strip().upper() in ("", "DA IDENTIFICARE", "VEICOLO DA DEFINIRE", "DA DEFINIRE", "DA INSERIRE"):
+            await execute("UPDATE work_orders SET vehicle=$1, updated_at=$2 WHERE id=$3",
+                          vehicle_label, now_utc(), order_id)
     await execute("UPDATE plate_lookup_requests SET status='answered', answered_at=$1 WHERE id=$2", now_utc(), body.request_id)
     return {"ok": True, "found": True}
 

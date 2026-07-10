@@ -74,8 +74,8 @@ export type WorkOrder = {
 export type WorkOrderProposeIn = {
   plate: string;
   vin?: string;
-  customer: string;
-  vehicle: string;
+  customer?: string;  // se assente, arriva da STAR
+  vehicle?: string;   // idem
   description: string;
 };
 
