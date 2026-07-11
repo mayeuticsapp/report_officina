@@ -8,14 +8,18 @@ import * as ImagePicker from "expo-image-picker";
 import {
   AudioModule, RecordingPresets, useAudioRecorder,
 } from "expo-audio";
-import { api, Conversation, ConversationTurn, SchedaTecnica, VoiceTurnResp, transcribeAudio, lookupPlate } from "@/src/api/client";
+import { api, Conversation, ConversationTurn, SchedaTecnica, VoiceTurnResp, transcribeAudio, lookupPlate, editDialogTurn } from "@/src/api/client";
+import { useAuth } from "@/src/auth/AuthContext";
 import { confirmDialog, showAlert } from "@/src/utils/dialog";
 import { colors, spacing } from "@/src/theme";
 
 type Props = { orderId: string; readOnly?: boolean };
 
 export function VoiceChat({ orderId, readOnly }: Props) {
+  const { user } = useAuth();
   const [scheda, setScheda] = useState<SchedaTecnica | null>(null);
+  const [editingIdx, setEditingIdx] = useState<number | null>(null);
+  const [editText, setEditText] = useState("");
   const [turns, setTurns] = useState<ConversationTurn[]>([]);
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
@@ -181,6 +185,21 @@ export function VoiceChat({ orderId, readOnly }: Props) {
     } finally { setScanning(false); }
   };
 
+  const saveTurnEdit = async () => {
+    if (editingIdx === null) return;
+    const t = editText.trim();
+    if (!t) { showAlert("Testo vuoto", "Scrivi il testo corretto o annulla."); return; }
+    try {
+      const c = await editDialogTurn(orderId, editingIdx, t);
+      setScheda(c.scheda_tecnica);
+      setTurns(c.turns);
+      setEditingIdx(null);
+      setEditText("");
+    } catch (e: any) {
+      showAlert("Errore", e?.message || "Modifica non salvata");
+    }
+  };
+
   if (loading) return <View style={styles.loader}><ActivityIndicator color={colors.text} /></View>;
 
   return (
@@ -220,14 +239,49 @@ export function VoiceChat({ orderId, readOnly }: Props) {
             {readOnly ? "Nessuna conversazione." : "Inizia parlando: descrivi la macchina, cosa hai fatto e cosa manca."}
           </Text>
         ) : (
-          turns.map((t, i) => (
-            <View key={i} style={[styles.bubble, t.role === "user" ? styles.bubbleUser : styles.bubbleAi]}>
-              <Text style={[styles.bubbleAuthor, t.role === "user" ? styles.bubbleAuthorUser : styles.bubbleAuthorAi]}>
-                {t.role === "user" ? (t.worker_full_name || "OPERAIO").toUpperCase() : "AI"}
-              </Text>
-              <Text style={[styles.bubbleText, t.role === "user" && { color: colors.textInverse }]}>{t.text}</Text>
-            </View>
-          ))
+          turns.map((t, i) => {
+            const mine = t.role === "user" && !readOnly && (!t.worker_id || t.worker_id === user?.id);
+            const isEditing = editingIdx === i;
+            return (
+              <View key={i} style={[styles.bubble, t.role === "user" ? styles.bubbleUser : styles.bubbleAi]}>
+                <Text style={[styles.bubbleAuthor, t.role === "user" ? styles.bubbleAuthorUser : styles.bubbleAuthorAi]}>
+                  {t.role === "user" ? (t.worker_full_name || "OPERAIO").toUpperCase() : "AI"}
+                  {t.edited_at ? " · MODIFICATO" : ""}
+                </Text>
+                {isEditing ? (
+                  <View>
+                    <TextInput
+                      testID={`edit-turn-input-${i}`}
+                      style={styles.turnEditInput}
+                      value={editText}
+                      onChangeText={setEditText}
+                      multiline
+                      autoFocus
+                    />
+                    <View style={styles.turnEditActions}>
+                      <TouchableOpacity testID={`btn-save-turn-${i}`} onPress={saveTurnEdit} style={styles.turnEditBtn}>
+                        <Ionicons name="checkmark" size={16} color={colors.active} />
+                        <Text style={[styles.turnEditBtnText, { color: colors.active }]}>SALVA</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity onPress={() => { setEditingIdx(null); setEditText(""); }} style={styles.turnEditBtn}>
+                        <Ionicons name="close" size={16} color="#A1A1AA" />
+                        <Text style={styles.turnEditBtnText}>ANNULLA</Text>
+                      </TouchableOpacity>
+                    </View>
+                  </View>
+                ) : (
+                  <View style={{ flexDirection: "row", alignItems: "flex-end", gap: 6 }}>
+                    <Text style={[styles.bubbleText, { flex: 1 }, t.role === "user" && { color: colors.textInverse }]}>{t.text}</Text>
+                    {mine && (
+                      <TouchableOpacity testID={`btn-edit-turn-${i}`} onPress={() => { setEditingIdx(i); setEditText(t.text); }} style={{ padding: 2 }}>
+                        <Ionicons name="pencil" size={13} color="#A1A1AA" />
+                      </TouchableOpacity>
+                    )}
+                  </View>
+                )}
+              </View>
+            );
+          })
         )}
       </ScrollView>
 
@@ -360,4 +414,11 @@ const styles = StyleSheet.create({
   micBtn: { width: 56, height: 56, backgroundColor: colors.primary, alignItems: "center", justifyContent: "center", borderRadius: Platform.OS === "web" ? 0 : 0 },
   micBtnActive: { backgroundColor: colors.stopped },
   hint: { fontSize: 11, color: colors.textSecondary, marginTop: 6, textAlign: "center" },
+  turnEditInput: {
+    borderWidth: 1, borderColor: "#A1A1AA", backgroundColor: colors.bg, color: colors.text,
+    paddingHorizontal: 8, paddingVertical: 6, fontSize: 14, minHeight: 40,
+  },
+  turnEditActions: { flexDirection: "row", gap: 12, marginTop: 6, justifyContent: "flex-end" },
+  turnEditBtn: { flexDirection: "row", alignItems: "center", gap: 4 },
+  turnEditBtnText: { fontSize: 10, fontWeight: "800", letterSpacing: 1, color: colors.textSecondary },
 });

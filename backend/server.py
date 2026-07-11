@@ -318,6 +318,7 @@ class ConversationTurn(BaseModel):
     timestamp: datetime
     worker_id: Optional[str] = None
     worker_full_name: Optional[str] = None
+    edited_at: Optional[datetime] = None
 
 
 class VoiceTurnIn(BaseModel):
@@ -495,6 +496,7 @@ async def startup():
         await conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_order_messages_order ON order_messages (work_order_id, created_at)"
         )
+        await conn.execute("ALTER TABLE order_messages ADD COLUMN IF NOT EXISTS edited_at TIMESTAMPTZ")
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS message_reads (
                 user_id TEXT NOT NULL,
@@ -1058,6 +1060,7 @@ class OrderMessage(BaseModel):
     sender_role: str
     text: str
     created_at: datetime
+    edited_at: Optional[datetime] = None
 
 
 class MessageIn(BaseModel):
@@ -1175,6 +1178,90 @@ async def send_message(order_id: str, body: MessageIn, user: dict = Depends(get_
         id=msg_id, work_order_id=order_id, sender_id=user["id"], sender_name=user["full_name"],
         sender_role=user["role"], text=text, created_at=now,
     )
+
+
+class MessageEditIn(BaseModel):
+    text: str
+
+
+@api.put("/messages/{message_id}", response_model=OrderMessage)
+async def edit_message(message_id: str, body: MessageEditIn, user: dict = Depends(get_current_user)):
+    """Modifica un messaggio: solo l'autore può farlo. Il messaggio resta marcato '(modificato)'."""
+    msg = await fetchrow("SELECT * FROM order_messages WHERE id=$1", message_id)
+    if not msg:
+        raise HTTPException(status_code=404, detail="Messaggio non trovato")
+    if msg["sender_id"] != user["id"]:
+        raise HTTPException(status_code=403, detail="Puoi modificare solo i tuoi messaggi")
+    text = body.text.strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Messaggio vuoto")
+    if len(text) > 2000:
+        raise HTTPException(status_code=413, detail="Messaggio troppo lungo (max 2000)")
+    now = now_utc()
+    await execute("UPDATE order_messages SET text=$1, edited_at=$2 WHERE id=$3", text, now, message_id)
+    row = await fetchrow("SELECT status FROM work_orders WHERE id=$1", msg["work_order_id"])
+    if row and row["status"] == "completed":
+        asyncio.create_task(_upsert_case_embedding(msg["work_order_id"]))
+    return OrderMessage(**{**dict(msg), "text": text, "edited_at": now})
+
+
+@api.delete("/messages/{message_id}")
+async def delete_message(message_id: str, user: dict = Depends(get_current_user)):
+    """Cancella un messaggio: solo l'autore può farlo."""
+    msg = await fetchrow("SELECT * FROM order_messages WHERE id=$1", message_id)
+    if not msg:
+        raise HTTPException(status_code=404, detail="Messaggio non trovato")
+    if msg["sender_id"] != user["id"]:
+        raise HTTPException(status_code=403, detail="Puoi cancellare solo i tuoi messaggi")
+    await execute("DELETE FROM order_messages WHERE id=$1", message_id)
+    row = await fetchrow("SELECT status FROM work_orders WHERE id=$1", msg["work_order_id"])
+    if row and row["status"] == "completed":
+        asyncio.create_task(_upsert_case_embedding(msg["work_order_id"]))
+    return {"ok": True}
+
+
+class TurnEditIn(BaseModel):
+    text: str
+
+
+@api.put("/work-orders/{order_id}/conversation/turns/{turn_index}", response_model=ConversationOut)
+async def edit_conversation_turn(order_id: str, turn_index: int, body: TurnEditIn, user: dict = Depends(get_current_user)):
+    """Modifica un proprio messaggio nel dialogo AI (es. refuso del vocale).
+    Solo turni 'user' propri; il turno resta marcato con edited_at. L'AI non ri-risponde:
+    la correzione vale per il registro, il report e la memoria storica."""
+    await _order_or_403(order_id, user)
+    convo = await fetchrow("SELECT turns FROM conversations WHERE work_order_id=$1", order_id)
+    if not convo:
+        raise HTTPException(status_code=404, detail="Conversazione non trovata")
+    turns = convo["turns"]
+    if isinstance(turns, str):
+        turns = json.loads(turns)
+    turns = turns or []
+    if turn_index < 0 or turn_index >= len(turns):
+        raise HTTPException(status_code=404, detail="Turno non trovato")
+    turn = turns[turn_index]
+    if turn.get("role") != "user":
+        raise HTTPException(status_code=403, detail="Puoi modificare solo i tuoi messaggi, non le risposte dell'AI")
+    if turn.get("worker_id") and turn["worker_id"] != user["id"]:
+        raise HTTPException(status_code=403, detail="Puoi modificare solo i tuoi messaggi")
+    text = body.text.strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Testo vuoto")
+    now = now_utc()
+    turn["text"] = text
+    turn["edited_at"] = now.isoformat()
+    await execute(
+        "UPDATE conversations SET turns=$1::jsonb, updated_at=$2 WHERE work_order_id=$3",
+        json.dumps(turns), now, order_id
+    )
+    row = await fetchrow("SELECT * FROM work_orders WHERE id=$1", order_id)
+    if row and row["status"] == "completed":
+        asyncio.create_task(_upsert_case_embedding(order_id))
+    scheda_raw = row.get("scheda_tecnica") or {}
+    if isinstance(scheda_raw, str):
+        scheda_raw = json.loads(scheda_raw)
+    parsed_turns = [ConversationTurn(**{k: v for k, v in t.items() if k in ConversationTurn.model_fields}) for t in turns]
+    return ConversationOut(work_order_id=order_id, scheda_tecnica=SchedaTecnica(**scheda_raw), turns=parsed_turns)
 
 
 @api.get("/messages/unread", response_model=UnreadOut)

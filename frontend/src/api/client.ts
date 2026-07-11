@@ -127,6 +127,7 @@ export type ConversationTurn = {
   timestamp: string;
   worker_id?: string | null;
   worker_full_name?: string | null;
+  edited_at?: string | null;
 };
 
 export type Conversation = {
@@ -195,6 +196,7 @@ export type OrderMessage = {
   sender_role: Role;
   text: string;
   created_at: string;
+  edited_at?: string | null;
 };
 
 export async function listOrderMessages(orderId: string): Promise<OrderMessage[]> {
@@ -203,6 +205,21 @@ export async function listOrderMessages(orderId: string): Promise<OrderMessage[]
 
 export async function sendOrderMessage(orderId: string, text: string): Promise<OrderMessage> {
   return api<OrderMessage>(`/work-orders/${orderId}/messages`, { method: "POST", body: { text } });
+}
+
+/** Modifica un proprio messaggio (resta marcato "modificato"). */
+export async function editOrderMessage(messageId: string, text: string): Promise<OrderMessage> {
+  return api<OrderMessage>(`/messages/${messageId}`, { method: "PUT", body: { text } });
+}
+
+/** Cancella un proprio messaggio. */
+export async function deleteOrderMessage(messageId: string): Promise<void> {
+  await api(`/messages/${messageId}`, { method: "DELETE" });
+}
+
+/** Modifica un proprio messaggio nel dialogo AI (l'AI non ri-risponde: corregge il registro). */
+export async function editDialogTurn(orderId: string, turnIndex: number, text: string): Promise<Conversation> {
+  return api<Conversation>(`/work-orders/${orderId}/conversation/turns/${turnIndex}`, { method: "PUT", body: { text } });
 }
 
 export type UnreadMessages = { total: number; by_order: Record<string, number> };
