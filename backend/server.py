@@ -1551,6 +1551,87 @@ def _worker_minutes(events: list) -> int:
     return total
 
 
+class StatsWorker(BaseModel):
+    full_name: str
+    minutes_worked: int
+    orders_touched: int
+    completed: int
+
+
+class StatsOut(BaseModel):
+    days: int
+    total_minutes: int
+    orders_completed: int
+    orders_created: int
+    workers: List[StatsWorker]
+    returning_vehicles: List[dict]   # {plate, vehicle, visits}
+    top_lavori: List[dict]           # {lavoro, volte}
+
+
+@api.get("/stats/overview", response_model=StatsOut)
+async def stats_overview(days: int = 30, admin: dict = Depends(require_admin)):
+    days = max(1, min(days, 365))
+    since = now_utc() - timedelta(days=days)
+
+    events = await fetch(
+        "SELECT * FROM work_events WHERE timestamp >= $1 ORDER BY timestamp ASC LIMIT 20000", since
+    )
+    orders_created = await fetchrow(
+        "SELECT count(*) AS c FROM work_orders WHERE created_at >= $1", since
+    )
+    completed_rows = await fetch(
+        """SELECT DISTINCT work_order_id FROM work_events
+           WHERE type='COMPLETE' AND timestamp >= $1""", since
+    )
+
+    # ore e commesse per operaio
+    per_worker: dict = {}
+    for e in events:
+        w = per_worker.setdefault(e["worker_full_name"], {"events": [], "orders": set(), "completed": 0})
+        w["events"].append(e)
+        w["orders"].add(e["work_order_id"])
+        if e["type"] == "COMPLETE":
+            w["completed"] += 1
+    workers = sorted(
+        [StatsWorker(full_name=name, minutes_worked=_worker_minutes(d["events"]),
+                     orders_touched=len(d["orders"]), completed=d["completed"])
+         for name, d in per_worker.items()],
+        key=lambda x: x.minutes_worked, reverse=True,
+    )
+    total_minutes = sum(w.minutes_worked for w in workers)
+
+    # veicoli che tornano (tutto lo storico, targhe vere)
+    ret_rows = await fetch(
+        """SELECT UPPER(REPLACE(plate,' ','')) AS p, count(*) AS visits, max(vehicle) AS vehicle
+           FROM work_orders
+           WHERE UPPER(REPLACE(plate,' ','')) NOT IN ('DAINSERIRE','')
+           GROUP BY 1 HAVING count(*) > 1 ORDER BY visits DESC LIMIT 10"""
+    )
+    returning = [{"plate": r["p"], "vehicle": r["vehicle"], "visits": r["visits"]} for r in ret_rows]
+
+    # lavori più frequenti (voci di lavori_fatti nel periodo)
+    order_rows = await fetch(
+        "SELECT scheda_tecnica FROM work_orders WHERE updated_at >= $1 LIMIT 2000", since
+    )
+    conteggio: dict = {}
+    for r in order_rows:
+        scheda = r.get("scheda_tecnica") or {}
+        if isinstance(scheda, str):
+            scheda = json.loads(scheda)
+        for lav in (scheda.get("lavori_fatti") or []):
+            key = lav.strip().lower()
+            if len(key) > 2:
+                conteggio[key] = conteggio.get(key, 0) + 1
+    top_lavori = [{"lavoro": k, "volte": v} for k, v in
+                  sorted(conteggio.items(), key=lambda kv: kv[1], reverse=True)[:10]]
+
+    return StatsOut(
+        days=days, total_minutes=total_minutes,
+        orders_completed=len(completed_rows), orders_created=orders_created["c"],
+        workers=workers, returning_vehicles=returning, top_lavori=top_lavori,
+    )
+
+
 @api.get("/reports/daily", response_model=DailyReportOut)
 async def daily_report(
     worker_ids: Optional[str] = None,

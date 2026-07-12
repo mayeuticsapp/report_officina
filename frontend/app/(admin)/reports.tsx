@@ -27,6 +27,10 @@ export default function Reports() {
   const [dateChoice, setDateChoice] = useState<DateChoice>("today");
   const [customFrom, setCustomFrom] = useState("");
   const [customTo, setCustomTo] = useState("");
+  const [mode, setMode] = useState<"report" | "stats">("report");
+  const [stats, setStats] = useState<any>(null);
+  const [statsDays, setStatsDays] = useState(30);
+  const [statsLoading, setStatsLoading] = useState(false);
   const [report, setReport] = useState<DailyReport | null>(null);
   const [loading, setLoading] = useState(false);
   const [workersLoading, setWorkersLoading] = useState(true);
@@ -72,6 +76,15 @@ export default function Reports() {
     const t = parseIt(customTo || customFrom);
     if (!f || !t) return null;
     return { from: f, to: t };
+  };
+
+  const loadStats = async (days: number) => {
+    setStatsLoading(true);
+    try {
+      setStats(await api<any>(`/stats/overview?days=${days}`));
+    } catch (e: any) {
+      showAlert("Errore", e?.message || "Impossibile caricare le statistiche");
+    } finally { setStatsLoading(false); }
   };
 
   const generate = async () => {
@@ -144,6 +157,89 @@ export default function Reports() {
         <Text style={styles.title}>OFFICINA</Text>
       </View>
 
+      <View style={styles.modeRow}>
+        {(["report", "stats"] as const).map((m) => (
+          <TouchableOpacity
+            key={m}
+            testID={`mode-${m}`}
+            style={[styles.modeBtn, mode === m && styles.modeBtnActive]}
+            onPress={() => { setMode(m); if (m === "stats" && !stats) loadStats(statsDays); }}
+          >
+            <Text style={[styles.modeText, mode === m && styles.modeTextActive]}>
+              {m === "report" ? "REPORT AI" : "STATISTICHE"}
+            </Text>
+          </TouchableOpacity>
+        ))}
+      </View>
+
+      {mode === "stats" ? (
+        <ScrollView contentContainerStyle={{ padding: spacing.lg, paddingBottom: spacing.xxl }}>
+          <View style={styles.chipRow}>
+            {[7, 30, 90].map((d) => (
+              <TouchableOpacity
+                key={d}
+                testID={`stats-days-${d}`}
+                style={[styles.chip, statsDays === d && styles.chipActive]}
+                onPress={() => { setStatsDays(d); loadStats(d); }}
+              >
+                <Text style={[styles.chipText, statsDays === d && styles.chipTextActive]}>{d} GIORNI</Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+          {statsLoading ? (
+            <ActivityIndicator color={colors.text} style={{ marginTop: spacing.lg }} />
+          ) : stats ? (
+            <View>
+              <View style={styles.statTotals}>
+                <View style={styles.statBox}>
+                  <Text style={styles.statLabel}>ORE LAVORATE</Text>
+                  <Text style={styles.statValue}>{fmtMinutes(stats.total_minutes)}</Text>
+                </View>
+                <View style={styles.statBox}>
+                  <Text style={styles.statLabel}>COMPLETATE</Text>
+                  <Text style={styles.statValue}>{stats.orders_completed}</Text>
+                </View>
+                <View style={styles.statBox}>
+                  <Text style={styles.statLabel}>NUOVE</Text>
+                  <Text style={styles.statValue}>{stats.orders_created}</Text>
+                </View>
+              </View>
+
+              <Text style={styles.section}>ORE PER MECCANICO</Text>
+              {stats.workers.map((w: any) => (
+                <View key={w.full_name} style={styles.statRow}>
+                  <Text style={styles.statRowName}>{w.full_name}</Text>
+                  <Text style={styles.statRowVal}>{fmtMinutes(w.minutes_worked)} · {w.orders_touched} commesse · {w.completed} completate</Text>
+                </View>
+              ))}
+
+              {stats.returning_vehicles.length > 0 && (
+                <View>
+                  <Text style={styles.section}>VEICOLI CHE TORNANO</Text>
+                  {stats.returning_vehicles.map((v: any) => (
+                    <View key={v.plate} style={styles.statRow}>
+                      <Text style={styles.statRowName}>{v.plate}</Text>
+                      <Text style={styles.statRowVal}>{v.vehicle} · {v.visits} visite</Text>
+                    </View>
+                  ))}
+                </View>
+              )}
+
+              {stats.top_lavori.length > 0 && (
+                <View>
+                  <Text style={styles.section}>LAVORI PIÙ FREQUENTI</Text>
+                  {stats.top_lavori.map((l: any) => (
+                    <View key={l.lavoro} style={styles.statRow}>
+                      <Text style={[styles.statRowName, { flex: 1 }]} numberOfLines={1}>{l.lavoro}</Text>
+                      <Text style={styles.statRowVal}>×{l.volte}</Text>
+                    </View>
+                  ))}
+                </View>
+              )}
+            </View>
+          ) : null}
+        </ScrollView>
+      ) : (
       <ScrollView contentContainerStyle={{ padding: spacing.lg, paddingBottom: spacing.xxl }}>
         {/* Date selector */}
         <Text style={styles.section}>DATA</Text>
@@ -305,6 +401,7 @@ export default function Reports() {
           </View>
         )}
       </ScrollView>
+      )}
     </SafeAreaView>
   );
 }
@@ -324,6 +421,21 @@ const styles = StyleSheet.create({
   headerLabel: { fontSize: 11, letterSpacing: 3, color: colors.textSecondary, fontWeight: "700" },
   title: { fontSize: 30, fontWeight: "900", color: colors.text, letterSpacing: -0.5, marginTop: 2 },
   section: { fontSize: 11, letterSpacing: 2.5, color: colors.textSecondary, fontWeight: "800", marginTop: spacing.md, marginBottom: spacing.sm },
+  modeRow: { flexDirection: "row", borderBottomWidth: 1, borderBottomColor: colors.border },
+  modeBtn: { flex: 1, paddingVertical: 12, alignItems: "center" },
+  modeBtnActive: { borderBottomWidth: 3, borderBottomColor: colors.text },
+  modeText: { fontSize: 12, fontWeight: "800", letterSpacing: 2, color: colors.textSecondary },
+  modeTextActive: { color: colors.text },
+  statTotals: { flexDirection: "row", gap: 8, marginBottom: spacing.md },
+  statBox: { flex: 1, borderWidth: 1, borderColor: colors.border, padding: spacing.md, alignItems: "center" },
+  statLabel: { fontSize: 9, letterSpacing: 1.5, fontWeight: "800", color: colors.textSecondary },
+  statValue: { fontSize: 18, fontWeight: "900", color: colors.text, marginTop: 4 },
+  statRow: {
+    flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: 8,
+    borderWidth: 1, borderColor: colors.border, padding: spacing.md, marginBottom: 6,
+  },
+  statRowName: { fontSize: 14, fontWeight: "800", color: colors.text },
+  statRowVal: { fontSize: 12, color: colors.textSecondary },
   customRow: { flexDirection: "row", gap: 8, marginBottom: spacing.sm },
   dateInput: {
     flex: 1, borderWidth: 1, borderColor: colors.borderStrong, paddingHorizontal: 12,
