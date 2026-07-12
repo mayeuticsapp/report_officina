@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import {
   View, Text, StyleSheet, TouchableOpacity, Image, ActivityIndicator, Modal, ScrollView,
+  Linking, Platform,
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import * as ImagePicker from "expo-image-picker";
@@ -59,6 +60,27 @@ export function PhotoArchive({ orderId, canUpload, canDelete }: Props) {
     }
   };
 
+  const recordVideo = async () => {
+    const perm = await ImagePicker.requestCameraPermissionsAsync();
+    if (perm.status !== "granted") {
+      showAlert("Permesso negato", "Serve il permesso fotocamera per registrare.");
+      return;
+    }
+    const res = await ImagePicker.launchCameraAsync({
+      mediaTypes: ["videos"], videoMaxDuration: 60, quality: 0.7,
+    });
+    if (!res.canceled && res.assets[0]?.uri) {
+      const a = res.assets[0];
+      setUploading(true);
+      try {
+        await uploadOrderPhoto(orderId, a.uri, a.mimeType || "video/mp4");
+        await load();
+      } catch (e: any) {
+        showAlert("Errore caricamento video", e?.message || "Impossibile caricare (max 60MB, ~60 secondi)");
+      } finally { setUploading(false); }
+    }
+  };
+
   const pickFromLibrary = async () => {
     const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
     if (perm.status !== "granted") {
@@ -108,6 +130,10 @@ export function PhotoArchive({ orderId, canUpload, canDelete }: Props) {
             <Ionicons name="images-outline" size={18} color={colors.text} />
             <Text style={styles.actionBtnAltText}>GALLERIA</Text>
           </TouchableOpacity>
+          <TouchableOpacity testID="btn-video-record" style={styles.actionBtnAlt} onPress={recordVideo} disabled={uploading}>
+            <Ionicons name="videocam-outline" size={18} color={colors.text} />
+            <Text style={styles.actionBtnAltText}>VIDEO</Text>
+          </TouchableOpacity>
         </View>
       )}
 
@@ -119,14 +145,33 @@ export function PhotoArchive({ orderId, canUpload, canDelete }: Props) {
         </Text>
       ) : (
         <View style={styles.grid}>
-          {photos.map((p) => (
-            <TouchableOpacity key={p.id} style={styles.thumbWrap} onPress={() => setViewer(p)}>
-              <Image source={{ uri: p.url }} style={styles.thumb} resizeMode="cover" />
-              <Text style={styles.thumbMeta} numberOfLines={1}>
-                {p.uploaded_by_name.split(" ")[0]} · {fmtDate(p.created_at)}
-              </Text>
-            </TouchableOpacity>
-          ))}
+          {photos.map((p) => {
+            const isVideo = p.content_type.startsWith("video/");
+            return (
+              <TouchableOpacity
+                key={p.id}
+                style={styles.thumbWrap}
+                onPress={() => {
+                  if (isVideo) {
+                    if (Platform.OS === "web") window.open(p.url, "_blank");
+                    else Linking.openURL(p.url);
+                  } else setViewer(p);
+                }}
+              >
+                {isVideo ? (
+                  <View style={[styles.thumb, styles.videoTile]}>
+                    <Ionicons name="play-circle" size={38} color="#FFFFFF" />
+                    <Text style={styles.videoLabel}>VIDEO</Text>
+                  </View>
+                ) : (
+                  <Image source={{ uri: p.url }} style={styles.thumb} resizeMode="cover" />
+                )}
+                <Text style={styles.thumbMeta} numberOfLines={1}>
+                  {p.uploaded_by_name.split(" ")[0]} · {fmtDate(p.created_at)}
+                </Text>
+              </TouchableOpacity>
+            );
+          })}
         </View>
       )}
 
@@ -181,6 +226,8 @@ const styles = StyleSheet.create({
   thumbWrap: { width: THUMB },
   thumb: { width: THUMB, height: THUMB, backgroundColor: colors.bgMuted, borderWidth: 1, borderColor: colors.border },
   thumbMeta: { fontSize: 9, color: colors.textSecondary, marginTop: 2 },
+  videoTile: { backgroundColor: "#18181B", alignItems: "center", justifyContent: "center" },
+  videoLabel: { color: "#A1A1AA", fontSize: 9, fontWeight: "900", letterSpacing: 2, marginTop: 2 },
   viewerBackdrop: { flex: 1, backgroundColor: "rgba(0,0,0,0.95)" },
   viewerScroll: { flexGrow: 1, justifyContent: "center" },
   viewerImg: { width: "100%", height: 480 },

@@ -313,18 +313,21 @@ export async function orderPhotoUrl(photoId: string): Promise<string> {
   return `${BASE_URL}/api/photos/${photoId}/file?token=${encodeURIComponent(t || "")}`;
 }
 
-/** Carica una foto (data: URI da ImagePicker, o file: URI su nativo). */
-export async function uploadOrderPhoto(orderId: string, uri: string): Promise<OrderPhoto> {
+/** Carica una foto o un video (data:/blob: URI da ImagePicker, o file: URI su nativo). */
+export async function uploadOrderPhoto(orderId: string, uri: string, mimeHint?: string): Promise<OrderPhoto> {
   const token = await getToken();
   const form = new FormData();
+  const extFor = (t: string) =>
+    t.includes("png") ? "png" : t.includes("webp") ? "webp" : t.includes("mp4") ? "mp4"
+    : t.includes("webm") ? "webm" : t.includes("quicktime") ? "mov" : "jpg";
   if (uri.startsWith("data:") || uri.startsWith("blob:")) {
     const blob = await (await fetch(uri)).blob();
-    const type = blob.type || "image/jpeg";
-    const ext = type.includes("png") ? "png" : type.includes("webp") ? "webp" : "jpg";
-    form.append("file", new File([blob], `foto.${ext}`, { type }));
+    const type = blob.type || mimeHint || "image/jpeg";
+    form.append("file", new File([blob], `media.${extFor(type)}`, { type }));
   } else {
+    const type = mimeHint || "image/jpeg";
     // @ts-expect-error RN form data typing
-    form.append("file", { uri, name: "foto.jpg", type: "image/jpeg" });
+    form.append("file", { uri, name: `media.${extFor(type)}`, type });
   }
   const res = await fetch(`${BASE_URL}/api/work-orders/${orderId}/photos`, {
     method: "POST",

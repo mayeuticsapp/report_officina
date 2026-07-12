@@ -39,6 +39,7 @@ SEED_ADMIN_USERNAME = os.environ.get("SEED_ADMIN_USERNAME", "admin")
 SEED_ADMIN_PASSWORD = os.environ.get("SEED_ADMIN_PASSWORD", "admin123")
 UPLOADS_DIR = Path(os.environ.get("UPLOADS_DIR", str(ROOT_DIR / "uploads")))
 MAX_PHOTO_BYTES = int(os.environ.get("MAX_PHOTO_BYTES", str(15 * 1024 * 1024)))  # 15MB
+MAX_VIDEO_BYTES = int(os.environ.get("MAX_VIDEO_BYTES", str(60 * 1024 * 1024)))  # 60MB
 # Openapi.com: riserva futura per targhe fuori anagrafica STAR (token sandbox in .env, non usato)
 OPENAPI_TOKEN = os.environ.get("OPENAPI_TOKEN", "")
 OPENAPI_BASE_URL = os.environ.get("OPENAPI_BASE_URL", "https://automotive.openapi.com")
@@ -1077,7 +1078,11 @@ class OrderPhoto(BaseModel):
     created_at: datetime
 
 
-_PHOTO_EXT = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "image/heic": "heic"}
+_PHOTO_EXT = {
+    "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "image/heic": "heic",
+    "video/mp4": "mp4", "video/webm": "webm", "video/quicktime": "mov",
+}
+_VIDEO_TYPES = {"video/mp4", "video/webm", "video/quicktime"}
 
 
 async def _order_or_403(order_id: str, user: dict) -> dict:
@@ -1102,10 +1107,11 @@ async def upload_order_photo(order_id: str, file: UploadFile = File(...), user: 
     await _order_or_403(order_id, user)
     content_type = (file.content_type or "").lower()
     if content_type not in _PHOTO_EXT:
-        raise HTTPException(status_code=415, detail=f"Formato non supportato: {content_type}. Usa JPEG/PNG/WebP.")
+        raise HTTPException(status_code=415, detail=f"Formato non supportato: {content_type}. Usa JPEG/PNG/WebP o MP4/WebM/MOV.")
     data = await file.read()
-    if len(data) > MAX_PHOTO_BYTES:
-        raise HTTPException(status_code=413, detail=f"Foto troppo grande (max {MAX_PHOTO_BYTES // (1024*1024)}MB)")
+    limit = MAX_VIDEO_BYTES if content_type in _VIDEO_TYPES else MAX_PHOTO_BYTES
+    if len(data) > limit:
+        raise HTTPException(status_code=413, detail=f"File troppo grande (max {limit // (1024*1024)}MB)")
     if not data:
         raise HTTPException(status_code=400, detail="File vuoto")
     photo_id = str(uuid.uuid4())
