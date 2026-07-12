@@ -1555,10 +1555,17 @@ def _worker_minutes(events: list) -> int:
 async def daily_report(
     worker_ids: Optional[str] = None,
     date: Optional[str] = None,
+    date_to: Optional[str] = None,
     admin: dict = Depends(require_admin),
 ):
     day_start = _parse_iso_date(date)
-    day_end = day_start + timedelta(days=1)
+    # date_to (incluso) permette report su periodi: settimana, mese, intervallo libero
+    range_end = _parse_iso_date(date_to) if date_to else day_start
+    if range_end < day_start:
+        day_start, range_end = range_end, day_start
+    if (range_end - day_start).days > 366:
+        raise HTTPException(status_code=400, detail="Periodo troppo lungo (max 1 anno)")
+    day_end = range_end + timedelta(days=1)
     filter_ids = [w for w in (worker_ids.split(",") if worker_ids else []) if w.strip()]
 
     if filter_ids:
@@ -1623,6 +1630,8 @@ async def daily_report(
 
     orders_touched = len(all_oids)
     date_str = day_start.strftime("%Y-%m-%d")
+    if range_end != day_start:
+        date_str = f"{date_str} → {range_end.strftime('%Y-%m-%d')}"
 
     if not events:
         narrative = "Nessuna attività registrata per il periodo/filtro selezionato."
@@ -1645,7 +1654,7 @@ async def daily_report(
                 [
                     {"role": "system", "content": ai.SYSTEM_DAILY_REPORT},
                     {"role": "user", "content": (
-                        f"Data: {date_str}\n{selection_hint}\n\n"
+                        f"Periodo: {date_str}\n{selection_hint}\n\n"
                         f"Statistiche aggregate: {total_events} eventi, {total_minutes} minuti, {orders_touched} commesse.\n\n"
                         f"Timeline eventi:\n{events_text}"
                     )},

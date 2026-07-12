@@ -1,6 +1,6 @@
 import { useCallback, useState } from "react";
 import {
-  View, Text, StyleSheet, ScrollView, TouchableOpacity, ActivityIndicator, Share, Platform, } from "react-native";
+  View, Text, StyleSheet, ScrollView, TouchableOpacity, ActivityIndicator, Share, Platform, TextInput, } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { useFocusEffect } from "expo-router";
@@ -9,7 +9,7 @@ import { showAlert } from "@/src/utils/dialog";
 import { printReport } from "@/src/utils/printReport";
 import { colors, spacing } from "@/src/theme";
 
-type DateChoice = "today" | "yesterday";
+type DateChoice = "today" | "yesterday" | "week" | "month" | "custom";
 
 function ymd(d: Date) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
@@ -25,6 +25,8 @@ export default function Reports() {
   const [workers, setWorkers] = useState<User[]>([]);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [dateChoice, setDateChoice] = useState<DateChoice>("today");
+  const [customFrom, setCustomFrom] = useState("");
+  const [customTo, setCustomTo] = useState("");
   const [report, setReport] = useState<DailyReport | null>(null);
   const [loading, setLoading] = useState(false);
   const [workersLoading, setWorkersLoading] = useState(true);
@@ -44,18 +46,47 @@ export default function Reports() {
   };
   const selectAll = () => setSelectedIds([]);
 
-  const dateFor = (): string => {
-    const d = new Date();
-    if (dateChoice === "yesterday") d.setDate(d.getDate() - 1);
-    return ymd(d);
+  const parseIt = (v: string): string | null => {
+    const m = v.trim().match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+    if (m) return `${m[3]}-${m[2].padStart(2, "0")}-${m[1].padStart(2, "0")}`;
+    if (/^\d{4}-\d{2}-\d{2}$/.test(v.trim())) return v.trim();
+    return null;
+  };
+
+  const rangeFor = (): { from: string; to?: string } | null => {
+    const today = new Date();
+    if (dateChoice === "today") return { from: ymd(today) };
+    if (dateChoice === "yesterday") {
+      const d = new Date(); d.setDate(d.getDate() - 1);
+      return { from: ymd(d) };
+    }
+    if (dateChoice === "week") {
+      const d = new Date(); d.setDate(d.getDate() - 6);
+      return { from: ymd(d), to: ymd(today) };
+    }
+    if (dateChoice === "month") {
+      const d = new Date(); d.setDate(d.getDate() - 29);
+      return { from: ymd(d), to: ymd(today) };
+    }
+    const f = parseIt(customFrom);
+    const t = parseIt(customTo || customFrom);
+    if (!f || !t) return null;
+    return { from: f, to: t };
   };
 
   const generate = async () => {
     setLoading(true);
     setReport(null);
     try {
+      const range = rangeFor();
+      if (!range) {
+        showAlert("Date non valide", "Scrivi le date come gg/mm/aaaa (es. 01/07/2026).");
+        setLoading(false);
+        return;
+      }
       const params = new URLSearchParams();
-      params.set("date", dateFor());
+      params.set("date", range.from);
+      if (range.to) params.set("date_to", range.to);
       if (selectedIds.length > 0) params.set("worker_ids", selectedIds.join(","));
       const r = await api<DailyReport>(`/reports/daily?${params.toString()}`);
       setReport(r);
@@ -110,14 +141,14 @@ export default function Reports() {
     <SafeAreaView style={styles.safe} edges={["top"]}>
       <View style={styles.header}>
         <Text style={styles.headerLabel}>REPORT AI</Text>
-        <Text style={styles.title}>GIORNALIERO</Text>
+        <Text style={styles.title}>OFFICINA</Text>
       </View>
 
       <ScrollView contentContainerStyle={{ padding: spacing.lg, paddingBottom: spacing.xxl }}>
         {/* Date selector */}
         <Text style={styles.section}>DATA</Text>
         <View style={styles.chipRow}>
-          {(["today", "yesterday"] as const).map((c) => (
+          {(["today", "yesterday", "week", "month", "custom"] as const).map((c) => (
             <TouchableOpacity
               key={c}
               testID={`date-chip-${c}`}
@@ -125,11 +156,32 @@ export default function Reports() {
               onPress={() => setDateChoice(c)}
             >
               <Text style={[styles.chipText, dateChoice === c && styles.chipTextActive]}>
-                {c === "today" ? "OGGI" : "IERI"}
+                {c === "today" ? "OGGI" : c === "yesterday" ? "IERI" : c === "week" ? "7 GIORNI" : c === "month" ? "30 GIORNI" : "DATE…"}
               </Text>
             </TouchableOpacity>
           ))}
         </View>
+
+        {dateChoice === "custom" && (
+          <View style={styles.customRow}>
+            <TextInput
+              testID="input-date-from"
+              style={styles.dateInput}
+              value={customFrom}
+              onChangeText={setCustomFrom}
+              placeholder="da: gg/mm/aaaa"
+              placeholderTextColor={colors.textSecondary}
+            />
+            <TextInput
+              testID="input-date-to"
+              style={styles.dateInput}
+              value={customTo}
+              onChangeText={setCustomTo}
+              placeholder="a: gg/mm/aaaa"
+              placeholderTextColor={colors.textSecondary}
+            />
+          </View>
+        )}
 
         {/* Worker selector */}
         <View style={styles.workerHeader}>
@@ -272,6 +324,11 @@ const styles = StyleSheet.create({
   headerLabel: { fontSize: 11, letterSpacing: 3, color: colors.textSecondary, fontWeight: "700" },
   title: { fontSize: 30, fontWeight: "900", color: colors.text, letterSpacing: -0.5, marginTop: 2 },
   section: { fontSize: 11, letterSpacing: 2.5, color: colors.textSecondary, fontWeight: "800", marginTop: spacing.md, marginBottom: spacing.sm },
+  customRow: { flexDirection: "row", gap: 8, marginBottom: spacing.sm },
+  dateInput: {
+    flex: 1, borderWidth: 1, borderColor: colors.borderStrong, paddingHorizontal: 12,
+    paddingVertical: 10, fontSize: 14, color: colors.text, minHeight: 44,
+  },
   chipRow: { flexDirection: "row", gap: 8 },
   chip: { flex: 1, paddingVertical: 14, borderWidth: 1, borderColor: colors.border, alignItems: "center", minHeight: 44 },
   chipActive: { backgroundColor: colors.text, borderColor: colors.text },
