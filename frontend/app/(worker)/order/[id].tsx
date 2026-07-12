@@ -10,6 +10,7 @@ import * as ImagePicker from "expo-image-picker";
 import { api, WorkEvent, WorkOrder, EventType } from "@/src/api/client";
 import { confirmDialog, showAlert } from "@/src/utils/dialog";
 import { VoiceChat } from "@/src/components/VoiceChat";
+import { VehicleHistory } from "@/src/components/VehicleHistory";
 import { PhotoArchive } from "@/src/components/PhotoArchive";
 import { OrderMessages } from "@/src/components/OrderMessages";
 import { colors, spacing } from "@/src/theme";
@@ -148,6 +149,8 @@ export default function OrderDetail() {
         </View>
 
         {/* AI Voice Chat + Scheda Tecnica */}
+        <VehicleHistory orderId={order.id} />
+
         <VoiceChat orderId={order.id} />
 
         <PhotoArchive orderId={order.id} canUpload />

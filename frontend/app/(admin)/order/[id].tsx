@@ -5,6 +5,7 @@ import { useLocalSearchParams, useRouter, useFocusEffect } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { api, WorkOrder, WorkEvent } from "@/src/api/client";
 import { VoiceChat } from "@/src/components/VoiceChat";
+import { VehicleHistory } from "@/src/components/VehicleHistory";
 import { PhotoArchive } from "@/src/components/PhotoArchive";
 import { OrderMessages } from "@/src/components/OrderMessages";
 import { colors, spacing } from "@/src/theme";
@@ -71,6 +72,8 @@ export default function AdminOrderDetail() {
             <Text style={styles.desc}>{order.description}</Text>
           </View>
         </View>
+
+        <VehicleHistory orderId={order.id} />
 
         <VoiceChat orderId={order.id} readOnly />
 

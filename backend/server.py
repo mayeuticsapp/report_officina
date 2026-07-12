@@ -924,6 +924,55 @@ async def get_work_order(order_id: str, user: dict = Depends(get_current_user)):
     return row_to_workorder(row)
 
 
+class VehicleHistoryItem(BaseModel):
+    id: str
+    status: OrderStatus
+    description: str
+    esito: Optional[str] = None
+    lavori_fatti: List[str] = Field(default_factory=list)
+    workers: List[str] = Field(default_factory=list)
+    created_at: datetime
+
+
+@api.get("/work-orders/{order_id}/vehicle-history", response_model=List[VehicleHistoryItem])
+async def vehicle_history(order_id: str, user: dict = Depends(get_current_user)):
+    """Lavori passati sulla stessa targa: il veicolo che torna in officina ha una storia."""
+    row = await _order_or_403(order_id, user)
+    plate = (row.get("plate") or "").strip().upper().replace(" ", "")
+    if not plate or plate in ("DA INSERIRE", "DAINSERIRE"):
+        return []
+    rows = await fetch(
+        """SELECT * FROM work_orders
+           WHERE UPPER(REPLACE(plate, ' ', '')) = $1 AND id != $2
+           ORDER BY created_at DESC LIMIT 20""",
+        plate, order_id
+    )
+    if not rows:
+        return []
+    user_rows = await fetch("SELECT id, full_name FROM users")
+    uname = {u["id"]: u["full_name"] for u in user_rows}
+    items: List[VehicleHistoryItem] = []
+    for r in rows:
+        scheda = r.get("scheda_tecnica") or {}
+        if isinstance(scheda, str):
+            scheda = json.loads(scheda)
+        worker_ids = r.get("assigned_worker_ids") or []
+        if isinstance(worker_ids, str):
+            worker_ids = json.loads(worker_ids)
+        esito_row = await fetchrow(
+            "SELECT reason FROM work_events WHERE work_order_id=$1 AND type='COMPLETE' ORDER BY timestamp DESC LIMIT 1",
+            r["id"]
+        )
+        items.append(VehicleHistoryItem(
+            id=r["id"], status=r["status"], description=r["description"],
+            esito=(esito_row or {}).get("reason"),
+            lavori_fatti=scheda.get("lavori_fatti") or [],
+            workers=[uname.get(w) for w in worker_ids if uname.get(w)],
+            created_at=r["created_at"],
+        ))
+    return items
+
+
 @api.put("/work-orders/{order_id}", response_model=WorkOrder)
 async def update_work_order(order_id: str, body: WorkOrderUpdate, admin: dict = Depends(require_admin)):
     parts = []
