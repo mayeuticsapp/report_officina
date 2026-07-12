@@ -665,14 +665,20 @@ async def delete_user(user_id: str, admin: dict = Depends(require_admin)):
 
 # ---- Work Orders ----
 @api.get("/work-orders", response_model=List[WorkOrder])
-async def list_work_orders(user: dict = Depends(get_current_user)):
+async def list_work_orders(q: Optional[str] = None, user: dict = Depends(get_current_user)):
+    conds = []
+    vals: list = []
     if user["role"] == "worker":
-        rows = await fetch(
-            "SELECT * FROM work_orders WHERE assigned_worker_ids @> $1::jsonb ORDER BY created_at DESC LIMIT 500",
-            json.dumps([user["id"]])
+        vals.append(json.dumps([user["id"]]))
+        conds.append(f"assigned_worker_ids @> ${len(vals)}::jsonb")
+    if q and q.strip():
+        vals.append(f"%{q.strip()}%")
+        i = len(vals)
+        conds.append(
+            f"(plate ILIKE ${i} OR customer ILIKE ${i} OR vehicle ILIKE ${i} OR description ILIKE ${i} OR scheda_tecnica::text ILIKE ${i})"
         )
-    else:
-        rows = await fetch("SELECT * FROM work_orders ORDER BY created_at DESC LIMIT 500")
+    where = f"WHERE {' AND '.join(conds)}" if conds else ""
+    rows = await fetch(f"SELECT * FROM work_orders {where} ORDER BY created_at DESC LIMIT 500", *vals)
     return [row_to_workorder(r) for r in rows]
 
 

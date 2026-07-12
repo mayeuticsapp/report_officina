@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity, Modal, TextInput, ActivityIndicator,
   KeyboardAvoidingView, Platform, RefreshControl,
@@ -32,10 +32,12 @@ export default function OrdersAdmin() {
   });
   const [unread, setUnread] = useState<Record<string, number>>({});
 
-  const load = useCallback(async () => {
+  const [search, setSearch] = useState("");
+
+  const load = useCallback(async (q?: string) => {
     try {
       const [o, u] = await Promise.all([
-        api<WorkOrder[]>("/work-orders"),
+        api<WorkOrder[]>(q && q.trim() ? `/work-orders?q=${encodeURIComponent(q.trim())}` : "/work-orders"),
         api<User[]>("/users"),
       ]);
       setOrders(o);
@@ -45,7 +47,12 @@ export default function OrdersAdmin() {
     finally { setLoading(false); setRefreshing(false); }
   }, []);
 
-  useFocusEffect(useCallback(() => { load(); }, [load]));
+  useFocusEffect(useCallback(() => { load(search); }, [load]));
+
+  useEffect(() => {
+    const t = setTimeout(() => load(search), 350);
+    return () => clearTimeout(t);
+  }, [search]);
 
   const openNew = () => {
     setEditing(null);
@@ -129,6 +136,24 @@ export default function OrdersAdmin() {
           <Ionicons name="add" size={22} color={colors.textInverse} />
           <Text style={styles.addBtnText}>NUOVA</Text>
         </TouchableOpacity>
+      </View>
+
+      <View style={styles.searchRow}>
+        <Ionicons name="search" size={18} color={colors.textSecondary} />
+        <TextInput
+          testID="input-search-orders"
+          style={styles.searchInput}
+          value={search}
+          onChangeText={setSearch}
+          placeholder="Cerca targa, cliente, lavoro…"
+          placeholderTextColor={colors.textSecondary}
+          autoCapitalize="none"
+        />
+        {search ? (
+          <TouchableOpacity onPress={() => setSearch("")}>
+            <Ionicons name="close-circle" size={18} color={colors.textSecondary} />
+          </TouchableOpacity>
+        ) : null}
       </View>
 
       {loading ? (
@@ -289,6 +314,12 @@ const styles = StyleSheet.create({
   title: { fontSize: 26, fontWeight: "900", color: colors.text, letterSpacing: -0.5 },
   addBtn: { flexDirection: "row", alignItems: "center", gap: 6, backgroundColor: colors.text, paddingHorizontal: 14, paddingVertical: 12 },
   addBtnText: { color: colors.textInverse, fontWeight: "900", letterSpacing: 2, fontSize: 12 },
+  searchRow: {
+    flexDirection: "row", alignItems: "center", gap: 8,
+    marginHorizontal: spacing.lg, marginTop: spacing.md,
+    borderWidth: 1, borderColor: colors.borderStrong, paddingHorizontal: 12,
+  },
+  searchInput: { flex: 1, paddingVertical: 10, fontSize: 14, color: colors.text, minHeight: 44 },
   empty: { padding: spacing.lg, borderWidth: 1, borderColor: colors.border },
   emptyText: { color: colors.textSecondary },
   card: { borderWidth: 1, borderColor: colors.border, padding: spacing.md, marginBottom: spacing.sm },

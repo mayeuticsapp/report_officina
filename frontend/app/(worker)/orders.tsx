@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity, ActivityIndicator, RefreshControl,
   Modal, TextInput, KeyboardAvoidingView, Platform,
@@ -33,16 +33,23 @@ export default function WorkerOrders() {
 
   const [unread, setUnread] = useState<Record<string, number>>({});
 
-  const load = useCallback(async () => {
+  const [search, setSearch] = useState("");
+
+  const load = useCallback(async (q?: string) => {
     try {
-      const list = await api<WorkOrder[]>("/work-orders");
+      const list = await api<WorkOrder[]>(q && q.trim() ? `/work-orders?q=${encodeURIComponent(q.trim())}` : "/work-orders");
       setOrders(list);
       try { setUnread((await unreadMessages()).by_order); } catch { /* silenzioso */ }
     } catch (e) { console.warn(e); }
     finally { setLoading(false); setRefreshing(false); }
   }, []);
 
-  useFocusEffect(useCallback(() => { load(); }, [load]));
+  useFocusEffect(useCallback(() => { load(search); }, [load]));
+
+  useEffect(() => {
+    const t = setTimeout(() => load(search), 350);
+    return () => clearTimeout(t);
+  }, [search]);
 
   const filtered = orders.filter((o) => {
     if (filter === "all") return true;
@@ -115,6 +122,24 @@ export default function WorkerOrders() {
           )}
           <Text style={styles.addBtnText}>NUOVA</Text>
         </TouchableOpacity>
+      </View>
+
+      <View style={styles.searchRow}>
+        <Ionicons name="search" size={18} color={colors.textSecondary} />
+        <TextInput
+          testID="input-search-orders-worker"
+          style={styles.searchInput}
+          value={search}
+          onChangeText={setSearch}
+          placeholder="Cerca targa, cliente, lavoro…"
+          placeholderTextColor={colors.textSecondary}
+          autoCapitalize="none"
+        />
+        {search ? (
+          <TouchableOpacity onPress={() => setSearch("")}>
+            <Ionicons name="close-circle" size={18} color={colors.textSecondary} />
+          </TouchableOpacity>
+        ) : null}
       </View>
 
       {/* Filter chips - horizontal row */}
@@ -225,6 +250,12 @@ const styles = StyleSheet.create({
   addBtn: { flexDirection: "row", alignItems: "center", gap: 6, backgroundColor: colors.text, paddingHorizontal: 14, paddingVertical: 12 },
   addBtnText: { color: colors.textInverse, fontWeight: "900", letterSpacing: 2, fontSize: 12 },
   plateInput: { fontSize: 22, fontWeight: "900", letterSpacing: 2, textAlign: "center" },
+  searchRow: {
+    flexDirection: "row", alignItems: "center", gap: 8,
+    marginHorizontal: spacing.lg, marginTop: spacing.sm,
+    borderWidth: 1, borderColor: colors.borderStrong, paddingHorizontal: 12,
+  },
+  searchInput: { flex: 1, paddingVertical: 10, fontSize: 14, color: colors.text, minHeight: 44 },
   chipScroller: { maxHeight: 56, borderBottomWidth: 1, borderBottomColor: colors.border },
   chipRow: { paddingHorizontal: spacing.lg, gap: 8, alignItems: "center", paddingVertical: 10 },
   chip: {
