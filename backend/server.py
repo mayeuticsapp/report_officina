@@ -587,6 +587,22 @@ async def login(body: LoginIn):
     return LoginOut(token=token, user=public)
 
 
+class PasswordChangeIn(BaseModel):
+    old_password: str
+    new_password: str
+
+
+@api.post("/auth/change-password")
+async def change_password(body: PasswordChangeIn, user: dict = Depends(get_current_user)):
+    row = await fetchrow("SELECT password_hash FROM users WHERE id=$1", user["id"])
+    if not row or not verify_password(body.old_password, row["password_hash"]):
+        raise HTTPException(status_code=403, detail="La password attuale non è corretta")
+    if len(body.new_password) < 6:
+        raise HTTPException(status_code=400, detail="La nuova password deve avere almeno 6 caratteri")
+    await execute("UPDATE users SET password_hash=$1 WHERE id=$2", hash_password(body.new_password), user["id"])
+    return {"ok": True}
+
+
 @api.get("/auth/me", response_model=UserPublic)
 async def me(user: dict = Depends(get_current_user)):
     return UserPublic(**user)

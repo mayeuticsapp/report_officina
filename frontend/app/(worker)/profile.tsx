@@ -3,6 +3,7 @@ import { View, Text, StyleSheet, TouchableOpacity } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useAuth } from "@/src/auth/AuthContext";
 import { NotificationToggle } from "@/src/components/NotificationToggle";
+import { ChangePassword } from "@/src/components/ChangePassword";
 import { colors, spacing } from "@/src/theme";
 
 export default function Profile() {
@@ -27,6 +28,8 @@ export default function Profile() {
         </View>
 
         <NotificationToggle />
+
+        <ChangePassword />
 
         {!confirming ? (
           <TouchableOpacity testID="logout-button" style={styles.logoutBtn} onPress={() => setConfirming(true)}>
