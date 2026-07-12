@@ -177,9 +177,11 @@ export default function OrdersAdmin() {
                   <Text style={styles.vehicle}>{o.vehicle}</Text>
                   <Text style={styles.customer}>Cliente: {o.customer}</Text>
                   {o.description ? <Text style={styles.desc}>{o.description}</Text> : null}
-                  {o.scheda_tecnica?.note ? (
+                  {(o.scheda_tecnica?.lavori_da_fare?.length || o.scheda_tecnica?.note) ? (
                     <Text testID={`pending-note-${o.id}`} style={styles.notePreview} numberOfLines={2}>
-                      {o.scheda_tecnica.note}
+                      {o.scheda_tecnica?.lavori_da_fare?.length
+                        ? o.scheda_tecnica.lavori_da_fare.join("; ")
+                        : o.scheda_tecnica?.note}
                     </Text>
                   ) : null}
                   {o.created_by_name ? (

@@ -764,12 +764,10 @@ async def omnius_ingest_scheda(body: OmniusSchedaIn):
     if not plate:
         raise HTTPException(status_code=400, detail="plate obbligatoria")
 
-    note_parts = []
-    if body.note and body.note.strip():
-        note_parts.append(body.note.strip())
-    if body.dtc_codes:
-        note_parts.append("DTC: " + ", ".join(body.dtc_codes))
-    extra_note = "\n".join(note_parts) if note_parts else None
+    # Le voci lavori/ricambi della scheda STAR diventano checklist (lavori_da_fare);
+    # i DTC restano in nota.
+    lavori_items = [s.strip() for s in (body.note or "").split(";") if s.strip()]
+    extra_note = ("DTC: " + ", ".join(body.dtc_codes)) if body.dtc_codes else None
 
     existing = await fetchrow("SELECT * FROM work_orders WHERE star_doc_id=$1", star_doc_id)
     now = now_utc()
@@ -779,9 +777,14 @@ async def omnius_ingest_scheda(body: OmniusSchedaIn):
         if isinstance(scheda_raw, str):
             scheda_raw = json.loads(scheda_raw)
         merged_scheda = dict(scheda_raw)
+        if lavori_items:
+            gia_noti = set((merged_scheda.get("lavori_da_fare") or []) + (merged_scheda.get("lavori_fatti") or []))
+            merged_scheda["lavori_da_fare"] = (merged_scheda.get("lavori_da_fare") or []) + \
+                [it for it in lavori_items if it not in gia_noti]
         if extra_note:
             prev = (merged_scheda.get("note") or "").strip()
-            merged_scheda["note"] = f"{prev}\n{extra_note}".strip() if prev else extra_note
+            if extra_note not in prev:
+                merged_scheda["note"] = f"{prev}\n{extra_note}".strip() if prev else extra_note
 
         parts = ["scheda_tecnica=$1::jsonb", "updated_at=$2"]
         vals: list = [json.dumps(merged_scheda), now]
@@ -795,7 +798,7 @@ async def omnius_ingest_scheda(body: OmniusSchedaIn):
         return OmniusSchedaOut(action="updated", work_order=row_to_workorder(row))
 
     new_id = str(uuid.uuid4())
-    scheda = SchedaTecnica(note=extra_note).model_dump()
+    scheda = SchedaTecnica(note=extra_note, lavori_da_fare=lavori_items).model_dump()
     customer = (body.customer or "Cliente da definire").strip()
     vehicle = (body.vehicle or "Veicolo da definire").strip()
     description = (body.description or "Scheda ricevuta da Omnius/STAR").strip()
@@ -928,6 +931,41 @@ async def get_work_order(order_id: str, user: dict = Depends(get_current_user)):
     if user["role"] == "worker" and user["id"] not in worker_ids:
         raise HTTPException(status_code=403, detail="Non assegnato")
     return row_to_workorder(row)
+
+
+class ToggleLavoroIn(BaseModel):
+    item: str
+    done: bool
+
+
+@api.post("/work-orders/{order_id}/scheda/toggle-lavoro", response_model=SchedaTecnica)
+async def toggle_lavoro(order_id: str, body: ToggleLavoroIn, user: dict = Depends(get_current_user)):
+    """Spunta (o togli la spunta a) un lavoro: sposta la voce tra 'da fare' e 'fatti'."""
+    row = await _order_or_403(order_id, user)
+    scheda_raw = row.get("scheda_tecnica") or {}
+    if isinstance(scheda_raw, str):
+        scheda_raw = json.loads(scheda_raw)
+    item = body.item.strip()
+    if not item:
+        raise HTTPException(status_code=400, detail="Voce vuota")
+    da_fare = [x for x in (scheda_raw.get("lavori_da_fare") or [])]
+    fatti = [x for x in (scheda_raw.get("lavori_fatti") or [])]
+    if body.done:
+        da_fare = [x for x in da_fare if x != item]
+        if item not in fatti:
+            fatti.append(item)
+    else:
+        fatti = [x for x in fatti if x != item]
+        if item not in da_fare:
+            da_fare.append(item)
+    scheda_raw["lavori_da_fare"] = da_fare
+    scheda_raw["lavori_fatti"] = fatti
+    scheda = SchedaTecnica(**scheda_raw)
+    await execute(
+        "UPDATE work_orders SET scheda_tecnica=$1::jsonb, updated_at=$2 WHERE id=$3",
+        json.dumps(scheda.model_dump()), now_utc(), order_id
+    )
+    return scheda
 
 
 class VehicleHistoryItem(BaseModel):

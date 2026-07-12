@@ -8,7 +8,7 @@ import * as ImagePicker from "expo-image-picker";
 import {
   AudioModule, RecordingPresets, useAudioRecorder,
 } from "expo-audio";
-import { api, Conversation, ConversationTurn, SchedaTecnica, VoiceTurnResp, transcribeAudio, lookupPlate, editDialogTurn } from "@/src/api/client";
+import { api, Conversation, ConversationTurn, SchedaTecnica, VoiceTurnResp, transcribeAudio, lookupPlate, editDialogTurn, toggleLavoro } from "@/src/api/client";
 import { useAuth } from "@/src/auth/AuthContext";
 import { confirmDialog, showAlert } from "@/src/utils/dialog";
 import { colors, spacing } from "@/src/theme";
@@ -185,6 +185,15 @@ export function VoiceChat({ orderId, readOnly }: Props) {
     } finally { setScanning(false); }
   };
 
+  const onToggleLavoro = async (item: string, done: boolean) => {
+    try {
+      const nuova = await toggleLavoro(orderId, item, done);
+      setScheda(nuova);
+    } catch (e: any) {
+      showAlert("Errore", e?.message || "Impossibile aggiornare la checklist");
+    }
+  };
+
   const saveTurnEdit = async () => {
     if (editingIdx === null) return;
     const t = editText.trim();
@@ -215,8 +224,10 @@ export function VoiceChat({ orderId, readOnly }: Props) {
         <SchedaRow label="ANNO" value={scheda?.anno} />
         <SchedaRow label="MOTORE" value={scheda?.motore} />
         <SchedaRow label="KM" value={scheda?.km} />
-        <SchedaList label="LAVORI FATTI" items={scheda?.lavori_fatti || []} color={colors.active} />
-        <SchedaList label="DA FARE" items={scheda?.lavori_da_fare || []} color={colors.idle} />
+        <SchedaList label="LAVORI FATTI" items={scheda?.lavori_fatti || []} color={colors.active}
+          checked onToggle={readOnly ? undefined : (it) => onToggleLavoro(it, false)} />
+        <SchedaList label="DA FARE" items={scheda?.lavori_da_fare || []} color={colors.idle}
+          onToggle={readOnly ? undefined : (it) => onToggleLavoro(it, true)} />
         <SchedaList label="RICAMBI NECESSARI" items={scheda?.ricambi_necessari || []} color={colors.primary} />
         {scheda?.note ? (
           <View style={{ marginTop: spacing.sm }}>
@@ -350,16 +361,28 @@ function SchedaRow({ label, value }: { label: string; value?: string | null }) {
   );
 }
 
-function SchedaList({ label, items, color }: { label: string; items: string[]; color: string }) {
+function SchedaList({ label, items, color, checked, onToggle }: {
+  label: string; items: string[]; color: string; checked?: boolean; onToggle?: (item: string) => void;
+}) {
   if (!items.length) return null;
   return (
     <View style={{ marginTop: spacing.sm }}>
       <Text style={[styles.rowLabel, { color }]}>{label}</Text>
       {items.map((it, i) => (
-        <View key={i} style={styles.listItem}>
-          <View style={[styles.listDot, { backgroundColor: color }]} />
-          <Text style={styles.listText}>{it}</Text>
-        </View>
+        <TouchableOpacity
+          key={i}
+          style={styles.listItem}
+          disabled={!onToggle}
+          onPress={() => onToggle?.(it)}
+          activeOpacity={0.7}
+        >
+          {onToggle ? (
+            <Ionicons name={checked ? "checkbox" : "square-outline"} size={18} color={color} style={{ marginTop: 1 }} />
+          ) : (
+            <View style={[styles.listDot, { backgroundColor: color }]} />
+          )}
+          <Text style={[styles.listText, checked && onToggle ? { textDecorationLine: "line-through", color: colors.textSecondary } : null]}>{it}</Text>
+        </TouchableOpacity>
       ))}
     </View>
   );

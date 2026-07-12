@@ -217,6 +217,14 @@ export async function deleteOrderMessage(messageId: string): Promise<void> {
   await api(`/messages/${messageId}`, { method: "DELETE" });
 }
 
+/** Spunta/togli spunta a un lavoro della checklist (sposta tra da_fare e fatti). */
+export async function toggleLavoro(orderId: string, item: string, done: boolean): Promise<SchedaTecnica> {
+  return api<SchedaTecnica>(`/work-orders/${orderId}/scheda/toggle-lavoro`, {
+    method: "POST",
+    body: { item, done },
+  });
+}
+
 /** Modifica un proprio messaggio nel dialogo AI (l'AI non ri-risponde: corregge il registro). */
 export async function editDialogTurn(orderId: string, turnIndex: number, text: string): Promise<Conversation> {
   return api<Conversation>(`/work-orders/${orderId}/conversation/turns/${turnIndex}`, { method: "PUT", body: { text } });
