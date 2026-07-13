@@ -1,6 +1,7 @@
 import { useCallback, useState } from "react";
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity, ActivityIndicator, RefreshControl,
+  Linking,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
@@ -16,6 +17,9 @@ type Appuntamento = {
   targa?: string;
   cliente?: string;
   nota?: string;
+  veicolo?: string;
+  telefono?: string;
+  cellulare?: string;
 };
 
 type Planning = {
@@ -124,8 +128,24 @@ export default function PlanningAdmin() {
                         </View>
                       ) : null}
                     </View>
+                    {a.veicolo ? <Text style={styles.veicolo}>{a.veicolo}</Text> : null}
                     {a.cliente ? <Text style={styles.cliente}>{a.cliente}</Text> : null}
                     {a.nota ? <Text style={styles.nota}>{a.nota}</Text> : null}
+                    {(a.telefono || a.cellulare) ? (
+                      <View style={styles.phoneRow}>
+                        {[a.cellulare, a.telefono].filter(Boolean).filter((v, i, arr) => arr.indexOf(v) === i).map((num) => (
+                          <TouchableOpacity
+                            key={num}
+                            testID={`btn-call-${num}`}
+                            style={styles.phoneBtn}
+                            onPress={() => Linking.openURL(`tel:${String(num).replace(/[^+\d]/g, "")}`)}
+                          >
+                            <Ionicons name="call" size={14} color={colors.textInverse} />
+                            <Text style={styles.phoneText}>{num}</Text>
+                          </TouchableOpacity>
+                        ))}
+                      </View>
+                    ) : null}
                   </View>
                 </View>
               ))}
@@ -167,6 +187,13 @@ const styles = StyleSheet.create({
   targa: { fontSize: 16, fontWeight: "900", color: colors.text },
   pontePill: { backgroundColor: colors.primary, paddingHorizontal: 8, paddingVertical: 2 },
   ponteText: { color: colors.textInverse, fontSize: 9, fontWeight: "900", letterSpacing: 1 },
+  veicolo: { fontSize: 12, color: colors.textSecondary, marginTop: 2, fontStyle: "italic" },
   cliente: { fontSize: 13, color: colors.text, marginTop: 2, fontWeight: "600" },
+  phoneRow: { flexDirection: "row", gap: 8, marginTop: 6, flexWrap: "wrap" },
+  phoneBtn: {
+    flexDirection: "row", alignItems: "center", gap: 6,
+    backgroundColor: colors.active, paddingHorizontal: 10, paddingVertical: 6,
+  },
+  phoneText: { color: colors.textInverse, fontSize: 12, fontWeight: "800", letterSpacing: 0.5 },
   nota: { fontSize: 12, color: colors.textSecondary, marginTop: 2 },
 });
