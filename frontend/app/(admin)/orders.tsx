@@ -132,10 +132,16 @@ export default function OrdersAdmin() {
           <Text style={styles.headerLabel}>GESTIONE</Text>
           <Text style={styles.title}>COMMESSE</Text>
         </View>
-        <TouchableOpacity testID="btn-add-order" style={styles.addBtn} onPress={openNew}>
-          <Ionicons name="add" size={22} color={colors.textInverse} />
-          <Text style={styles.addBtnText}>NUOVA</Text>
-        </TouchableOpacity>
+        <View style={{ flexDirection: "row", gap: 8 }}>
+          <TouchableOpacity testID="btn-planning" style={styles.planningBtn} onPress={() => router.push("/(admin)/planning" as any)}>
+            <Ionicons name="calendar-outline" size={20} color={colors.text} />
+            <Text style={styles.planningBtnText}>PLANNING</Text>
+          </TouchableOpacity>
+          <TouchableOpacity testID="btn-add-order" style={styles.addBtn} onPress={openNew}>
+            <Ionicons name="add" size={22} color={colors.textInverse} />
+            <Text style={styles.addBtnText}>NUOVA</Text>
+          </TouchableOpacity>
+        </View>
       </View>
 
       <View style={styles.searchRow}>
@@ -315,6 +321,8 @@ const styles = StyleSheet.create({
   headerLabel: { fontSize: 11, letterSpacing: 3, color: colors.textSecondary, fontWeight: "700" },
   title: { fontSize: 26, fontWeight: "900", color: colors.text, letterSpacing: -0.5 },
   addBtn: { flexDirection: "row", alignItems: "center", gap: 6, backgroundColor: colors.text, paddingHorizontal: 14, paddingVertical: 12 },
+  planningBtn: { flexDirection: "row", alignItems: "center", gap: 6, borderWidth: 1, borderColor: colors.borderStrong, paddingHorizontal: 12, paddingVertical: 12 },
+  planningBtnText: { color: colors.text, fontWeight: "900", letterSpacing: 2, fontSize: 11 },
   addBtnText: { color: colors.textInverse, fontWeight: "900", letterSpacing: 2, fontSize: 12 },
   searchRow: {
     flexDirection: "row", alignItems: "center", gap: 8,

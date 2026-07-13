@@ -465,6 +465,16 @@ async def startup():
         await conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_plate_lookup_pending ON plate_lookup_requests (status, created_at)"
         )
+        # Planning officina: snapshot unico spedito da Omnius (fonte: STAR)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS officina_planning (
+                id INT PRIMARY KEY DEFAULT 1,
+                aggiornato TEXT,
+                giorni_coperti INT,
+                appuntamenti JSONB NOT NULL DEFAULT '[]',
+                received_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """)
         await conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_work_orders_star_doc_id ON work_orders (star_doc_id) WHERE star_doc_id IS NOT NULL"
         )
@@ -812,6 +822,48 @@ async def omnius_ingest_scheda(body: OmniusSchedaIn):
     )
     row = await fetchrow("SELECT * FROM work_orders WHERE id=$1", new_id)
     return OmniusSchedaOut(action="created", work_order=row_to_workorder(row))
+
+
+# ---- Planning officina (snapshot da STAR via Omnius) ----
+class PlanningIn(BaseModel):
+    aggiornato: Optional[str] = None
+    giorni_coperti: Optional[int] = None
+    appuntamenti: List[dict] = Field(default_factory=list)
+
+
+class PlanningOut(BaseModel):
+    aggiornato: Optional[str] = None
+    giorni_coperti: Optional[int] = None
+    appuntamenti: List[dict]
+    received_at: datetime
+
+
+@api.post("/v1/omnius/planning", dependencies=[Depends(require_omnius_key)])
+async def omnius_planning(body: PlanningIn):
+    """Riceve lo snapshot completo del planning STAR (prossimi 7 giorni).
+    Ogni invio SOSTITUISCE il precedente (niente merge)."""
+    await execute(
+        """INSERT INTO officina_planning (id, aggiornato, giorni_coperti, appuntamenti, received_at)
+           VALUES (1, $1, $2, $3::jsonb, $4)
+           ON CONFLICT (id) DO UPDATE SET aggiornato=$1, giorni_coperti=$2, appuntamenti=$3::jsonb, received_at=$4""",
+        body.aggiornato, body.giorni_coperti, json.dumps(body.appuntamenti), now_utc()
+    )
+    return {"ok": True, "appuntamenti": len(body.appuntamenti)}
+
+
+@api.get("/planning", response_model=PlanningOut)
+async def get_planning(admin: dict = Depends(require_admin)):
+    """Il planning STAR per la pagina admin (sola lettura, fonte: Omnius)."""
+    row = await fetchrow("SELECT * FROM officina_planning WHERE id=1")
+    if not row:
+        raise HTTPException(status_code=404, detail="Planning non ancora ricevuto da Omnius")
+    apps = row.get("appuntamenti") or []
+    if isinstance(apps, str):
+        apps = json.loads(apps)
+    return PlanningOut(
+        aggiornato=row.get("aggiornato"), giorni_coperti=row.get("giorni_coperti"),
+        appuntamenti=apps, received_at=row["received_at"],
+    )
 
 
 # ---- Sportello di lettura report per Omnius (Fase 2) ----
