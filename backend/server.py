@@ -221,6 +221,9 @@ class SchedaTecnica(BaseModel):
     lavori_da_fare: List[str] = Field(default_factory=list)
     ricambi_necessari: List[str] = Field(default_factory=list)
     note: Optional[str] = None
+    # Righe strutturate da STAR (ricambi/manodopera con codice, qta, tipo, prezzo).
+    # I prezzi sono dati sensibili: vengono rimossi per i non-admin (vedi _strip_prices_for).
+    righe: List[dict] = Field(default_factory=list)
 
 
 class WorkOrderUpdate(BaseModel):
@@ -352,6 +355,20 @@ class TranscribeOut(BaseModel):
 
 
 # ---------------- DB row helpers ----------------
+def _scheda_for_user(scheda: SchedaTecnica, user: dict) -> SchedaTecnica:
+    """I prezzi delle righe sono visibili solo all'admin: per gli altri li rimuove."""
+    if user.get("role") == "admin" or not scheda.righe:
+        return scheda
+    righe = [{k: v for k, v in r.items() if k != "prezzo"} for r in scheda.righe]
+    return scheda.model_copy(update={"righe": righe})
+
+
+def _workorder_for_user(wo: WorkOrder, user: dict) -> WorkOrder:
+    if user.get("role") == "admin" or not wo.scheda_tecnica.righe:
+        return wo
+    return wo.model_copy(update={"scheda_tecnica": _scheda_for_user(wo.scheda_tecnica, user)})
+
+
 def row_to_workorder(row: dict) -> WorkOrder:
     scheda = row.get("scheda_tecnica") or {}
     if isinstance(scheda, str):
@@ -690,7 +707,7 @@ async def list_work_orders(q: Optional[str] = None, user: dict = Depends(get_cur
         )
     where = f"WHERE {' AND '.join(conds)}" if conds else ""
     rows = await fetch(f"SELECT * FROM work_orders {where} ORDER BY created_at DESC LIMIT 500", *vals)
-    return [row_to_workorder(r) for r in rows]
+    return [_workorder_for_user(row_to_workorder(r), user) for r in rows]
 
 
 @api.post("/work-orders", response_model=WorkOrder)
@@ -747,6 +764,14 @@ async def require_omnius_key(x_omnius_key: Optional[str] = Header(None)):
     return True
 
 
+class OmniusRiga(BaseModel):
+    codice: Optional[str] = None
+    descrizione: str
+    qta: Optional[float] = None
+    tipo: Optional[str] = None       # "ricambio" | "manodopera"
+    prezzo: Optional[float] = None   # sensibile: mostrato solo all'admin
+
+
 class OmniusSchedaIn(BaseModel):
     star_doc_id: str
     plate: str
@@ -756,6 +781,19 @@ class OmniusSchedaIn(BaseModel):
     description: Optional[str] = None
     note: Optional[str] = None
     dtc_codes: List[str] = Field(default_factory=list)
+    righe: Optional[List[OmniusRiga]] = None  # opzionale: se assente, fallback su note
+
+
+def _riga_label(r: dict) -> str:
+    """Etichetta checklist da una riga: 'Descrizione [codice] xqta'."""
+    parts = [str(r.get("descrizione") or "").strip()]
+    if r.get("codice"):
+        parts.append(f"[{r['codice']}]")
+    q = r.get("qta")
+    if q not in (None, "", 1, 1.0):
+        qn = int(q) if float(q).is_integer() else q
+        parts.append(f"x{qn}")
+    return " ".join(p for p in parts if p).strip()
 
 
 class OmniusSchedaOut(BaseModel):
@@ -775,9 +813,13 @@ async def omnius_ingest_scheda(body: OmniusSchedaIn):
     if not plate:
         raise HTTPException(status_code=400, detail="plate obbligatoria")
 
-    # Le voci lavori/ricambi della scheda STAR diventano checklist (lavori_da_fare);
-    # i DTC restano in nota.
-    lavori_items = [s.strip() for s in (body.note or "").split(";") if s.strip()]
+    # Righe strutturate (nuovo) o fallback sul testo note (vecchio).
+    # In entrambi i casi le voci diventano checklist (lavori_da_fare).
+    righe = [r.model_dump() for r in body.righe] if body.righe is not None else None
+    if righe is not None:
+        lavori_items = [_riga_label(r) for r in righe if (r.get("descrizione") or "").strip()]
+    else:
+        lavori_items = [s.strip() for s in (body.note or "").split(";") if s.strip()]
     extra_note = ("DTC: " + ", ".join(body.dtc_codes)) if body.dtc_codes else None
 
     existing = await fetchrow("SELECT * FROM work_orders WHERE star_doc_id=$1", star_doc_id)
@@ -788,7 +830,12 @@ async def omnius_ingest_scheda(body: OmniusSchedaIn):
         if isinstance(scheda_raw, str):
             scheda_raw = json.loads(scheda_raw)
         merged_scheda = dict(scheda_raw)
-        if lavori_items:
+        if righe is not None:
+            # Sostituzione integrale delle righe (idempotenza), ma preserva le spunte del meccanico
+            merged_scheda["righe"] = righe
+            fatti = set(merged_scheda.get("lavori_fatti") or [])
+            merged_scheda["lavori_da_fare"] = [it for it in lavori_items if it not in fatti]
+        elif lavori_items:
             gia_noti = set((merged_scheda.get("lavori_da_fare") or []) + (merged_scheda.get("lavori_fatti") or []))
             merged_scheda["lavori_da_fare"] = (merged_scheda.get("lavori_da_fare") or []) + \
                 [it for it in lavori_items if it not in gia_noti]
@@ -809,7 +856,9 @@ async def omnius_ingest_scheda(body: OmniusSchedaIn):
         return OmniusSchedaOut(action="updated", work_order=row_to_workorder(row))
 
     new_id = str(uuid.uuid4())
-    scheda = SchedaTecnica(note=extra_note, lavori_da_fare=lavori_items).model_dump()
+    scheda = SchedaTecnica(
+        note=extra_note, lavori_da_fare=lavori_items, righe=(righe or []),
+    ).model_dump()
     customer = (body.customer or "Cliente da definire").strip()
     vehicle = (body.vehicle or "Veicolo da definire").strip()
     description = (body.description or "Scheda ricevuta da Omnius/STAR").strip()
@@ -983,7 +1032,7 @@ async def get_work_order(order_id: str, user: dict = Depends(get_current_user)):
         worker_ids = json.loads(worker_ids)
     if user["role"] == "worker" and user["id"] not in worker_ids:
         raise HTTPException(status_code=403, detail="Non assegnato")
-    return row_to_workorder(row)
+    return _workorder_for_user(row_to_workorder(row), user)
 
 
 class ToggleLavoroIn(BaseModel):
@@ -1018,7 +1067,7 @@ async def toggle_lavoro(order_id: str, body: ToggleLavoroIn, user: dict = Depend
         "UPDATE work_orders SET scheda_tecnica=$1::jsonb, updated_at=$2 WHERE id=$3",
         json.dumps(scheda.model_dump()), now_utc(), order_id
     )
-    return scheda
+    return _scheda_for_user(scheda, user)
 
 
 class VehicleHistoryItem(BaseModel):
@@ -2389,7 +2438,7 @@ async def voice_turn(order_id: str, body: VoiceTurnIn, user: dict = Depends(get_
 
     return VoiceTurnOut(
         assistant_text=reply,
-        scheda_tecnica=scheda_final,
+        scheda_tecnica=_scheda_for_user(scheda_final, user),
         turn=ConversationTurn(role="assistant", text=reply, timestamp=now),
     )
 
@@ -2423,7 +2472,7 @@ async def get_conversation(order_id: str, user: dict = Depends(get_current_user)
             role=t["role"], text=t["text"], timestamp=ts,
             worker_id=t.get("worker_id"), worker_full_name=t.get("worker_full_name")
         ))
-    return ConversationOut(work_order_id=order_id, scheda_tecnica=scheda, turns=parsed_turns)
+    return ConversationOut(work_order_id=order_id, scheda_tecnica=_scheda_for_user(scheda, user), turns=parsed_turns)
 
 
 app.include_router(api)
