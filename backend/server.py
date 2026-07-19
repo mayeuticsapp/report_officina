@@ -1733,6 +1733,71 @@ async def stats_overview(days: int = 30, admin: dict = Depends(require_admin)):
     )
 
 
+# ---- Chiedi all'AI (domande libere del titolare sui dati veri) ----
+async def _build_admin_digest(days: int = 60) -> str:
+    """Digest compatto del registro officina per l'AI: commesse, eventi, minuti per operaio."""
+    since = now_utc() - timedelta(days=days)
+    oggi = now_utc().strftime("%Y-%m-%d")
+    orders = await fetch(
+        "SELECT * FROM work_orders WHERE updated_at >= $1 ORDER BY created_at DESC LIMIT 300", since
+    )
+    events = await fetch(
+        "SELECT * FROM work_events WHERE timestamp >= $1 ORDER BY timestamp ASC LIMIT 5000", since
+    )
+    ev_by_order: dict = {}
+    for e in events:
+        ev_by_order.setdefault(e["work_order_id"], []).append(e)
+
+    lines = [f"OGGI: {oggi}. REGISTRO ULTIMI {days} GIORNI ({len(orders)} commesse, {len(events)} eventi):"]
+    for o in orders:
+        evs = ev_by_order.get(o["id"], [])
+        per_worker: dict = {}
+        for e in evs:
+            per_worker.setdefault(e["worker_full_name"], []).append(e)
+        parts = [
+            f"targa={o['plate']}", f"veicolo={o['vehicle']}", f"cliente={o['customer']}",
+            f"stato={o['status']}", f"lavoro={o['description'][:60]}",
+            f"creata={o['created_at'].strftime('%Y-%m-%d')}",
+        ]
+        for w, wevs in per_worker.items():
+            mins = _worker_minutes(wevs)
+            completata = any(e["type"] == "COMPLETE" for e in wevs)
+            comp_date = next((e["timestamp"].strftime("%Y-%m-%d") for e in reversed(wevs) if e["type"] == "COMPLETE"), None)
+            parts.append(f"operaio={w}({mins}min{', COMPLETATA il ' + comp_date if completata else ''})")
+        lines.append(" | ".join(parts))
+    return "\n".join(lines)[:24000]
+
+
+class AskIn(BaseModel):
+    question: str
+    history: List[dict] = Field(default_factory=list)  # [{role, text}] ultimi turni, per i follow-up
+
+
+class AskOut(BaseModel):
+    answer: str
+
+
+@api.post("/admin/ask", response_model=AskOut)
+async def admin_ask(body: AskIn, admin: dict = Depends(require_admin)):
+    question = body.question.strip()
+    if not question:
+        raise HTTPException(status_code=400, detail="Domanda vuota")
+    digest = await _build_admin_digest()
+    messages = [{"role": "system", "content": ai.SYSTEM_ADMIN_ASK}]
+    for t in body.history[-6:]:
+        role = "user" if t.get("role") == "user" else "assistant"
+        messages.append({"role": role, "content": str(t.get("text", ""))[:1000]})
+    messages.append({"role": "user", "content": f"{digest}\n\nDOMANDA DEL TITOLARE: {question}"})
+    try:
+        answer = await ai.chat(messages, max_tokens=700)
+    except Exception as e:
+        msg = str(e)
+        status_code = 429 if "429" in msg or "rate" in msg.lower() else 500
+        logger.exception("admin ask failed")
+        raise HTTPException(status_code=status_code, detail=f"AI non disponibile: {e}")
+    return AskOut(answer=answer.strip())
+
+
 @api.get("/reports/daily", response_model=DailyReportOut)
 async def daily_report(
     worker_ids: Optional[str] = None,

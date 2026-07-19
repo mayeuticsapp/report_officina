@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useState } from "react";
-import { View, Text, StyleSheet, ScrollView, RefreshControl, ActivityIndicator } from "react-native";
+import { View, Text, StyleSheet, ScrollView, RefreshControl, ActivityIndicator, TouchableOpacity } from "react-native";
+import { Ionicons } from "@expo/vector-icons";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { useFocusEffect } from "expo-router";
+import { useFocusEffect, useRouter } from "expo-router";
 import { api, LiveStatus, WorkEvent } from "@/src/api/client";
 import { colors, spacing } from "@/src/theme";
 
 export default function Dashboard() {
+  const router = useRouter();
   const [live, setLive] = useState<LiveStatus[]>([]);
   const [recent, setRecent] = useState<WorkEvent[]>([]);
   const [loading, setLoading] = useState(true);
@@ -41,9 +43,15 @@ export default function Dashboard() {
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
-      <View style={styles.header}>
-        <Text style={styles.headerLabel}>DASHBOARD</Text>
-        <Text style={styles.headerTitle}>LIVE</Text>
+      <View style={[styles.header, { flexDirection: "row", justifyContent: "space-between", alignItems: "center" }]}>
+        <View>
+          <Text style={styles.headerLabel}>DASHBOARD</Text>
+          <Text style={styles.headerTitle}>LIVE</Text>
+        </View>
+        <TouchableOpacity testID="btn-ask-ai" style={dashAskStyles.btn} onPress={() => router.push("/(admin)/ask" as any)}>
+          <Ionicons name="sparkles" size={18} color={colors.textInverse} />
+          <Text style={dashAskStyles.btnText}>CHIEDI ALL'AI</Text>
+        </TouchableOpacity>
       </View>
 
       <ScrollView
@@ -165,4 +173,12 @@ const styles = StyleSheet.create({
   recentPillText: { fontSize: 9, fontWeight: "900", color: colors.textInverse, letterSpacing: 1 },
   recentWorker: { fontSize: 13, fontWeight: "700", color: colors.text },
   recentReason: { fontSize: 11, color: colors.textSecondary, fontStyle: "italic" },
+});
+
+const dashAskStyles = StyleSheet.create({
+  btn: {
+    flexDirection: "row", alignItems: "center", gap: 6,
+    backgroundColor: colors.primary, paddingHorizontal: 14, paddingVertical: 12,
+  },
+  btnText: { color: colors.textInverse, fontWeight: "900", letterSpacing: 1.5, fontSize: 11 },
 });

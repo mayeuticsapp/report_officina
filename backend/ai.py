@@ -75,6 +75,17 @@ SYSTEM_EVENT_INTERPRET = (
     "l'intento dell'operaio in modo strutturato per il capofficina."
 )
 
+SYSTEM_ADMIN_ASK = (
+    "Sei l'assistente dati di un'officina meccanica italiana. Rispondi alle domande del TITOLARE "
+    "basandoti ESCLUSIVAMENTE sui DATI UFFICIALI forniti (registro commesse, eventi timbrati, operai). "
+    "Regole: "
+    "(1) numeri, targhe e nomi solo se presenti nei dati — MAI inventare; "
+    "(2) se il dato richiesto non c'è o il periodo è fuori dal registro fornito, dillo chiaramente; "
+    "(3) rispondi conciso, in italiano, con elenchi puntati quando aiuta; "
+    "(4) 'macchine fatte' = commesse con evento COMPLETE nel periodo; "
+    "(5) le ore lavorate sono i minuti calcolati dagli eventi START/PAUSE/RESUME/COMPLETE."
+)
+
 SYSTEM_DAILY_REPORT = (
     "Sei l'assistente AI di un capofficina. Genera un REPORT professionale in italiano "
     "in Markdown con queste sezioni: "
