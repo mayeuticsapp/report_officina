@@ -2184,6 +2184,11 @@ def _build_case_content(row: dict, events: List[dict], turns: List[dict], messag
     complete_reasons = [e.get("reason") for e in events if e.get("type") == "COMPLETE" and e.get("reason")]
     if complete_reasons:
         parts.append("ESITO: " + " | ".join(complete_reasons))
+    # Anche le note di INIZIA/PAUSA/RIPRENDI raccontano il lavoro: entrano nel caso
+    altre_note = [f"{e.get('type')}: {e.get('reason')}" for e in events
+                  if e.get("type") != "COMPLETE" and e.get("reason")]
+    if altre_note:
+        parts.append("NOTE EVENTI: " + " | ".join(altre_note)[:800])
     dialog = " / ".join(t.get("text", "") for t in turns if t.get("role") == "user")
     if dialog:
         parts.append(f"DIALOGO OPERAIO: {dialog[:1500]}")
@@ -2456,6 +2461,27 @@ async def voice_turn(order_id: str, body: VoiceTurnIn, user: dict = Depends(get_
     except Exception as e:
         logger.warning(f"recupero conoscenza fallito: {e}")
 
+    # Le note scritte agli eventi (INIZIA/PAUSA/RIPRENDI/COMPLETA) e i km per evento
+    # fanno parte del contesto: l'AI deve sapere cosa è già successo su questo lavoro.
+    eventi_block = ""
+    try:
+        evs = await fetch(
+            "SELECT type, reason, km, worker_full_name, timestamp FROM work_events WHERE work_order_id=$1 ORDER BY timestamp ASC LIMIT 30",
+            order_id
+        )
+        if evs:
+            righe_ev = []
+            for e in evs:
+                parti = [e["timestamp"].strftime("%d/%m %H:%M"), e["type"], e["worker_full_name"]]
+                if e.get("km"):
+                    parti.append(f"km={e['km']}")
+                if e.get("reason"):
+                    parti.append(f"nota: {e['reason']}")
+                righe_ev.append(" ".join(parti))
+            eventi_block = "\nEVENTI DI QUESTO LAVORO:\n  " + "\n  ".join(righe_ev)
+    except Exception as e:
+        logger.warning(f"eventi block fallito: {e}")
+
     try:
         messages = [{"role": "system", "content": ai.SYSTEM_ASSISTANT}]
         veicolo_block = (
@@ -2468,6 +2494,7 @@ async def voice_turn(order_id: str, body: VoiceTurnIn, user: dict = Depends(get_
         prefix = (
             f"{veicolo_block}\n"
             f"SCHEDA ATTUALE COMPLETA: {json.dumps(current_scheda, ensure_ascii=False)}"
+            f"{eventi_block}"
             f"{rag_block}"
         )
         for t in turns[-6:]:
