@@ -24,6 +24,7 @@ export default function OrderDetail() {
   const [submitting, setSubmitting] = useState(false);
   const [modalOpen, setModalOpen] = useState<null | EventType>(null);
   const [reason, setReason] = useState("");
+  const [km, setKm] = useState("");
   const [photos, setPhotos] = useState<string[]>([]);
 
   const load = useCallback(async () => {
@@ -51,6 +52,7 @@ export default function OrderDetail() {
 
   const openAction = (t: EventType) => {
     setReason("");
+    setKm("");
     setPhotos([]);
     setModalOpen(t);
   };
@@ -92,6 +94,10 @@ export default function OrderDetail() {
 
   const submitAction = async () => {
     if (!modalOpen || !order) return;
+    if (modalOpen === "START" && !km.replace(/[^0-9]/g, "")) {
+      showAlert("KM OBBLIGATORI", "Inserisci i chilometri del veicolo: senza km non puoi iniziare il lavoro.");
+      return;
+    }
     if ((modalOpen === "PAUSE" || modalOpen === "COMPLETE") && !reason.trim()) {
       showAlert("Motivo richiesto", `Inserisci un motivo per ${modalOpen === "PAUSE" ? "la sospensione" : "il completamento"}.`);
       return;
@@ -100,7 +106,7 @@ export default function OrderDetail() {
     try {
       await api<WorkEvent>(`/work-orders/${order.id}/events`, {
         method: "POST",
-        body: { type: modalOpen, reason: reason.trim() || null, photos_base64: photos },
+        body: { type: modalOpen, reason: reason.trim() || null, photos_base64: photos, km: modalOpen === "START" ? km : null },
       });
       setModalOpen(null);
       await load();
@@ -209,6 +215,23 @@ export default function OrderDetail() {
             </View>
 
             <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={{ padding: spacing.lg }}>
+              {modalOpen === "START" && (
+                <View style={styles.kmBox}>
+                  <Text style={styles.kmLabel}>⚠ KM DEL VEICOLO — OBBLIGATORIO</Text>
+                  <TextInput
+                    testID="km-input"
+                    style={styles.kmInput}
+                    value={km}
+                    onChangeText={(v) => setKm(v.replace(/[^0-9]/g, ""))}
+                    placeholder="es. 154000"
+                    placeholderTextColor="#FCA5A5"
+                    keyboardType="number-pad"
+                    maxLength={7}
+                    autoFocus
+                  />
+                  <Text style={styles.kmHint}>Leggi il contachilometri: senza km non puoi iniziare.</Text>
+                </View>
+              )}
               <Text style={styles.label}>
                 {modalOpen === "PAUSE" || modalOpen === "COMPLETE" ? "MOTIVO (obbligatorio)" : "NOTE (facoltativo)"}
               </Text>
@@ -305,6 +328,7 @@ function TimelineItem({ ev }: { ev: WorkEvent }) {
       <View style={styles.tlBody}>
         <Text style={[styles.tlLabel, { color: colorMap[ev.type] }]}>{labelMap[ev.type]}</Text>
         <Text style={styles.tlWorker}>{ev.worker_full_name}</Text>
+        {ev.km ? <Text style={styles.tlKm}>KM {Number(ev.km).toLocaleString("it-IT")}</Text> : null}
         {ev.reason ? <Text style={styles.tlReason}>&ldquo;{ev.reason}&rdquo;</Text> : null}
         {ev.ai_interpretation ? (
           <View style={styles.aiBox}>
@@ -351,6 +375,7 @@ const styles = StyleSheet.create({
   tlBody: { flex: 1, borderLeftWidth: 1, borderLeftColor: colors.border, paddingLeft: spacing.md },
   tlLabel: { fontSize: 11, fontWeight: "900", letterSpacing: 2 },
   tlWorker: { fontSize: 13, color: colors.text, marginTop: 2, fontWeight: "600" },
+  tlKm: { fontSize: 12, fontWeight: "900", color: colors.primary, marginTop: 2, letterSpacing: 0.5 },
   tlReason: { fontSize: 13, color: colors.textSecondary, marginTop: 4, fontStyle: "italic" },
   aiBox: { marginTop: 8, padding: 8, backgroundColor: colors.bgMuted, flexDirection: "row", gap: 8 },
   aiLabel: { fontSize: 10, fontWeight: "900", letterSpacing: 2, color: colors.primary },
@@ -368,6 +393,17 @@ const styles = StyleSheet.create({
   pendingBarText: { fontSize: 13, fontWeight: "800", color: colors.text, letterSpacing: 0.5 },
   action: { flex: 1, paddingVertical: 22, alignItems: "center", justifyContent: "center", minHeight: 64 },
   actionText: { fontSize: 14, fontWeight: "900", letterSpacing: 3 },
+  kmBox: {
+    borderWidth: 2, borderColor: colors.stopped, backgroundColor: "#FEF2F2",
+    padding: spacing.md, marginBottom: spacing.md,
+  },
+  kmLabel: { fontSize: 12, letterSpacing: 1.5, fontWeight: "900", color: colors.stopped, marginBottom: 8 },
+  kmInput: {
+    borderWidth: 2, borderColor: colors.stopped, backgroundColor: colors.bg,
+    paddingHorizontal: 12, paddingVertical: 12, fontSize: 22, fontWeight: "900",
+    color: colors.text, textAlign: "center", letterSpacing: 2, minHeight: 52,
+  },
+  kmHint: { fontSize: 11, color: colors.stopped, marginTop: 6, fontWeight: "600" },
   modalBackdrop: { flex: 1, backgroundColor: "rgba(0,0,0,0.5)", justifyContent: "flex-end" },
   modalSheet: { backgroundColor: colors.bg, borderTopWidth: 2, borderTopColor: colors.borderStrong, maxHeight: "90%" },
   modalHeader: {

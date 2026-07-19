@@ -117,6 +117,7 @@ function TimelineItem({ ev }: { ev: WorkEvent }) {
       <View style={styles.tlBody}>
         <Text style={[styles.tlLabel, { color: colorMap[ev.type] }]}>{labelMap[ev.type]}</Text>
         <Text style={styles.tlWorker}>{ev.worker_full_name}</Text>
+        {ev.km ? <Text style={styles.tlKm}>KM {Number(ev.km).toLocaleString("it-IT")}</Text> : null}
         {ev.reason ? <Text style={styles.tlReason}>&ldquo;{ev.reason}&rdquo;</Text> : null}
         {ev.ai_interpretation ? (
           <View style={styles.aiBox}>
@@ -161,6 +162,7 @@ const styles = StyleSheet.create({
   tlBody: { flex: 1, borderLeftWidth: 1, borderLeftColor: colors.border, paddingLeft: spacing.md },
   tlLabel: { fontSize: 11, fontWeight: "900", letterSpacing: 2 },
   tlWorker: { fontSize: 13, color: colors.text, marginTop: 2, fontWeight: "600" },
+  tlKm: { fontSize: 12, fontWeight: "900", color: colors.primary, marginTop: 2, letterSpacing: 0.5 },
   tlReason: { fontSize: 13, color: colors.textSecondary, marginTop: 4, fontStyle: "italic" },
   aiBox: { marginTop: 8, padding: 8, backgroundColor: colors.bgMuted, flexDirection: "row", gap: 8 },
   aiLabel: { fontSize: 10, fontWeight: "900", letterSpacing: 2, color: colors.primary },

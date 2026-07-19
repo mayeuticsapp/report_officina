@@ -95,6 +95,7 @@ export type WorkEvent = {
   photos_base64: string[];
   timestamp: string;
   ai_interpretation?: string | null;
+  km?: string | null;
 };
 
 export type LiveStatus = {

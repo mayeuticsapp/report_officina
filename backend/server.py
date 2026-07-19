@@ -256,6 +256,7 @@ class WorkEventCreate(BaseModel):
     type: EventType
     reason: Optional[str] = None
     photos_base64: List[str] = Field(default_factory=list)
+    km: Optional[str] = None  # obbligatorio su START (chilometraggio del veicolo)
 
 
 class WorkEvent(BaseModel):
@@ -269,6 +270,7 @@ class WorkEvent(BaseModel):
     photos_base64: List[str] = Field(default_factory=list)
     timestamp: datetime
     ai_interpretation: Optional[str] = None
+    km: Optional[str] = None
 
 
 class LiveWorkerStatus(BaseModel):
@@ -408,6 +410,7 @@ def row_to_event(row: dict) -> WorkEvent:
         photos_base64=photos,
         timestamp=row["timestamp"],
         ai_interpretation=row.get("ai_interpretation"),
+        km=row.get("km"),
     )
 
 
@@ -525,6 +528,7 @@ async def startup():
             "CREATE INDEX IF NOT EXISTS idx_order_messages_order ON order_messages (work_order_id, created_at)"
         )
         await conn.execute("ALTER TABLE order_messages ADD COLUMN IF NOT EXISTS edited_at TIMESTAMPTZ")
+        await conn.execute("ALTER TABLE work_events ADD COLUMN IF NOT EXISTS km TEXT")
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS message_reads (
                 user_id TEXT NOT NULL,
@@ -1534,16 +1538,35 @@ async def add_event(order_id: str, body: WorkEventCreate, user: dict = Depends(g
     if row["status"] == "pending":
         raise HTTPException(status_code=409, detail="Commessa in attesa di approvazione dal titolare")
 
+    # Su INIZIA i km sono OBBLIGATORI: senza chilometraggio non si parte.
+    km_clean = None
+    if body.type == "START":
+        km_digits = re.sub(r"[^0-9]", "", body.km or "")
+        if not km_digits or not (1 <= len(km_digits) <= 7):
+            raise HTTPException(status_code=400, detail="Inserisci i km del veicolo per iniziare il lavoro")
+        km_clean = km_digits
+
     ai_note = await _ai_interpret_reason(body.reason or "", body.type) if body.reason else None
     event_id = str(uuid.uuid4())
     ts = now_utc()
 
     await execute(
-        """INSERT INTO work_events (id, work_order_id, worker_id, worker_username, worker_full_name, type, reason, photos_base64, timestamp, ai_interpretation)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10)""",
+        """INSERT INTO work_events (id, work_order_id, worker_id, worker_username, worker_full_name, type, reason, photos_base64, timestamp, ai_interpretation, km)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11)""",
         event_id, order_id, user["id"], user["username"], user["full_name"],
-        body.type, body.reason, json.dumps(body.photos_base64), ts, ai_note
+        body.type, body.reason, json.dumps(body.photos_base64), ts, ai_note, km_clean
     )
+
+    # I km finiscono anche nella scheda tecnica (l'AI e i report li usano da lì)
+    if km_clean:
+        scheda_raw = row.get("scheda_tecnica") or {}
+        if isinstance(scheda_raw, str):
+            scheda_raw = json.loads(scheda_raw)
+        scheda_raw["km"] = km_clean
+        await execute(
+            "UPDATE work_orders SET scheda_tecnica=$1::jsonb WHERE id=$2",
+            json.dumps(SchedaTecnica(**scheda_raw).model_dump()), order_id
+        )
 
     new_status_map = {"START": "in_progress", "RESUME": "in_progress", "PAUSE": "paused", "COMPLETE": "completed"}
     await execute(
@@ -1559,7 +1582,7 @@ async def add_event(order_id: str, body: WorkEventCreate, user: dict = Depends(g
         id=event_id, work_order_id=order_id, worker_id=user["id"],
         worker_username=user["username"], worker_full_name=user["full_name"],
         type=body.type, reason=body.reason, photos_base64=body.photos_base64,
-        timestamp=ts, ai_interpretation=ai_note
+        timestamp=ts, ai_interpretation=ai_note, km=km_clean
     )
 
 
