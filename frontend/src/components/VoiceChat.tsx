@@ -8,7 +8,7 @@ import * as ImagePicker from "expo-image-picker";
 import {
   AudioModule, RecordingPresets, useAudioRecorder,
 } from "expo-audio";
-import { api, Conversation, ConversationTurn, SchedaTecnica, VoiceTurnResp, transcribeAudio, lookupPlate, editDialogTurn, toggleLavoro } from "@/src/api/client";
+import { api, Conversation, ConversationTurn, SchedaTecnica, VoiceTurnResp, transcribeAudio, lookupPlate, editDialogTurn, deleteDialogTurn, toggleLavoro } from "@/src/api/client";
 import { useAuth } from "@/src/auth/AuthContext";
 import { confirmDialog, showAlert } from "@/src/utils/dialog";
 import { colors, spacing } from "@/src/theme";
@@ -209,6 +209,19 @@ export function VoiceChat({ orderId, readOnly }: Props) {
     }
   };
 
+  const deleteTurn = async (idx: number) => {
+    const ok = await confirmDialog("Cancellare il messaggio?", "Sparisce dal dialogo. Finché il lavoro è aperto, l'AI non lo ha ancora imparato.", "Cancella");
+    if (!ok) return;
+    if (editingIdx === idx) { setEditingIdx(null); setEditText(""); }
+    try {
+      const c = await deleteDialogTurn(orderId, idx);
+      setScheda(c.scheda_tecnica);
+      setTurns(c.turns);
+    } catch (e: any) {
+      showAlert("Errore", e?.message || "Messaggio non cancellato");
+    }
+  };
+
   if (loading) return <View style={styles.loader}><ActivityIndicator color={colors.text} /></View>;
 
   return (
@@ -286,6 +299,11 @@ export function VoiceChat({ orderId, readOnly }: Props) {
                     {mine && (
                       <TouchableOpacity testID={`btn-edit-turn-${i}`} onPress={() => { setEditingIdx(i); setEditText(t.text); }} style={{ padding: 2 }}>
                         <Ionicons name="pencil" size={13} color="#A1A1AA" />
+                      </TouchableOpacity>
+                    )}
+                    {mine && (
+                      <TouchableOpacity testID={`btn-delete-turn-${i}`} onPress={() => deleteTurn(i)} style={{ padding: 2 }}>
+                        <Ionicons name="trash-outline" size={13} color={colors.idle} />
                       </TouchableOpacity>
                     )}
                   </View>

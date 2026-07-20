@@ -231,6 +231,11 @@ export async function editDialogTurn(orderId: string, turnIndex: number, text: s
   return api<Conversation>(`/work-orders/${orderId}/conversation/turns/${turnIndex}`, { method: "PUT", body: { text } });
 }
 
+/** Cancella un proprio messaggio del dialogo AI, anche un vocale trascritto. */
+export async function deleteDialogTurn(orderId: string, turnIndex: number): Promise<Conversation> {
+  return api<Conversation>(`/work-orders/${orderId}/conversation/turns/${turnIndex}`, { method: "DELETE" });
+}
+
 export type UnreadMessages = { total: number; by_order: Record<string, number> };
 
 export async function unreadMessages(): Promise<UnreadMessages> {

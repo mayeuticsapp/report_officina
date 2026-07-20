@@ -1484,6 +1484,42 @@ async def edit_conversation_turn(order_id: str, turn_index: int, body: TurnEditI
     return ConversationOut(work_order_id=order_id, scheda_tecnica=SchedaTecnica(**scheda_raw), turns=parsed_turns)
 
 
+@api.delete("/work-orders/{order_id}/conversation/turns/{turn_index}", response_model=ConversationOut)
+async def delete_conversation_turn(order_id: str, turn_index: int, user: dict = Depends(get_current_user)):
+    """Cancella un proprio messaggio del dialogo AI, anche un vocale trascritto.
+    Solo turni 'user' propri; le risposte dell'AI non si toccano. La cancellazione vale
+    per il registro, il report e la memoria storica (che si aggiorna solo se la commessa è chiusa)."""
+    await _order_or_403(order_id, user)
+    convo = await fetchrow("SELECT turns FROM conversations WHERE work_order_id=$1", order_id)
+    if not convo:
+        raise HTTPException(status_code=404, detail="Conversazione non trovata")
+    turns = convo["turns"]
+    if isinstance(turns, str):
+        turns = json.loads(turns)
+    turns = turns or []
+    if turn_index < 0 or turn_index >= len(turns):
+        raise HTTPException(status_code=404, detail="Turno non trovato")
+    turn = turns[turn_index]
+    if turn.get("role") != "user":
+        raise HTTPException(status_code=403, detail="Puoi cancellare solo i tuoi messaggi, non le risposte dell'AI")
+    if turn.get("worker_id") and turn["worker_id"] != user["id"]:
+        raise HTTPException(status_code=403, detail="Puoi cancellare solo i tuoi messaggi")
+    del turns[turn_index]
+    now = now_utc()
+    await execute(
+        "UPDATE conversations SET turns=$1::jsonb, updated_at=$2 WHERE work_order_id=$3",
+        json.dumps(turns), now, order_id
+    )
+    row = await fetchrow("SELECT * FROM work_orders WHERE id=$1", order_id)
+    if row and row["status"] == "completed":
+        asyncio.create_task(_upsert_case_embedding(order_id))
+    scheda_raw = row.get("scheda_tecnica") or {}
+    if isinstance(scheda_raw, str):
+        scheda_raw = json.loads(scheda_raw)
+    parsed_turns = [ConversationTurn(**{k: v for k, v in t.items() if k in ConversationTurn.model_fields}) for t in turns]
+    return ConversationOut(work_order_id=order_id, scheda_tecnica=SchedaTecnica(**scheda_raw), turns=parsed_turns)
+
+
 @api.get("/messages/unread", response_model=UnreadOut)
 async def unread_messages(user: dict = Depends(get_current_user)):
     """Conteggio non letti per l'utente: messaggi altrui nelle commesse a cui ha accesso,
@@ -2259,7 +2295,7 @@ async def _find_similar_cases(query_text: str, exclude_order_id: str, limit: int
                       1 - (c.embedding <=> $1::vector) AS similarity
                FROM case_embeddings c
                JOIN work_orders w ON w.id = c.work_order_id
-               WHERE c.work_order_id != $2
+               WHERE c.work_order_id != $2 AND w.status = 'completed'
                ORDER BY c.embedding <=> $1::vector
                LIMIT $3""",
             vec, exclude_order_id, limit
