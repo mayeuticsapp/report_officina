@@ -220,6 +220,7 @@ class SchedaTecnica(BaseModel):
     lavori_fatti: List[str] = Field(default_factory=list)
     lavori_da_fare: List[str] = Field(default_factory=list)
     ricambi_necessari: List[str] = Field(default_factory=list)
+    ricambi_sostituiti: List[str] = Field(default_factory=list)  # pezzi VERAMENTE cambiati (per la fattura)
     note: Optional[str] = None
     # Righe strutturate da STAR (ricambi/manodopera con codice, qta, tipo, prezzo).
     # I prezzi sono dati sensibili: vengono rimossi per i non-admin (vedi _strip_prices_for).
@@ -248,6 +249,9 @@ class WorkOrder(BaseModel):
     scheda_tecnica: SchedaTecnica = Field(default_factory=SchedaTecnica)
     created_by: Optional[str] = None
     created_by_name: Optional[str] = None
+    minutes_calculated: Optional[int] = None       # ore dai timbri (registro grezzo)
+    minutes_effective: Optional[int] = None        # ore corrette dal meccanico (per la fattura)
+    minutes_effective_reason: Optional[str] = None
     created_at: datetime
     updated_at: datetime
 
@@ -390,6 +394,8 @@ def row_to_workorder(row: dict) -> WorkOrder:
         scheda_tecnica=SchedaTecnica(**scheda),
         created_by=row.get("created_by"),
         created_by_name=row.get("created_by_name"),
+        minutes_effective=row.get("minutes_effective"),
+        minutes_effective_reason=row.get("minutes_effective_reason"),
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
@@ -471,6 +477,9 @@ async def startup():
         await conn.execute("ALTER TABLE work_orders ADD COLUMN IF NOT EXISTS created_by TEXT")
         await conn.execute("ALTER TABLE work_orders ADD COLUMN IF NOT EXISTS created_by_name TEXT")
         await conn.execute("ALTER TABLE work_orders ADD COLUMN IF NOT EXISTS star_doc_id TEXT")
+        # Ore effettive corrette dal meccanico (per la fattura); le calcolate restano nei timbri
+        await conn.execute("ALTER TABLE work_orders ADD COLUMN IF NOT EXISTS minutes_effective INTEGER")
+        await conn.execute("ALTER TABLE work_orders ADD COLUMN IF NOT EXISTS minutes_effective_reason TEXT")
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS plate_lookup_requests (
                 id TEXT PRIMARY KEY,
@@ -944,9 +953,11 @@ class OmniusReportItem(BaseModel):
     status: OrderStatus
     updated_at: datetime
     workers: List[str]
-    minutes_worked: int
+    minutes_worked: int                            # ore dai timbri (registro grezzo)
+    minutes_effective: int                         # ore da fatturare (corrette dal meccanico, o = calcolate)
+    minutes_effective_reason: Optional[str] = None
     events: List[OmniusEventOut]
-    scheda_tecnica: SchedaTecnica
+    scheda_tecnica: SchedaTecnica                  # include ricambi_sostituiti (pezzi veri) per la fattura
     dialogo: List[dict]
     photos: List[OmniusPhotoOut]
 
@@ -1016,6 +1027,8 @@ async def omnius_read_reports(updated_since: Optional[str] = None, status: Optio
             star_doc_id=row["star_doc_id"], work_order_id=oid, plate=row["plate"],
             vehicle=row["vehicle"], customer=row["customer"], status=row["status"],
             updated_at=row["updated_at"], workers=list(workers), minutes_worked=_worker_minutes(evs),
+            minutes_effective=(row.get("minutes_effective") if row.get("minutes_effective") is not None else _worker_minutes(evs)),
+            minutes_effective_reason=row.get("minutes_effective_reason"),
             events=events, scheda_tecnica=SchedaTecnica(**scheda_raw),
             dialogo=turns or [], photos=photos,
         ))
@@ -1036,7 +1049,10 @@ async def get_work_order(order_id: str, user: dict = Depends(get_current_user)):
         worker_ids = json.loads(worker_ids)
     if user["role"] == "worker" and user["id"] not in worker_ids:
         raise HTTPException(status_code=403, detail="Non assegnato")
-    return _workorder_for_user(row_to_workorder(row), user)
+    wo = row_to_workorder(row)
+    evs = await fetch("SELECT type, timestamp FROM work_events WHERE work_order_id=$1 ORDER BY timestamp ASC", order_id)
+    wo.minutes_calculated = _worker_minutes(evs)
+    return _workorder_for_user(wo, user)
 
 
 class ToggleLavoroIn(BaseModel):
@@ -1072,6 +1088,66 @@ async def toggle_lavoro(order_id: str, body: ToggleLavoroIn, user: dict = Depend
         json.dumps(scheda.model_dump()), now_utc(), order_id
     )
     return _scheda_for_user(scheda, user)
+
+
+@api.post("/work-orders/{order_id}/scheda/toggle-ricambio", response_model=SchedaTecnica)
+async def toggle_ricambio(order_id: str, body: ToggleLavoroIn, user: dict = Depends(get_current_user)):
+    """Spunta un ricambio come VERAMENTE sostituito (o togli la spunta): sposta la voce
+    tra 'necessari' (previsti) e 'sostituiti' (montati davvero). I sostituiti vanno in fattura."""
+    row = await _order_or_403(order_id, user)
+    scheda_raw = row.get("scheda_tecnica") or {}
+    if isinstance(scheda_raw, str):
+        scheda_raw = json.loads(scheda_raw)
+    item = body.item.strip()
+    if not item:
+        raise HTTPException(status_code=400, detail="Voce vuota")
+    necessari = [x for x in (scheda_raw.get("ricambi_necessari") or [])]
+    sostituiti = [x for x in (scheda_raw.get("ricambi_sostituiti") or [])]
+    if body.done:
+        necessari = [x for x in necessari if x != item]
+        if item not in sostituiti:
+            sostituiti.append(item)
+    else:
+        sostituiti = [x for x in sostituiti if x != item]
+        if item not in necessari:
+            necessari.append(item)
+    scheda_raw["ricambi_necessari"] = necessari
+    scheda_raw["ricambi_sostituiti"] = sostituiti
+    scheda = SchedaTecnica(**scheda_raw)
+    await execute(
+        "UPDATE work_orders SET scheda_tecnica=$1::jsonb, updated_at=$2 WHERE id=$3",
+        json.dumps(scheda.model_dump()), now_utc(), order_id
+    )
+    if row["status"] == "completed":
+        asyncio.create_task(_upsert_case_embedding(order_id))
+    return _scheda_for_user(scheda, user)
+
+
+class EffectiveHoursIn(BaseModel):
+    minutes: Optional[int] = None   # None = azzera la correzione, tornano valide le calcolate
+    reason: Optional[str] = None
+
+
+@api.post("/work-orders/{order_id}/effective-hours", response_model=WorkOrder)
+async def set_effective_hours(order_id: str, body: EffectiveHoursIn, user: dict = Depends(get_current_user)):
+    """Il meccanico corregge il totale ORE EFFETTIVE (quelle che vanno in fattura), se i
+    timbri non tornano (es. pausa dimenticata). Le ore calcolate dai timbri restano intatte."""
+    row = await _order_or_403(order_id, user)
+    mins = body.minutes
+    if mins is not None and not (0 <= mins <= 100000):
+        raise HTTPException(status_code=400, detail="Ore non valide")
+    reason = (body.reason or "").strip() or None
+    await execute(
+        "UPDATE work_orders SET minutes_effective=$1, minutes_effective_reason=$2, updated_at=$3 WHERE id=$4",
+        mins, reason, now_utc(), order_id
+    )
+    if row["status"] == "completed":
+        asyncio.create_task(_upsert_case_embedding(order_id))
+    updated = await fetchrow("SELECT * FROM work_orders WHERE id=$1", order_id)
+    wo = row_to_workorder(updated)
+    evs = await fetch("SELECT type, timestamp FROM work_events WHERE work_order_id=$1 ORDER BY timestamp ASC", order_id)
+    wo.minutes_calculated = _worker_minutes(evs)
+    return _workorder_for_user(wo, user)
 
 
 class VehicleHistoryItem(BaseModel):

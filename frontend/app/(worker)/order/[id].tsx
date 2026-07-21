@@ -7,7 +7,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { useLocalSearchParams, useRouter, useFocusEffect } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import * as ImagePicker from "expo-image-picker";
-import { api, WorkEvent, WorkOrder, EventType } from "@/src/api/client";
+import { api, WorkEvent, WorkOrder, EventType, setEffectiveHours } from "@/src/api/client";
 import { confirmDialog, showAlert } from "@/src/utils/dialog";
 import { VoiceChat } from "@/src/components/VoiceChat";
 import { VehicleHistory } from "@/src/components/VehicleHistory";
@@ -26,6 +26,11 @@ export default function OrderDetail() {
   const [reason, setReason] = useState("");
   const [km, setKm] = useState("");
   const [photos, setPhotos] = useState<string[]>([]);
+  const [hoursEditing, setHoursEditing] = useState(false);
+  const [hOre, setHOre] = useState("");
+  const [hMin, setHMin] = useState("");
+  const [hReason, setHReason] = useState("");
+  const [savingHours, setSavingHours] = useState(false);
 
   const load = useCallback(async () => {
     if (!id) return;
@@ -42,6 +47,44 @@ export default function OrderDetail() {
   }, [id]);
 
   useFocusEffect(useCallback(() => { load(); }, [load]));
+
+  const fmtMin = (m: number) => {
+    const h = Math.floor(m / 60), mm = m % 60;
+    return h > 0 ? `${h}h ${mm}m` : `${mm}m`;
+  };
+
+  const openHoursEdit = () => {
+    const base = order?.minutes_effective ?? order?.minutes_calculated ?? 0;
+    setHOre(String(Math.floor(base / 60)));
+    setHMin(String(base % 60));
+    setHReason(order?.minutes_effective_reason || "");
+    setHoursEditing(true);
+  };
+
+  const saveHours = async () => {
+    if (!order) return;
+    const total = (parseInt(hOre || "0", 10) || 0) * 60 + (parseInt(hMin || "0", 10) || 0);
+    setSavingHours(true);
+    try {
+      const updated = await setEffectiveHours(order.id, total, hReason.trim() || null);
+      setOrder(updated);
+      setHoursEditing(false);
+    } catch (e: any) {
+      showAlert("Errore", e?.message || "Ore non salvate");
+    } finally { setSavingHours(false); }
+  };
+
+  const resetHours = async () => {
+    if (!order) return;
+    setSavingHours(true);
+    try {
+      const updated = await setEffectiveHours(order.id, null, null);
+      setOrder(updated);
+      setHoursEditing(false);
+    } catch (e: any) {
+      showAlert("Errore", e?.message || "Non riesco ad azzerare");
+    } finally { setSavingHours(false); }
+  };
 
   const lastEvent = events[events.length - 1];
   const isPending = order?.status === "pending";
@@ -159,6 +202,57 @@ export default function OrderDetail() {
         <VehicleHistory orderId={order.id} />
 
         <VoiceChat orderId={order.id} />
+
+        {events.length > 0 && (() => {
+          const calc = order.minutes_calculated ?? 0;
+          const hasEff = order.minutes_effective != null && order.minutes_effective !== calc;
+          const eff = order.minutes_effective ?? calc;
+          return (
+            <View style={styles.hoursCard}>
+              <Text style={styles.sectionLabel}>ORE LAVORATE</Text>
+              <View style={styles.hoursRow}>
+                <Text style={styles.hoursLabel}>Dai timbri (calcolate)</Text>
+                <Text style={[styles.hoursVal, hasEff && styles.hoursStrike]}>{fmtMin(calc)}</Text>
+              </View>
+              {hasEff && (
+                <View style={styles.hoursRow}>
+                  <Text style={[styles.hoursLabel, { color: colors.active }]}>Da fatturare (corrette)</Text>
+                  <Text style={[styles.hoursVal, { color: colors.active }]}>{fmtMin(eff)}</Text>
+                </View>
+              )}
+              {hasEff && order.minutes_effective_reason ? (
+                <Text style={styles.hoursReason}>Motivo: {order.minutes_effective_reason}</Text>
+              ) : null}
+              {!hoursEditing ? (
+                <TouchableOpacity testID="btn-edit-hours" style={styles.hoursBtn} onPress={openHoursEdit}>
+                  <Ionicons name="create-outline" size={16} color={colors.text} />
+                  <Text style={styles.hoursBtnText}>Le ore non tornano? Correggi</Text>
+                </TouchableOpacity>
+              ) : (
+                <View style={styles.hoursEditBox}>
+                  <View style={styles.hoursInputsRow}>
+                    <TextInput testID="hours-ore" style={styles.hoursInput} value={hOre} onChangeText={setHOre} keyboardType="number-pad" placeholder="0" placeholderTextColor={colors.textSecondary} />
+                    <Text style={styles.hoursUnit}>h</Text>
+                    <TextInput testID="hours-min" style={styles.hoursInput} value={hMin} onChangeText={setHMin} keyboardType="number-pad" placeholder="0" placeholderTextColor={colors.textSecondary} />
+                    <Text style={styles.hoursUnit}>m</Text>
+                  </View>
+                  <TextInput testID="hours-reason" style={styles.hoursReasonInput} value={hReason} onChangeText={setHReason} placeholder="Motivo (es. pausa pranzo dimenticata)" placeholderTextColor={colors.textSecondary} />
+                  <View style={styles.hoursActions}>
+                    <TouchableOpacity testID="btn-save-hours" style={[styles.hoursSaveBtn, savingHours && { opacity: 0.5 }]} disabled={savingHours} onPress={saveHours}>
+                      <Text style={styles.hoursSaveText}>SALVA ORE</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity style={styles.hoursMiniBtn} disabled={savingHours} onPress={resetHours}>
+                      <Text style={styles.hoursMiniText}>Usa calcolate</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity style={styles.hoursMiniBtn} disabled={savingHours} onPress={() => setHoursEditing(false)}>
+                      <Text style={styles.hoursMiniText}>Annulla</Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              )}
+            </View>
+          );
+        })()}
 
         <PhotoArchive orderId={order.id} canUpload />
 
@@ -369,6 +463,24 @@ const styles = StyleSheet.create({
   value: { fontSize: 16, color: colors.text, marginTop: 2, fontWeight: "600" },
   desc: { fontSize: 14, color: colors.text, marginTop: 4, lineHeight: 20 },
   sectionLabel: { marginHorizontal: spacing.lg, fontSize: 11, letterSpacing: 3, color: colors.textSecondary, fontWeight: "700", marginBottom: spacing.sm },
+  hoursCard: { margin: spacing.lg, marginTop: 0, padding: spacing.lg, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.bgMuted },
+  hoursRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", paddingVertical: 3 },
+  hoursLabel: { fontSize: 13, color: colors.textSecondary },
+  hoursVal: { fontSize: 17, fontWeight: "900", color: colors.text },
+  hoursStrike: { textDecorationLine: "line-through", color: colors.textSecondary, fontWeight: "700" },
+  hoursReason: { fontSize: 12, color: colors.textSecondary, fontStyle: "italic", marginTop: 2 },
+  hoursBtn: { flexDirection: "row", alignItems: "center", gap: 6, marginTop: spacing.sm, paddingVertical: 8 },
+  hoursBtnText: { fontSize: 13, color: colors.text, fontWeight: "700" },
+  hoursEditBox: { marginTop: spacing.sm, gap: 8 },
+  hoursInputsRow: { flexDirection: "row", alignItems: "center", gap: 8 },
+  hoursInput: { width: 60, borderWidth: 1, borderColor: colors.borderStrong, paddingHorizontal: 10, paddingVertical: 8, fontSize: 18, fontWeight: "900", color: colors.text, textAlign: "center" },
+  hoursUnit: { fontSize: 16, fontWeight: "700", color: colors.textSecondary },
+  hoursReasonInput: { borderWidth: 1, borderColor: colors.borderStrong, paddingHorizontal: 10, paddingVertical: 8, fontSize: 14, color: colors.text },
+  hoursActions: { flexDirection: "row", alignItems: "center", gap: 10, marginTop: 2 },
+  hoursSaveBtn: { backgroundColor: colors.active, paddingHorizontal: 16, paddingVertical: 10 },
+  hoursSaveText: { color: colors.textInverse, fontSize: 13, fontWeight: "900", letterSpacing: 1 },
+  hoursMiniBtn: { paddingVertical: 8 },
+  hoursMiniText: { fontSize: 12, color: colors.textSecondary, fontWeight: "700" },
   empty: { marginHorizontal: spacing.lg, padding: spacing.md, borderWidth: 1, borderColor: colors.border },
   emptyText: { color: colors.textSecondary, fontSize: 13 },
   tlItem: { flexDirection: "row", marginHorizontal: spacing.lg, marginBottom: spacing.sm, borderWidth: 1, borderColor: colors.border, padding: spacing.md },

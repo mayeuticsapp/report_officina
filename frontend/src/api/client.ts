@@ -67,6 +67,9 @@ export type WorkOrder = {
   scheda_tecnica?: SchedaTecnica;
   created_by?: string | null;
   created_by_name?: string | null;
+  minutes_calculated?: number | null;
+  minutes_effective?: number | null;
+  minutes_effective_reason?: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -119,6 +122,7 @@ export type SchedaTecnica = {
   lavori_fatti: string[];
   lavori_da_fare: string[];
   ricambi_necessari: string[];
+  ricambi_sostituiti: string[];
   note?: string | null;
 };
 
@@ -223,6 +227,22 @@ export async function toggleLavoro(orderId: string, item: string, done: boolean)
   return api<SchedaTecnica>(`/work-orders/${orderId}/scheda/toggle-lavoro`, {
     method: "POST",
     body: { item, done },
+  });
+}
+
+/** Spunta un ricambio come VERAMENTE sostituito (sposta tra necessari e sostituiti). */
+export async function toggleRicambio(orderId: string, item: string, done: boolean): Promise<SchedaTecnica> {
+  return api<SchedaTecnica>(`/work-orders/${orderId}/scheda/toggle-ricambio`, {
+    method: "POST",
+    body: { item, done },
+  });
+}
+
+/** Corregge le ore effettive (per la fattura). minutes=null azzera la correzione. */
+export async function setEffectiveHours(orderId: string, minutes: number | null, reason: string | null): Promise<WorkOrder> {
+  return api<WorkOrder>(`/work-orders/${orderId}/effective-hours`, {
+    method: "POST",
+    body: { minutes, reason },
   });
 }
 

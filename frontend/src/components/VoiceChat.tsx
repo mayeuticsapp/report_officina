@@ -8,7 +8,7 @@ import * as ImagePicker from "expo-image-picker";
 import {
   AudioModule, RecordingPresets, useAudioRecorder,
 } from "expo-audio";
-import { api, Conversation, ConversationTurn, SchedaTecnica, VoiceTurnResp, transcribeAudio, lookupPlate, editDialogTurn, deleteDialogTurn, toggleLavoro } from "@/src/api/client";
+import { api, Conversation, ConversationTurn, SchedaTecnica, VoiceTurnResp, transcribeAudio, lookupPlate, editDialogTurn, deleteDialogTurn, toggleLavoro, toggleRicambio } from "@/src/api/client";
 import { useAuth } from "@/src/auth/AuthContext";
 import { confirmDialog, showAlert } from "@/src/utils/dialog";
 import { colors, spacing } from "@/src/theme";
@@ -194,6 +194,15 @@ export function VoiceChat({ orderId, readOnly }: Props) {
     }
   };
 
+  const onToggleRicambio = async (item: string, done: boolean) => {
+    try {
+      const nuova = await toggleRicambio(orderId, item, done);
+      setScheda(nuova);
+    } catch (e: any) {
+      showAlert("Errore", e?.message || "Impossibile aggiornare i ricambi");
+    }
+  };
+
   const saveTurnEdit = async () => {
     if (editingIdx === null) return;
     const t = editText.trim();
@@ -241,7 +250,10 @@ export function VoiceChat({ orderId, readOnly }: Props) {
           checked onToggle={readOnly ? undefined : (it) => onToggleLavoro(it, false)} />
         <SchedaList label="DA FARE" items={scheda?.lavori_da_fare || []} color={colors.idle}
           onToggle={readOnly ? undefined : (it) => onToggleLavoro(it, true)} />
-        <SchedaList label="RICAMBI NECESSARI" items={scheda?.ricambi_necessari || []} color={colors.primary} />
+        <SchedaList label="RICAMBI PREVISTI" items={scheda?.ricambi_necessari || []} color={colors.idle}
+          onToggle={readOnly ? undefined : (it) => onToggleRicambio(it, true)} />
+        <SchedaList label="RICAMBI CAMBIATI (in fattura)" items={scheda?.ricambi_sostituiti || []} color={colors.active}
+          checked onToggle={readOnly ? undefined : (it) => onToggleRicambio(it, false)} />
         {scheda?.note ? (
           <View style={{ marginTop: spacing.sm }}>
             <Text style={styles.rowLabel}>NOTE</Text>
