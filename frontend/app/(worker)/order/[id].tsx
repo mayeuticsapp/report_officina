@@ -45,7 +45,8 @@ export default function OrderDetail() {
 
   const lastEvent = events[events.length - 1];
   const isPending = order?.status === "pending";
-  const canStart = !isPending && (!lastEvent || lastEvent.type === "COMPLETE");
+  const canStart = !isPending && !lastEvent;
+  const canReopen = !isPending && !!lastEvent && lastEvent.type === "COMPLETE";
   const canPause = lastEvent && (lastEvent.type === "START" || lastEvent.type === "RESUME");
   const canResume = lastEvent && lastEvent.type === "PAUSE";
   const canComplete = lastEvent && lastEvent.type !== "COMPLETE";
@@ -183,6 +184,9 @@ export default function OrderDetail() {
         {canStart && (
           <ActionBtn testID="btn-start" label="INIZIA" color={colors.active} onPress={() => openAction("START")} />
         )}
+        {canReopen && (
+          <ActionBtn testID="btn-reopen" label="RIAPRI" color={colors.active} onPress={() => openAction("RESUME")} />
+        )}
         {canPause && (
           <ActionBtn testID="btn-pause" label="PAUSA" color={colors.paused} textColor={colors.text} onPress={() => openAction("PAUSE")} />
         )}
@@ -206,7 +210,7 @@ export default function OrderDetail() {
               <Text style={styles.modalTitle}>
                 {modalOpen === "START" && "INIZIA LAVORO"}
                 {modalOpen === "PAUSE" && "SOSPENDI LAVORO"}
-                {modalOpen === "RESUME" && "RIPRENDI LAVORO"}
+                {modalOpen === "RESUME" && (canReopen ? "RIAPRI LAVORO" : "RIPRENDI LAVORO")}
                 {modalOpen === "COMPLETE" && "COMPLETA LAVORO"}
               </Text>
               <TouchableOpacity testID="modal-close" onPress={() => setModalOpen(null)}>
