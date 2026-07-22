@@ -33,6 +33,7 @@ TEXT_MODEL = os.environ.get("MISTRAL_TEXT_MODEL", "mistral-large-latest")
 OCR_MODEL = os.environ.get("MISTRAL_OCR_MODEL", "mistral-ocr-latest")
 STT_MODEL = os.environ.get("MISTRAL_STT_MODEL", "voxtral-mini-latest")
 EMBED_MODEL = os.environ.get("MISTRAL_EMBED_MODEL", "mistral-embed")
+VISION_MODEL = os.environ.get("MISTRAL_VISION_MODEL", "pixtral-12b-2409")  # "vede" le foto
 
 _client = Mistral(api_key=os.environ["MISTRAL_API_KEY"])
 
@@ -89,7 +90,10 @@ SYSTEM_ADMIN_ASK = (
     "lavoro solo perché era nella richiesta o nella scheda; "
     "(7) se una commessa non ha COMPLETE, o la 'NOTA_scheda'/'note_operaio' dicono che è stata "
     "interrotta/sospesa/annullata, dillo esplicitamente e NON elencare come fatti i lavori non "
-    "eseguiti. La 'NOTA_scheda' scritta dall'operaio è la fonte più affidabile sull'esito reale."
+    "eseguiti. La 'NOTA_scheda' scritta dall'operaio è la fonte più affidabile sull'esito reale; "
+    "(8) per capire cosa è successo usa anche 'DIALOGO' (cosa ha detto l'operaio a voce), 'CHAT' "
+    "(messaggi col titolare) e 'FOTO' (didascalie di ciò che si vede nelle foto). Sono fatti reali "
+    "del lavoro: sfruttali per rispondere in modo completo."
 )
 
 SYSTEM_DAILY_REPORT = (
@@ -126,6 +130,26 @@ async def ocr_image(data_url: str) -> str:
         model=OCR_MODEL, document={"type": "image_url", "image_url": data_url}
     )
     return " ".join((p.markdown or "") for p in (resp.pages or []))
+
+
+SYSTEM_PHOTO_CAPTION = (
+    "Sei un occhio tecnico d'officina. Guarda la foto e descrivi in UNA frase breve, in italiano, "
+    "solo ciò che si VEDE: componente inquadrato, stato o danno visibile, e qualsiasi testo/codice/"
+    "spia leggibile. Niente ipotesi o diagnosi non visibili. Se non è chiara, dillo."
+)
+
+
+async def describe_image(data_url: str) -> str:
+    """Vision: descrive in una frase cosa mostra una foto (per la memoria dell'officina)."""
+    resp = await _client.chat.complete_async(
+        model=VISION_MODEL,
+        messages=[{"role": "user", "content": [
+            {"type": "text", "text": SYSTEM_PHOTO_CAPTION},
+            {"type": "image_url", "image_url": data_url},
+        ]}],
+        max_tokens=120,
+    )
+    return (resp.choices[0].message.content or "").strip()
 
 
 async def transcribe(content: bytes, filename: str) -> str:

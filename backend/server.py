@@ -8,6 +8,7 @@ import asyncio
 import logging
 import json
 import re
+import base64
 import tempfile
 import io
 from pathlib import Path
@@ -521,6 +522,8 @@ async def startup():
         await conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_order_photos_order ON order_photos (work_order_id, created_at)"
         )
+        # Didascalia AI della foto (Mistral vision la 'vede' una volta, poi entra nella memoria)
+        await conn.execute("ALTER TABLE order_photos ADD COLUMN IF NOT EXISTS caption TEXT")
         # Messaggi commessa (admin <-> operai) + notifiche push
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS order_messages (
@@ -1283,6 +1286,19 @@ def _photo_path(order_id: str, photo_id: str, content_type: str) -> Path:
     return UPLOADS_DIR / order_id / f"{photo_id}.{ext}"
 
 
+async def _caption_photo(photo_id: str, data: bytes, content_type: str):
+    """Mistral 'guarda' la foto una volta e ne scrive una didascalia, salvata per sempre.
+    Così anche 'Chiedi all'AI' del titolare sa cosa c'è nelle foto senza rimandarle."""
+    try:
+        data_url = f"data:{content_type};base64,{base64.b64encode(data).decode()}"
+        caption = await ai.describe_image(data_url)
+        if caption:
+            await execute("UPDATE order_photos SET caption=$1 WHERE id=$2", caption[:500], photo_id)
+            logger.info(f"didascalia foto {photo_id}: {caption[:60]}")
+    except Exception as e:
+        logger.warning(f"didascalia foto fallita per {photo_id}: {e}")
+
+
 @api.post("/work-orders/{order_id}/photos", response_model=OrderPhoto)
 async def upload_order_photo(order_id: str, file: UploadFile = File(...), user: dict = Depends(get_current_user)):
     await _order_or_403(order_id, user)
@@ -1305,6 +1321,9 @@ async def upload_order_photo(order_id: str, file: UploadFile = File(...), user: 
            VALUES ($1,$2,$3,$4,$5,$6,$7)""",
         photo_id, order_id, user["id"], user["full_name"], content_type, len(data), now,
     )
+    # solo le immagini si "vedono": i video no
+    if content_type not in _VIDEO_TYPES:
+        asyncio.create_task(_caption_photo(photo_id, data, content_type))
     return OrderPhoto(
         id=photo_id, work_order_id=order_id, uploaded_by=user["id"], uploaded_by_name=user["full_name"],
         content_type=content_type, size_bytes=len(data), created_at=now,
@@ -1883,6 +1902,24 @@ async def _build_admin_digest(days: int = 60) -> str:
     for e in events:
         ev_by_order.setdefault(e["work_order_id"], []).append(e)
 
+    order_ids = [o["id"] for o in orders]
+    # Dialogo AI, messaggi in chat e didascalie foto: cosa è stato DETTO e VISTO (non solo scritto in scheda)
+    dlg_by_order: dict = {}
+    msg_by_order: dict = {}
+    cap_by_order: dict = {}
+    if order_ids:
+        for c in await fetch("SELECT work_order_id, turns FROM conversations WHERE work_order_id = ANY($1)", order_ids):
+            turns = c["turns"]
+            if isinstance(turns, str):
+                turns = json.loads(turns)
+            said = [(t.get("text") or "").strip() for t in (turns or []) if t.get("role") == "user" and (t.get("text") or "").strip()]
+            if said:
+                dlg_by_order[c["work_order_id"]] = said
+        for m in await fetch("SELECT work_order_id, sender_name, text FROM order_messages WHERE work_order_id = ANY($1) ORDER BY created_at ASC", order_ids):
+            msg_by_order.setdefault(m["work_order_id"], []).append(f"{m['sender_name']}: {(m['text'] or '').strip()}")
+        for p in await fetch("SELECT work_order_id, caption FROM order_photos WHERE work_order_id = ANY($1) AND caption IS NOT NULL", order_ids):
+            cap_by_order.setdefault(p["work_order_id"], []).append((p["caption"] or "").strip())
+
     lines = [f"OGGI: {oggi}. REGISTRO ULTIMI {days} GIORNI ({len(orders)} commesse, {len(events)} eventi):"]
     for o in orders:
         evs = ev_by_order.get(o["id"], [])
@@ -1917,13 +1954,22 @@ async def _build_admin_digest(days: int = 60) -> str:
             parts.append("NOTA_scheda=" + nota_scheda[:220])
         if note_ev:
             parts.append("note_operaio=" + " || ".join(note_ev))
+        dlg = dlg_by_order.get(o["id"])
+        if dlg:
+            parts.append("DIALOGO=" + (" || ".join(dlg))[:700])
+        msgs = msg_by_order.get(o["id"])
+        if msgs:
+            parts.append("CHAT=" + (" || ".join(msgs))[:500])
+        caps = cap_by_order.get(o["id"])
+        if caps:
+            parts.append("FOTO=" + ("; ".join(caps))[:500])
         for w, wevs in per_worker.items():
             mins = _worker_minutes(wevs)
             completata = any(e["type"] == "COMPLETE" for e in wevs)
             comp_date = next((e["timestamp"].strftime("%Y-%m-%d") for e in reversed(wevs) if e["type"] == "COMPLETE"), None)
             parts.append(f"operaio={w}({mins}min{', COMPLETATA il ' + comp_date if completata else ''})")
         lines.append(" | ".join(parts))
-    return "\n".join(lines)[:32000]
+    return "\n".join(lines)[:48000]
 
 
 class AskIn(BaseModel):
