@@ -83,7 +83,13 @@ SYSTEM_ADMIN_ASK = (
     "(2) se il dato richiesto non c'è o il periodo è fuori dal registro fornito, dillo chiaramente; "
     "(3) rispondi conciso, in italiano, con elenchi puntati quando aiuta; "
     "(4) 'macchine fatte' = commesse con evento COMPLETE nel periodo; "
-    "(5) le ore lavorate sono i minuti calcolati dagli eventi START/PAUSE/RESUME/COMPLETE."
+    "(5) le ore lavorate sono i minuti calcolati dagli eventi START/PAUSE/RESUME/COMPLETE; "
+    "(6) 'richiesta_iniziale' è ciò che era da fare, NON ciò che è stato fatto: per dire cosa "
+    "ha fatto un operaio usa SOLO 'LAVORI_FATTI' e 'RICAMBI_CAMBIATI'. Mai dare per eseguito un "
+    "lavoro solo perché era nella richiesta o nella scheda; "
+    "(7) se una commessa non ha COMPLETE, o la 'NOTA_scheda'/'note_operaio' dicono che è stata "
+    "interrotta/sospesa/annullata, dillo esplicitamente e NON elencare come fatti i lavori non "
+    "eseguiti. La 'NOTA_scheda' scritta dall'operaio è la fonte più affidabile sull'esito reale."
 )
 
 SYSTEM_DAILY_REPORT = (

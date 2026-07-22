@@ -1889,18 +1889,41 @@ async def _build_admin_digest(days: int = 60) -> str:
         per_worker: dict = {}
         for e in evs:
             per_worker.setdefault(e["worker_full_name"], []).append(e)
+        scheda = o.get("scheda_tecnica") or {}
+        if isinstance(scheda, str):
+            scheda = json.loads(scheda)
+        fatti = scheda.get("lavori_fatti") or []
+        da_fare = scheda.get("lavori_da_fare") or []
+        ricambi_cambiati = scheda.get("ricambi_sostituiti") or []
+        nota_scheda = (scheda.get("note") or "").strip()
+        # note ed esiti timbrati dagli operai (motivo pausa/interruzione, esito completamento)
+        note_ev = []
+        for e in evs:
+            r = (e.get("reason") or "").strip() or (e.get("ai_interpretation") or "").strip()
+            if r:
+                note_ev.append(f"{e['type']}={r}")
         parts = [
             f"targa={o['plate']}", f"veicolo={o['vehicle']}", f"cliente={o['customer']}",
-            f"stato={o['status']}", f"lavoro={o['description'][:60]}",
+            f"stato={o['status']}", f"richiesta_iniziale={o['description'][:60]}",
             f"creata={o['created_at'].strftime('%Y-%m-%d')}",
         ]
+        if fatti:
+            parts.append("LAVORI_FATTI=" + "; ".join(fatti))
+        if da_fare:
+            parts.append("NON_fatti=" + "; ".join(da_fare))
+        if ricambi_cambiati:
+            parts.append("RICAMBI_CAMBIATI=" + "; ".join(ricambi_cambiati))
+        if nota_scheda:
+            parts.append("NOTA_scheda=" + nota_scheda[:220])
+        if note_ev:
+            parts.append("note_operaio=" + " || ".join(note_ev))
         for w, wevs in per_worker.items():
             mins = _worker_minutes(wevs)
             completata = any(e["type"] == "COMPLETE" for e in wevs)
             comp_date = next((e["timestamp"].strftime("%Y-%m-%d") for e in reversed(wevs) if e["type"] == "COMPLETE"), None)
             parts.append(f"operaio={w}({mins}min{', COMPLETATA il ' + comp_date if completata else ''})")
         lines.append(" | ".join(parts))
-    return "\n".join(lines)[:24000]
+    return "\n".join(lines)[:32000]
 
 
 class AskIn(BaseModel):
