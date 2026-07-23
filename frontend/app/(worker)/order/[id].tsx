@@ -138,8 +138,8 @@ export default function OrderDetail() {
 
   const submitAction = async () => {
     if (!modalOpen || !order) return;
-    if (modalOpen === "START" && !km.replace(/[^0-9]/g, "")) {
-      showAlert("KM OBBLIGATORI", "Inserisci i chilometri del veicolo: senza km non puoi iniziare il lavoro.");
+    if (modalOpen === "COMPLETE" && !km.replace(/[^0-9]/g, "")) {
+      showAlert("KM OBBLIGATORI", "Inserisci i chilometri del veicolo: senza km non puoi completare il lavoro.");
       return;
     }
     if ((modalOpen === "PAUSE" || modalOpen === "COMPLETE") && !reason.trim()) {
@@ -150,7 +150,7 @@ export default function OrderDetail() {
     try {
       await api<WorkEvent>(`/work-orders/${order.id}/events`, {
         method: "POST",
-        body: { type: modalOpen, reason: reason.trim() || null, photos_base64: photos, km: modalOpen === "START" ? km : null },
+        body: { type: modalOpen, reason: reason.trim() || null, photos_base64: photos, km: modalOpen === "COMPLETE" ? km : null },
       });
       setModalOpen(null);
       await load();
@@ -313,7 +313,7 @@ export default function OrderDetail() {
             </View>
 
             <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={{ padding: spacing.lg }}>
-              {modalOpen === "START" && (
+              {modalOpen === "COMPLETE" && (
                 <View style={styles.kmBox}>
                   <Text style={styles.kmLabel}>⚠ KM DEL VEICOLO — OBBLIGATORIO</Text>
                   <TextInput
@@ -327,7 +327,7 @@ export default function OrderDetail() {
                     maxLength={7}
                     autoFocus
                   />
-                  <Text style={styles.kmHint}>Leggi il contachilometri: senza km non puoi iniziare.</Text>
+                  <Text style={styles.kmHint}>Leggi il contachilometri: senza km non puoi completare.</Text>
                 </View>
               )}
               <Text style={styles.label}>

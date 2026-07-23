@@ -1669,12 +1669,12 @@ async def add_event(order_id: str, body: WorkEventCreate, user: dict = Depends(g
     if row["status"] == "pending":
         raise HTTPException(status_code=409, detail="Commessa in attesa di approvazione dal titolare")
 
-    # Su INIZIA i km sono OBBLIGATORI: senza chilometraggio non si parte.
+    # Su COMPLETA i km sono OBBLIGATORI: si registrano a lavoro finito, non all'inizio.
     km_clean = None
-    if body.type == "START":
+    if body.type == "COMPLETE":
         km_digits = re.sub(r"[^0-9]", "", body.km or "")
         if not km_digits or not (1 <= len(km_digits) <= 7):
-            raise HTTPException(status_code=400, detail="Inserisci i km del veicolo per iniziare il lavoro")
+            raise HTTPException(status_code=400, detail="Inserisci i km del veicolo per completare il lavoro")
         km_clean = km_digits
 
     ai_note = await _ai_interpret_reason(body.reason or "", body.type) if body.reason else None
