@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useState } from "react";
 import { View, Text, StyleSheet, ScrollView, RefreshControl, ActivityIndicator, TouchableOpacity } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { useFocusEffect, useRouter } from "expo-router";
+import { useRouter } from "expo-router";
 import { api, LiveStatus, WorkEvent } from "@/src/api/client";
+import { useAutoRefresh } from "@/src/hooks/use-auto-refresh";
 import { colors, spacing } from "@/src/theme";
 
 export default function Dashboard() {
@@ -26,12 +27,7 @@ export default function Dashboard() {
     finally { setLoading(false); setRefreshing(false); }
   }, []);
 
-  useFocusEffect(useCallback(() => { load(); }, [load]));
-
-  useEffect(() => {
-    const t = setInterval(() => { load(); setTick((x) => x + 1); }, 15000);
-    return () => clearInterval(t);
-  }, [load]);
+  useAutoRefresh(useCallback(() => { load(); setTick((x) => x + 1); }, [load]));
 
   const working = live.filter((w) => w.current_status === "working").length;
   const paused = live.filter((w) => w.current_status === "paused").length;

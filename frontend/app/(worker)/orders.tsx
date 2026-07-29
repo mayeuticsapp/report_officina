@@ -1,14 +1,15 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity, ActivityIndicator, RefreshControl,
   Modal, TextInput, KeyboardAvoidingView, Platform,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
-import { useRouter, useFocusEffect } from "expo-router";
+import { useRouter } from "expo-router";
 import * as ImagePicker from "expo-image-picker";
 import { api, WorkOrder, proposeWorkOrder, lookupPlate, unreadMessages } from "@/src/api/client";
 import { showAlert } from "@/src/utils/dialog";
+import { useAutoRefresh } from "@/src/hooks/use-auto-refresh";
 import { colors, spacing } from "@/src/theme";
 
 const statusMap: Record<string, { c: string; label: string }> = {
@@ -44,7 +45,12 @@ export default function WorkerOrders() {
     finally { setLoading(false); setRefreshing(false); }
   }, []);
 
-  useFocusEffect(useCallback(() => { load(search); }, [load]));
+  // la ricerca corrente letta da ref: così l'aggiornamento automatico non
+  // azzera il filtro che l'operaio ha appena scritto
+  const searchRef = useRef(search);
+  searchRef.current = search;
+
+  useAutoRefresh(useCallback(() => load(searchRef.current), [load]));
 
   useEffect(() => {
     const t = setTimeout(() => load(search), 350);
@@ -114,14 +120,28 @@ export default function WorkerOrders() {
     <SafeAreaView style={styles.safe} edges={["top"]}>
       <View style={styles.header}>
         <Text style={styles.title}>COMMESSE</Text>
-        <TouchableOpacity testID="btn-propose-order" style={styles.addBtn} onPress={openNew} disabled={submitting}>
-          {submitting && !modalOpen ? (
-            <ActivityIndicator size="small" color={colors.textInverse} />
-          ) : (
-            <Ionicons name="camera" size={20} color={colors.textInverse} />
-          )}
-          <Text style={styles.addBtnText}>NUOVA</Text>
-        </TouchableOpacity>
+        <View style={styles.headerActions}>
+          <TouchableOpacity
+            testID="btn-refresh-orders"
+            style={styles.refreshBtn}
+            onPress={() => { setRefreshing(true); load(searchRef.current); }}
+            disabled={refreshing}
+          >
+            {refreshing ? (
+              <ActivityIndicator size="small" color={colors.text} />
+            ) : (
+              <Ionicons name="refresh" size={20} color={colors.text} />
+            )}
+          </TouchableOpacity>
+          <TouchableOpacity testID="btn-propose-order" style={styles.addBtn} onPress={openNew} disabled={submitting}>
+            {submitting && !modalOpen ? (
+              <ActivityIndicator size="small" color={colors.textInverse} />
+            ) : (
+              <Ionicons name="camera" size={20} color={colors.textInverse} />
+            )}
+            <Text style={styles.addBtnText}>NUOVA</Text>
+          </TouchableOpacity>
+        </View>
       </View>
 
       <View style={styles.searchRow}>
@@ -247,6 +267,11 @@ const styles = StyleSheet.create({
     flexDirection: "row", justifyContent: "space-between", alignItems: "center",
   },
   title: { fontSize: 28, fontWeight: "900", color: colors.text, letterSpacing: -0.5 },
+  headerActions: { flexDirection: "row", alignItems: "center", gap: 8 },
+  refreshBtn: {
+    width: 44, height: 44, alignItems: "center", justifyContent: "center",
+    borderWidth: 1, borderColor: colors.borderStrong,
+  },
   addBtn: { flexDirection: "row", alignItems: "center", gap: 6, backgroundColor: colors.text, paddingHorizontal: 14, paddingVertical: 12 },
   addBtnText: { color: colors.textInverse, fontWeight: "900", letterSpacing: 2, fontSize: 12 },
   plateInput: { fontSize: 22, fontWeight: "900", letterSpacing: 2, textAlign: "center" },

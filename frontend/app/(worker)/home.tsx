@@ -3,10 +3,11 @@ import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity, ActivityIndicator, RefreshControl,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { useRouter, useFocusEffect } from "expo-router";
+import { useRouter } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { api, LiveStatus, WorkOrder } from "@/src/api/client";
 import { useAuth } from "@/src/auth/AuthContext";
+import { useAutoRefresh } from "@/src/hooks/use-auto-refresh";
 import { colors, spacing } from "@/src/theme";
 
 type MyState = {
@@ -56,7 +57,7 @@ export default function WorkerHome() {
     }
   }, [user]);
 
-  useFocusEffect(useCallback(() => { load(); }, [load]));
+  useAutoRefresh(load);
 
   useEffect(() => {
     const t = setInterval(() => {

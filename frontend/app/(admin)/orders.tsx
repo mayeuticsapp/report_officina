@@ -1,13 +1,14 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity, Modal, TextInput, ActivityIndicator,
   KeyboardAvoidingView, Platform, RefreshControl,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
-import { useFocusEffect, useRouter } from "expo-router";
+import { useRouter } from "expo-router";
 import { api, User, WorkOrder, unreadMessages } from "@/src/api/client";
 import { confirmDialog, showAlert } from "@/src/utils/dialog";
+import { useAutoRefresh } from "@/src/hooks/use-auto-refresh";
 import { colors, spacing } from "@/src/theme";
 
 const statusMap: Record<string, { c: string; label: string }> = {
@@ -34,7 +35,9 @@ export default function OrdersAdmin() {
 
   const [search, setSearch] = useState("");
 
-  const load = useCallback(async (q?: string) => {
+  // silent: usato dall'aggiornamento automatico — se la rete cade per un attimo
+  // non deve comparire un avviso ogni 15 secondi
+  const load = useCallback(async (q?: string, silent = false) => {
     try {
       const [o, u] = await Promise.all([
         api<WorkOrder[]>(q && q.trim() ? `/work-orders?q=${encodeURIComponent(q.trim())}` : "/work-orders"),
@@ -43,11 +46,17 @@ export default function OrdersAdmin() {
       setOrders(o);
       setWorkers(u.filter((x) => x.role === "worker"));
       try { setUnread((await unreadMessages()).by_order); } catch { /* silenzioso */ }
-    } catch (e: any) { showAlert("Errore", e.message); }
+    } catch (e: any) {
+      if (silent) console.warn(e); else showAlert("Errore", e.message);
+    }
     finally { setLoading(false); setRefreshing(false); }
   }, []);
 
-  useFocusEffect(useCallback(() => { load(search); }, [load]));
+  // la ricerca corrente letta da ref: l'aggiornamento automatico non azzera il filtro
+  const searchRef = useRef(search);
+  searchRef.current = search;
+
+  useAutoRefresh(useCallback(() => load(searchRef.current, true), [load]));
 
   useEffect(() => {
     const t = setTimeout(() => load(search), 350);
@@ -132,7 +141,19 @@ export default function OrdersAdmin() {
           <Text style={styles.headerLabel}>GESTIONE</Text>
           <Text style={styles.title}>COMMESSE</Text>
         </View>
-        <View style={{ flexDirection: "row", gap: 8 }}>
+        <View style={{ flexDirection: "row", gap: 8, alignItems: "center" }}>
+          <TouchableOpacity
+            testID="btn-refresh-orders"
+            style={styles.refreshBtn}
+            onPress={() => { setRefreshing(true); load(searchRef.current); }}
+            disabled={refreshing}
+          >
+            {refreshing ? (
+              <ActivityIndicator size="small" color={colors.text} />
+            ) : (
+              <Ionicons name="refresh" size={20} color={colors.text} />
+            )}
+          </TouchableOpacity>
           <TouchableOpacity testID="btn-planning" style={styles.planningBtn} onPress={() => router.push("/(admin)/planning" as any)}>
             <Ionicons name="calendar-outline" size={20} color={colors.text} />
             <Text style={styles.planningBtnText}>PLANNING</Text>
@@ -320,6 +341,10 @@ const styles = StyleSheet.create({
   header: { padding: spacing.lg, borderBottomWidth: 1, borderBottomColor: colors.border, flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
   headerLabel: { fontSize: 11, letterSpacing: 3, color: colors.textSecondary, fontWeight: "700" },
   title: { fontSize: 26, fontWeight: "900", color: colors.text, letterSpacing: -0.5 },
+  refreshBtn: {
+    width: 44, height: 44, alignItems: "center", justifyContent: "center",
+    borderWidth: 1, borderColor: colors.borderStrong,
+  },
   addBtn: { flexDirection: "row", alignItems: "center", gap: 6, backgroundColor: colors.text, paddingHorizontal: 14, paddingVertical: 12 },
   planningBtn: { flexDirection: "row", alignItems: "center", gap: 6, borderWidth: 1, borderColor: colors.borderStrong, paddingHorizontal: 12, paddingVertical: 12 },
   planningBtnText: { color: colors.text, fontWeight: "900", letterSpacing: 2, fontSize: 11 },

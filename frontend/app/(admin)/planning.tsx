@@ -5,8 +5,9 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
-import { useRouter, useFocusEffect } from "expo-router";
+import { useRouter } from "expo-router";
 import { api } from "@/src/api/client";
+import { useAutoRefresh } from "@/src/hooks/use-auto-refresh";
 import { colors, spacing } from "@/src/theme";
 
 type Appuntamento = {
@@ -47,7 +48,7 @@ export default function PlanningAdmin() {
     } finally { setLoading(false); setRefreshing(false); }
   }, []);
 
-  useFocusEffect(useCallback(() => { load(); }, [load]));
+  useAutoRefresh(load);
 
   const fmtGiorno = (iso: string) => {
     const d = new Date(iso + "T00:00:00");
