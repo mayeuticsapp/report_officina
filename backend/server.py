@@ -165,6 +165,11 @@ Role = Literal["admin", "worker"]
 EventType = Literal["START", "PAUSE", "RESUME", "COMPLETE", "KM"]
 OrderStatus = Literal["pending", "open", "in_progress", "paused", "completed"]
 
+# Segnaposto che significano "veicolo non ancora identificato": non sono dati,
+# e all'AI non vanno passati come se lo fossero.
+PLACEHOLDER_VEICOLO = ("", "DA IDENTIFICARE", "VEICOLO DA DEFINIRE", "DA DEFINIRE", "DA INSERIRE")
+PLACEHOLDER_CLIENTE = ("", "DA INSERIRE", "CLIENTE DA DEFINIRE")
+
 
 class UserPublic(BaseModel):
     id: str
@@ -2339,12 +2344,11 @@ async def omnius_lookup_result(body: OmniusLookupResultIn):
     row = await fetchrow("SELECT customer, vehicle FROM work_orders WHERE id=$1", order_id)
     if row:
         if body.customer and body.customer.strip() and \
-           (row["customer"] or "").strip().upper() in ("", "DA INSERIRE", "CLIENTE DA DEFINIRE"):
+           (row["customer"] or "").strip().upper() in PLACEHOLDER_CLIENTE:
             await execute("UPDATE work_orders SET customer=$1, updated_at=$2 WHERE id=$3",
                           body.customer.strip(), now_utc(), order_id)
         vehicle_label = " ".join(filter(None, [body.make, body.model, body.year and f"({body.year})"]))
-        if vehicle_label and \
-           (row["vehicle"] or "").strip().upper() in ("", "DA IDENTIFICARE", "VEICOLO DA DEFINIRE", "DA DEFINIRE", "DA INSERIRE"):
+        if vehicle_label and (row["vehicle"] or "").strip().upper() in PLACEHOLDER_VEICOLO:
             await execute("UPDATE work_orders SET vehicle=$1, updated_at=$2 WHERE id=$3",
                           vehicle_label, now_utc(), order_id)
     await execute("UPDATE plate_lookup_requests SET status='answered', answered_at=$1 WHERE id=$2", now_utc(), body.request_id)
@@ -2716,12 +2720,22 @@ async def voice_turn(order_id: str, body: VoiceTurnIn, user: dict = Depends(get_
 
     try:
         messages = [{"role": "system", "content": ai.SYSTEM_ASSISTANT}]
+        # Elenchiamo SOLO i dati che abbiamo davvero: i "?" facevano sembrare
+        # all'AI che mancasse qualcosa da chiedere all'operaio.
+        noti = [f"targa {row['plate']}"]
+        if (row["customer"] or "").strip().upper() not in PLACEHOLDER_CLIENTE:
+            noti.append(f"cliente {row['customer']}")
+        if (row["vehicle"] or "").strip().upper() not in PLACEHOLDER_VEICOLO:
+            noti.append(f"veicolo {row['vehicle']}")
+        for chiave in ("marca", "modello", "anno", "motore", "km"):
+            valore = str(current_scheda.get(chiave) or "").strip()
+            if valore:
+                noti.append(f"{chiave} {valore}")
         veicolo_block = (
             "VEICOLO SU CUI STAI LAVORANDO (dati reali, ancoraci ogni risposta tecnica):\n"
-            f"  targa: {row['plate']} | veicolo: {row['vehicle']} | cliente: {row['customer']}\n"
-            f"  marca: {current_scheda.get('marca') or '?'} | modello: {current_scheda.get('modello') or '?'} | "
-            f"anno: {current_scheda.get('anno') or '?'} | motore: {current_scheda.get('motore') or '?'} | "
-            f"km: {current_scheda.get('km') or '?'}"
+            f"  {' | '.join(noti)}\n"
+            "  Questi dati li hai già: NON chiederli all'operaio. Se un dato non è nell'elenco "
+            "vuol dire che il gestionale non ce l'ha ancora: lavora lo stesso senza chiederlo."
         )
         prefix = (
             f"{veicolo_block}\n"
