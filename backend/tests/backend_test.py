@@ -151,7 +151,8 @@ class TestWorkOrders:
 
 # ---------- Events + status transitions + AI ----------
 class TestEvents:
-    def _post_event(self, session, headers, order_id, etype, reason=None, km=None, km_deferred_reason=None):
+    def _post_event(self, session, headers, order_id, etype, reason=None, km=None,
+                    km_deferred_reason=None, minutes_effective=None):
         payload = {"type": etype}
         if reason:
             payload["reason"] = reason
@@ -159,6 +160,8 @@ class TestEvents:
             payload["km"] = km
         if km_deferred_reason:
             payload["km_deferred_reason"] = km_deferred_reason
+        if minutes_effective is not None:
+            payload["minutes_effective"] = minutes_effective
         return session.post(f"{API}/work-orders/{order_id}/events", headers=headers, json=payload)
 
     def test_start_senza_km_e_senza_motivo_rifiutato(self, session, state):
@@ -198,13 +201,29 @@ class TestEvents:
         r2 = session.get(f"{API}/work-orders/{state['order_id']}", headers=state["worker_headers"])
         assert r2.json()["status"] == "in_progress"
 
-    def test_complete_event(self, session, state):
-        """Km già dati su START: alla chiusura non si richiedono."""
+    def test_ore_proposte(self, session, state):
+        """Lo sportello propone sempre un numero, anche se l'AI non risponde."""
+        r = session.get(f"{API}/work-orders/{state['order_id']}/ore-proposte",
+                        headers=state["worker_headers"])
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert isinstance(body["minuti_proposti"], int)
+        assert body["fonte"] in ("note", "timbri", "errore")
+
+    def test_complete_senza_ore_rifiutato(self, session, state):
+        """Le ore in fattura le conferma il meccanico: senza, non si chiude."""
         r = self._post_event(session, state["worker_headers"], state["order_id"], "COMPLETE",
                              reason="Lavoro finito")
+        assert r.status_code == 400, r.text
+
+    def test_complete_event(self, session, state):
+        """Km già dati su START: alla chiusura non si richiedono. Le ore sì."""
+        r = self._post_event(session, state["worker_headers"], state["order_id"], "COMPLETE",
+                             reason="Lavoro finito", minutes_effective=135)
         assert r.status_code == 200, r.text
         r2 = session.get(f"{API}/work-orders/{state['order_id']}", headers=state["worker_headers"])
         assert r2.json()["status"] == "completed"
+        assert r2.json()["minutes_effective"] == 135, "le ore confermate finiscono in fattura"
 
     def test_correzione_km(self, session, state):
         """Km sbagliati: si correggono con un'osservazione, senza cambiare stato."""
@@ -251,12 +270,12 @@ class TestKmRimandati:
 
     def test_complete_senza_km_rifiutato(self, session, state, order_id):
         r = session.post(f"{API}/work-orders/{order_id}/events", headers=state["worker_headers"],
-                         json={"type": "COMPLETE", "reason": "finito"})
+                         json={"type": "COMPLETE", "reason": "finito", "minutes_effective": 90})
         assert r.status_code == 400, "chi ha rimandato i km deve darli alla chiusura"
 
     def test_complete_con_km(self, session, state, order_id):
         r = session.post(f"{API}/work-orders/{order_id}/events", headers=state["worker_headers"],
-                         json={"type": "COMPLETE", "reason": "finito", "km": "98000"})
+                         json={"type": "COMPLETE", "reason": "finito", "km": "98000", "minutes_effective": 90})
         assert r.status_code == 200, r.text
         r2 = session.get(f"{API}/work-orders/{order_id}", headers=state["worker_headers"])
         assert r2.json()["scheda_tecnica"]["km"] == "98000"

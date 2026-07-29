@@ -79,6 +79,27 @@ SYSTEM_ASSISTANT = (
     "e codice motore di un'altra), segnalalo all'operaio nella reply invece di proseguire come se nulla fosse."
 )
 
+SYSTEM_ORE_DA_NOTE = (
+    "Sei l'assistente di un'officina meccanica. Devi capire QUANTE ORE DI LAVORO il meccanico "
+    "dichiara di aver fatto su questa commessa, leggendo quello che ha scritto e dettato.\n"
+    "REGOLE FERREE:\n"
+    "1. Riporta SOLO tempi che il meccanico ha detto esplicitamente. Mai stimarli, mai dedurli dal "
+    "tipo di lavoro, dai pezzi cambiati o dalla difficoltà. Se non lo dice, non lo sai.\n"
+    "2. Le note sono scritte di fretta e dettate a voce, con errori: 'ire', 'ora', 'h', 'oretta' "
+    "vanno letti come ore. 'una mezz'oretta' = 30 minuti. 'due ore' = 120 minuti.\n"
+    "3. SOMMA solo tempi di lavorazioni DIVERSE (es. 'due ore per il compressore' + 'tre ore per il "
+    "cuscinetto' = 300 minuti). Se lo stesso tempo è ripetuto in note diverse (es. 'iniziata 2 ore "
+    "fa' e poi 'due ore di lavoro') è LO STESSO lavoro: conta 120 minuti, NON 240.\n"
+    "4. Conta anche il lavoro fatto PRIMA dell'apertura della commessa, se il meccanico dice quanto "
+    "tempo ha impiegato (es. '3 ore in precedenza' + il lavoro di oggi).\n"
+    "5. Se non c'è nessuna indicazione di tempo, rispondi minuti: null. 'Non lo so' è la risposta "
+    "giusta: qui si fanno fatture, un numero inventato diventa soldi sbagliati.\n"
+    "Rispondi SOLO con questo JSON:\n"
+    '{"minuti": numero intero o null, '
+    '"citazione": "le parole ESATTE del meccanico da cui hai preso il tempo, o null", '
+    '"dettaglio": "come hai composto il totale in una riga, o null"}'
+)
+
 SYSTEM_EVENT_INTERPRET = (
     "Sei un assistente per un'officina meccanica. Ricevi il motivo di un evento "
     "(START/PAUSE/RESUME/COMPLETE) scritto in linguaggio naturale da un operaio. "

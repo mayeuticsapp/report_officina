@@ -242,6 +242,20 @@ export async function toggleRicambio(orderId: string, item: string, done: boolea
 }
 
 /** Corregge le ore effettive (per la fattura). minutes=null azzera la correzione. */
+/** Ore proposte alla chiusura: lette da ciò che il meccanico ha scritto, o dai timbri se non le ha dette. */
+export type OreProposte = {
+  minuti_proposti: number;
+  minuti_timbri: number;
+  /** "note" = lette dal meccanico · "timbri" = non le ha scritte · "errore" = AI non disponibile */
+  fonte: "note" | "timbri" | "errore";
+  citazione?: string | null;
+  dettaglio?: string | null;
+};
+
+export async function oreProposte(orderId: string): Promise<OreProposte> {
+  return api<OreProposte>(`/work-orders/${orderId}/ore-proposte`);
+}
+
 export async function setEffectiveHours(orderId: string, minutes: number | null, reason: string | null): Promise<WorkOrder> {
   return api<WorkOrder>(`/work-orders/${orderId}/effective-hours`, {
     method: "POST",

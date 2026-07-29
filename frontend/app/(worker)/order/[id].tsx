@@ -7,7 +7,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { useLocalSearchParams, useRouter, useFocusEffect } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import * as ImagePicker from "expo-image-picker";
-import { api, WorkEvent, WorkOrder, EventType, setEffectiveHours } from "@/src/api/client";
+import { api, WorkEvent, WorkOrder, EventType, setEffectiveHours, oreProposte, OreProposte } from "@/src/api/client";
 import { confirmDialog, showAlert } from "@/src/utils/dialog";
 import { VoiceChat } from "@/src/components/VoiceChat";
 import { VehicleHistory } from "@/src/components/VehicleHistory";
@@ -33,6 +33,11 @@ export default function OrderDetail() {
   const [kmFixValue, setKmFixValue] = useState("");
   const [kmFixReason, setKmFixReason] = useState("");
   const [savingKmFix, setSavingKmFix] = useState(false);
+  // ore da fatturare, confermate alla chiusura
+  const [oreProp, setOreProp] = useState<OreProposte | null>(null);
+  const [oreCaricando, setOreCaricando] = useState(false);
+  const [cOre, setCOre] = useState("");
+  const [cMin, setCMin] = useState("");
   const [photos, setPhotos] = useState<string[]>([]);
   const [hoursEditing, setHoursEditing] = useState(false);
   const [hOre, setHOre] = useState("");
@@ -116,6 +121,21 @@ export default function OrderDetail() {
     setKmDeferReason("");
     setPhotos([]);
     setModalOpen(t);
+    if (t === "COMPLETE" && order) {
+      // l'AI legge quello che il meccanico ha scritto durante il lavoro e propone le ore
+      setOreProp(null);
+      setCOre("");
+      setCMin("");
+      setOreCaricando(true);
+      oreProposte(order.id)
+        .then((p) => {
+          setOreProp(p);
+          setCOre(String(Math.floor(p.minuti_proposti / 60)));
+          setCMin(String(p.minuti_proposti % 60));
+        })
+        .catch(() => setOreProp(null))
+        .finally(() => setOreCaricando(false));
+    }
   };
 
   const pickPhoto = async () => {
@@ -171,6 +191,23 @@ export default function OrderDetail() {
       showAlert("KM OBBLIGATORI", "Inserisci i chilometri del veicolo: senza km non puoi completare il lavoro.");
       return;
     }
+    const minutiConfermati = modalOpen === "COMPLETE"
+      ? (parseInt(cOre || "0", 10) || 0) * 60 + (parseInt(cMin || "0", 10) || 0)
+      : null;
+    if (modalOpen === "COMPLETE") {
+      if (oreCaricando) {
+        showAlert("Un attimo", "Sto ancora leggendo le ore dalle tue note.");
+        return;
+      }
+      if (!cOre.trim() && !cMin.trim()) {
+        showAlert("ORE OBBLIGATORIE", "Conferma le ore lavorate: sono quelle che finiscono in fattura.");
+        return;
+      }
+      if (minutiConfermati === 0) {
+        showAlert("Ore a zero", "Hai messo zero ore. Se è giusto scrivi almeno 1 minuto, altrimenti correggi.");
+        return;
+      }
+    }
     if ((modalOpen === "PAUSE" || modalOpen === "COMPLETE") && !reason.trim()) {
       showAlert("Motivo richiesto", `Inserisci un motivo per ${modalOpen === "PAUSE" ? "la sospensione" : "il completamento"}.`);
       return;
@@ -188,6 +225,7 @@ export default function OrderDetail() {
           photos_base64: photos,
           km: inviaKm ? kmPulito : null,
           km_deferred_reason: modalOpen === "START" && kmDefer ? kmDeferReason.trim() : null,
+          minutes_effective: minutiConfermati,
         },
       });
       setModalOpen(null);
@@ -505,6 +543,69 @@ export default function OrderDetail() {
                   <Text style={styles.kmHint}>Leggi il contachilometri: senza km non puoi completare.</Text>
                 </View>
               )}
+              {modalOpen === "COMPLETE" && (
+                <View style={styles.oreBox}>
+                  <Text style={styles.oreLabel}>⏱ ORE LAVORATE — VANNO IN FATTURA</Text>
+                  {oreCaricando ? (
+                    <View style={styles.oreLoading}>
+                      <ActivityIndicator size="small" color={colors.text} />
+                      <Text style={styles.oreLoadingText}>Leggo le ore da quello che hai scritto…</Text>
+                    </View>
+                  ) : (
+                    <>
+                      <View style={styles.oreInputsRow}>
+                        <TextInput
+                          testID="complete-ore"
+                          style={styles.oreInput}
+                          value={cOre}
+                          onChangeText={(v) => setCOre(v.replace(/[^0-9]/g, ""))}
+                          keyboardType="number-pad"
+                          maxLength={3}
+                          placeholder="0"
+                          placeholderTextColor={colors.textSecondary}
+                        />
+                        <Text style={styles.oreUnit}>h</Text>
+                        <TextInput
+                          testID="complete-min"
+                          style={styles.oreInput}
+                          value={cMin}
+                          onChangeText={(v) => setCMin(v.replace(/[^0-9]/g, ""))}
+                          keyboardType="number-pad"
+                          maxLength={2}
+                          placeholder="00"
+                          placeholderTextColor={colors.textSecondary}
+                        />
+                        <Text style={styles.oreUnit}>m</Text>
+                      </View>
+                      {oreProp?.fonte === "note" ? (
+                        <View style={styles.oreFonteBox}>
+                          <Text style={styles.oreFonteTitolo}>Preso da quello che hai detto:</Text>
+                          {oreProp.citazione ? (
+                            <Text style={styles.oreCitazione}>&ldquo;{oreProp.citazione}&rdquo;</Text>
+                          ) : null}
+                          {oreProp.dettaglio ? (
+                            <Text style={styles.oreDettaglio}>{oreProp.dettaglio}</Text>
+                          ) : null}
+                          <Text style={styles.oreTimbri}>
+                            I timbri dicono {Math.floor(oreProp.minuti_timbri / 60)}h {oreProp.minuti_timbri % 60}m
+                          </Text>
+                        </View>
+                      ) : oreProp?.fonte === "timbri" ? (
+                        <Text style={styles.oreDettaglio}>
+                          Nelle tue note non hai scritto quanto ci hai messo: qui ci sono le ore dei timbri.
+                          Controllale, spesso non tornano.
+                        </Text>
+                      ) : (
+                        <Text style={styles.oreDettaglio}>
+                          Non sono riuscito a leggere le tue note adesso: qui ci sono le ore dei timbri.
+                          Scrivile tu.
+                        </Text>
+                      )}
+                      <Text style={styles.oreHint}>È giusto? Conferma. Altrimenti correggi e vai avanti.</Text>
+                    </>
+                  )}
+                </View>
+              )}
               {modalOpen === "COMPLETE" && !kmDaChiedereAllaFine && (
                 <View style={styles.kmDoneBox}>
                   <Ionicons name="checkmark-circle" size={18} color={colors.active} />
@@ -710,6 +811,28 @@ const styles = StyleSheet.create({
     color: colors.text, textAlign: "center", letterSpacing: 2, minHeight: 52,
   },
   kmHint: { fontSize: 11, color: colors.stopped, marginTop: 6, fontWeight: "600" },
+  oreBox: {
+    borderWidth: 2, borderColor: colors.text, backgroundColor: colors.bgMuted,
+    padding: spacing.md, marginBottom: spacing.md,
+  },
+  oreLabel: { fontSize: 12, letterSpacing: 1.5, fontWeight: "900", color: colors.text, marginBottom: 10 },
+  oreLoading: { flexDirection: "row", alignItems: "center", gap: 8, paddingVertical: 10 },
+  oreLoadingText: { fontSize: 13, color: colors.textSecondary },
+  oreInputsRow: { flexDirection: "row", alignItems: "center", gap: 8 },
+  oreInput: {
+    borderWidth: 2, borderColor: colors.borderStrong, backgroundColor: colors.bg,
+    paddingHorizontal: 12, paddingVertical: 10, fontSize: 24, fontWeight: "900",
+    color: colors.text, textAlign: "center", minWidth: 76, minHeight: 56,
+  },
+  oreUnit: { fontSize: 18, fontWeight: "900", color: colors.textSecondary },
+  oreFonteBox: {
+    marginTop: 10, paddingTop: 10, borderTopWidth: 1, borderTopColor: colors.border,
+  },
+  oreFonteTitolo: { fontSize: 11, letterSpacing: 1, fontWeight: "800", color: colors.textSecondary },
+  oreCitazione: { fontSize: 14, fontStyle: "italic", color: colors.text, marginTop: 4 },
+  oreDettaglio: { fontSize: 12, color: colors.textSecondary, marginTop: 6 },
+  oreTimbri: { fontSize: 12, color: colors.textSecondary, marginTop: 6 },
+  oreHint: { fontSize: 11, color: colors.text, marginTop: 10, fontWeight: "700" },
   kmDeferBtn: {
     flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 6,
     marginTop: spacing.md, paddingVertical: 12,

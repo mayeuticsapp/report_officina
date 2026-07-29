@@ -272,6 +272,8 @@ class WorkEventCreate(BaseModel):
     # se su INIZIA il meccanico non può leggere il contachilometri (auto già sul
     # ponte, arrivata col carroattrezzi…) scrive qui il perché e li mette alla fine
     km_deferred_reason: Optional[str] = None
+    # ore da mettere in fattura, confermate dal meccanico su COMPLETA (obbligatorie)
+    minutes_effective: Optional[int] = None
 
 
 class WorkEvent(BaseModel):
@@ -1166,6 +1168,73 @@ async def set_effective_hours(order_id: str, body: EffectiveHoursIn, user: dict 
     return _workorder_for_user(wo, user)
 
 
+class OreProposteOut(BaseModel):
+    minuti_proposti: int              # quanto proponiamo di mettere in fattura
+    minuti_timbri: int                # quanto dicono i timbri (registro grezzo)
+    # "note"    = lette da ciò che ha scritto il meccanico
+    # "timbri"  = nelle note non c'era nessun tempo, ripieghiamo sui timbri
+    # "errore"  = l'AI non ha risposto: NON dire al meccanico che non ha scritto le ore
+    fonte: Literal["note", "timbri", "errore"]
+    citazione: Optional[str] = None   # le parole del meccanico, se la fonte sono le note
+    dettaglio: Optional[str] = None   # come è stato composto il totale
+
+
+def _testo_per_ore(row: dict, events: List[dict], turns: List[dict]) -> str:
+    """Tutto ciò che il meccanico ha scritto o dettato su questa commessa."""
+    righe = [f"LAVORO RICHIESTO: {row.get('description') or '-'}"]
+    for e in events:
+        nota = (e.get("reason") or "").strip()
+        if nota:
+            righe.append(f"[{e['type']}] {nota}")
+    for t in turns or []:
+        if t.get("role") == "user" and (t.get("text") or "").strip():
+            righe.append(f"[detta a voce] {t['text'].strip()}")
+    return "\n".join(righe)
+
+
+@api.get("/work-orders/{order_id}/ore-proposte", response_model=OreProposteOut)
+async def ore_proposte(order_id: str, user: dict = Depends(get_current_user)):
+    """Ore da proporre alla chiusura: le legge da ciò che il meccanico ha scritto durante il
+    lavoro (più affidabile dei timbri, che restano aperti o non vengono premuti). Se nelle note
+    non c'è nessun tempo, o se l'AI non risponde, ripiega sui timbri."""
+    row = await _order_or_403(order_id, user)
+    evs = await fetch("SELECT * FROM work_events WHERE work_order_id=$1 ORDER BY timestamp ASC", order_id)
+    minuti_timbri = _worker_minutes(evs)
+
+    convo = await fetchrow("SELECT turns FROM conversations WHERE work_order_id=$1", order_id)
+    turns = convo["turns"] if convo else []
+    if isinstance(turns, str):
+        turns = json.loads(turns)
+
+    testo = _testo_per_ore(dict(row), [dict(e) for e in evs], turns or [])
+    ultimo_errore: Optional[Exception] = None
+    for tentativo in range(3):
+        try:
+            raw = await ai.chat(
+                [{"role": "system", "content": ai.SYSTEM_ORE_DA_NOTE}, {"role": "user", "content": testo}],
+                json=True, max_tokens=300,
+            )
+            parsed = _extract_json_block(raw) or {}
+            minuti = parsed.get("minuti")
+            if isinstance(minuti, (int, float)) and 0 < int(minuti) <= 100000:
+                return OreProposteOut(
+                    minuti_proposti=int(minuti), minuti_timbri=minuti_timbri, fonte="note",
+                    citazione=(parsed.get("citazione") or None), dettaglio=(parsed.get("dettaglio") or None),
+                )
+            # l'AI ha risposto e dice che un tempo non c'è: è una risposta valida
+            return OreProposteOut(minuti_proposti=minuti_timbri, minuti_timbri=minuti_timbri, fonte="timbri")
+        except Exception as e:
+            ultimo_errore = e
+            # il limite di richieste è passeggero: riprova, non è un "niente da leggere"
+            if tentativo < 2:
+                await asyncio.sleep(1.5 * (tentativo + 1))
+
+    # l'AI non deve mai bloccare la chiusura di un lavoro: si ripiega sui timbri,
+    # ma va detto che è stato un guasto, non che il meccanico non ha scritto le ore
+    logger.warning(f"ore-proposte: AI non disponibile, uso i timbri ({ultimo_errore})")
+    return OreProposteOut(minuti_proposti=minuti_timbri, minuti_timbri=minuti_timbri, fonte="errore")
+
+
 class VehicleHistoryItem(BaseModel):
     id: str
     status: OrderStatus
@@ -1716,6 +1785,16 @@ async def add_event(order_id: str, body: WorkEventCreate, user: dict = Depends(g
                 raise HTTPException(status_code=400, detail="Inserisci i km del veicolo per completare il lavoro")
             km_clean = km_digits
         km_rinvio = None
+        # Le ore in fattura le conferma il meccanico: i timbri da soli non bastano
+        # (restano aperti, o il lavoro è iniziato prima della commessa).
+        if body.minutes_effective is None:
+            raise HTTPException(
+                status_code=400,
+                detail=("Conferma le ore lavorate per completare il lavoro. "
+                        "Se non vedi il campo, ricarica la pagina."),
+            )
+        if not (0 <= body.minutes_effective <= 100000):
+            raise HTTPException(status_code=400, detail="Ore non valide")
     elif body.type == "KM":
         # correzione di un chilometraggio sbagliato: numero + motivo, sempre
         if not km_valido:
@@ -1747,6 +1826,13 @@ async def add_event(order_id: str, body: WorkEventCreate, user: dict = Depends(g
         await execute(
             "UPDATE work_orders SET scheda_tecnica=$1::jsonb WHERE id=$2",
             json.dumps(SchedaTecnica(**scheda_raw).model_dump()), order_id
+        )
+
+    # Ore confermate alla chiusura: sono quelle che Omnius porta in fattura
+    if body.type == "COMPLETE" and body.minutes_effective is not None:
+        await execute(
+            "UPDATE work_orders SET minutes_effective=$1, minutes_effective_reason=$2 WHERE id=$3",
+            body.minutes_effective, "confermate dal meccanico alla chiusura", order_id
         )
 
     # La correzione dei km non tocca lo stato della commessa
