@@ -1787,13 +1787,15 @@ async def add_event(order_id: str, body: WorkEventCreate, user: dict = Depends(g
         km_rinvio = None
         # Le ore in fattura le conferma il meccanico: i timbri da soli non bastano
         # (restano aperti, o il lavoro è iniziato prima della commessa).
-        if body.minutes_effective is None:
+        # Se le ha già confermate prima — dalla scheda ORE LAVORATE della commessa —
+        # valgono quelle: si danno una volta sola, come i km.
+        if body.minutes_effective is None and row.get("minutes_effective") is None:
             raise HTTPException(
                 status_code=400,
                 detail=("Conferma le ore lavorate per completare il lavoro. "
                         "Se non vedi il campo, ricarica la pagina."),
             )
-        if not (0 <= body.minutes_effective <= 100000):
+        if body.minutes_effective is not None and not (0 <= body.minutes_effective <= 100000):
             raise HTTPException(status_code=400, detail="Ore non valide")
     elif body.type == "KM":
         # correzione di un chilometraggio sbagliato: numero + motivo, sempre
