@@ -160,7 +160,9 @@ async def require_admin(user: dict = Depends(get_current_user)) -> dict:
 
 # ---------------- Models ----------------
 Role = Literal["admin", "worker"]
-EventType = Literal["START", "PAUSE", "RESUME", "COMPLETE"]
+# KM non cambia lo stato della commessa: serve solo a correggere un chilometraggio
+# sbagliato, lasciando scritto il perché.
+EventType = Literal["START", "PAUSE", "RESUME", "COMPLETE", "KM"]
 OrderStatus = Literal["pending", "open", "in_progress", "paused", "completed"]
 
 
@@ -261,7 +263,10 @@ class WorkEventCreate(BaseModel):
     type: EventType
     reason: Optional[str] = None
     photos_base64: List[str] = Field(default_factory=list)
-    km: Optional[str] = None  # obbligatorio su START (chilometraggio del veicolo)
+    km: Optional[str] = None  # chilometraggio del veicolo: si chiede su INIZIA
+    # se su INIZIA il meccanico non può leggere il contachilometri (auto già sul
+    # ponte, arrivata col carroattrezzi…) scrive qui il perché e li mette alla fine
+    km_deferred_reason: Optional[str] = None
 
 
 class WorkEvent(BaseModel):
@@ -276,6 +281,7 @@ class WorkEvent(BaseModel):
     timestamp: datetime
     ai_interpretation: Optional[str] = None
     km: Optional[str] = None
+    km_deferred_reason: Optional[str] = None
 
 
 class LiveWorkerStatus(BaseModel):
@@ -418,6 +424,7 @@ def row_to_event(row: dict) -> WorkEvent:
         timestamp=row["timestamp"],
         ai_interpretation=row.get("ai_interpretation"),
         km=row.get("km"),
+        km_deferred_reason=row.get("km_deferred_reason"),
     )
 
 
@@ -541,6 +548,7 @@ async def startup():
         )
         await conn.execute("ALTER TABLE order_messages ADD COLUMN IF NOT EXISTS edited_at TIMESTAMPTZ")
         await conn.execute("ALTER TABLE work_events ADD COLUMN IF NOT EXISTS km TEXT")
+        await conn.execute("ALTER TABLE work_events ADD COLUMN IF NOT EXISTS km_deferred_reason TEXT")
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS message_reads (
                 user_id TEXT NOT NULL,
@@ -1669,41 +1677,82 @@ async def add_event(order_id: str, body: WorkEventCreate, user: dict = Depends(g
     if row["status"] == "pending":
         raise HTTPException(status_code=409, detail="Commessa in attesa di approvazione dal titolare")
 
-    # Su COMPLETA i km sono OBBLIGATORI: si registrano a lavoro finito, non all'inizio.
-    km_clean = None
-    if body.type == "COMPLETE":
-        km_digits = re.sub(r"[^0-9]", "", body.km or "")
-        if not km_digits or not (1 <= len(km_digits) <= 7):
-            raise HTTPException(status_code=400, detail="Inserisci i km del veicolo per completare il lavoro")
-        km_clean = km_digits
+    # I km si chiedono su INIZIA. Se il contachilometri non è leggibile (auto già
+    # sul ponte, arrivata col carroattrezzi…) il meccanico può rinviarli alla
+    # chiusura scrivendo il perché: in quel caso tornano obbligatori su COMPLETA.
+    # Chi li ha già dati all'inizio non se li vede più chiedere.
+    scheda_raw = row.get("scheda_tecnica") or {}
+    if isinstance(scheda_raw, str):
+        scheda_raw = json.loads(scheda_raw)
+    km_registrati = str(scheda_raw.get("km") or "").strip()
 
-    ai_note = await _ai_interpret_reason(body.reason or "", body.type) if body.reason else None
+    km_digits = re.sub(r"[^0-9]", "", body.km or "")
+    km_valido = 1 <= len(km_digits) <= 7
+    km_rinvio = (body.km_deferred_reason or "").strip() or None
+    km_clean = None
+
+    if body.type == "START":
+        if km_digits:
+            if not km_valido:
+                raise HTTPException(status_code=400, detail="Chilometraggio non valido")
+            km_clean = km_digits
+            km_rinvio = None
+        elif not km_rinvio and not km_registrati:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Inserisci i km del veicolo, oppure spiega perché li metti alla fine. "
+                    "Se non vedi il campo, ricarica la pagina."
+                ),
+            )
+    elif body.type == "COMPLETE":
+        if not km_registrati:
+            if not km_valido:
+                raise HTTPException(status_code=400, detail="Inserisci i km del veicolo per completare il lavoro")
+            km_clean = km_digits
+        km_rinvio = None
+    elif body.type == "KM":
+        # correzione di un chilometraggio sbagliato: numero + motivo, sempre
+        if not km_valido:
+            raise HTTPException(status_code=400, detail="Chilometraggio non valido")
+        if not (body.reason or "").strip():
+            raise HTTPException(status_code=400, detail="Scrivi il motivo della correzione dei km")
+        km_clean = km_digits
+        km_rinvio = None
+    else:
+        km_rinvio = None
+
+    ai_note = (
+        await _ai_interpret_reason(body.reason or "", body.type)
+        if body.reason and body.type != "KM" else None
+    )
     event_id = str(uuid.uuid4())
     ts = now_utc()
 
     await execute(
-        """INSERT INTO work_events (id, work_order_id, worker_id, worker_username, worker_full_name, type, reason, photos_base64, timestamp, ai_interpretation, km)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11)""",
+        """INSERT INTO work_events (id, work_order_id, worker_id, worker_username, worker_full_name, type, reason, photos_base64, timestamp, ai_interpretation, km, km_deferred_reason)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11,$12)""",
         event_id, order_id, user["id"], user["username"], user["full_name"],
-        body.type, body.reason, json.dumps(body.photos_base64), ts, ai_note, km_clean
+        body.type, body.reason, json.dumps(body.photos_base64), ts, ai_note, km_clean, km_rinvio
     )
 
     # I km finiscono anche nella scheda tecnica (l'AI e i report li usano da lì)
     if km_clean:
-        scheda_raw = row.get("scheda_tecnica") or {}
-        if isinstance(scheda_raw, str):
-            scheda_raw = json.loads(scheda_raw)
         scheda_raw["km"] = km_clean
         await execute(
             "UPDATE work_orders SET scheda_tecnica=$1::jsonb WHERE id=$2",
             json.dumps(SchedaTecnica(**scheda_raw).model_dump()), order_id
         )
 
+    # La correzione dei km non tocca lo stato della commessa
     new_status_map = {"START": "in_progress", "RESUME": "in_progress", "PAUSE": "paused", "COMPLETE": "completed"}
-    await execute(
-        "UPDATE work_orders SET status=$1, updated_at=$2 WHERE id=$3",
-        new_status_map[body.type], now_utc(), order_id
-    )
+    if body.type in new_status_map:
+        await execute(
+            "UPDATE work_orders SET status=$1, updated_at=$2 WHERE id=$3",
+            new_status_map[body.type], now_utc(), order_id
+        )
+    else:
+        await execute("UPDATE work_orders SET updated_at=$1 WHERE id=$2", now_utc(), order_id)
 
     # A lavoro completato, il caso entra nella memoria storica dell'officina (in background)
     if body.type == "COMPLETE":
@@ -1713,7 +1762,7 @@ async def add_event(order_id: str, body: WorkEventCreate, user: dict = Depends(g
         id=event_id, work_order_id=order_id, worker_id=user["id"],
         worker_username=user["username"], worker_full_name=user["full_name"],
         type=body.type, reason=body.reason, photos_base64=body.photos_base64,
-        timestamp=ts, ai_interpretation=ai_note, km=km_clean
+        timestamp=ts, ai_interpretation=ai_note, km=km_clean, km_deferred_reason=km_rinvio
     )
 
 
@@ -1747,8 +1796,10 @@ async def workers_live_status(admin: dict = Depends(require_admin)):
     result: List[LiveWorkerStatus] = []
     now = now_utc()
     for w in workers:
+        # le correzioni dei km non sono un cambio di stato: non devono far
+        # risultare "in pausa" un operaio che sta lavorando
         last = await fetchrow(
-            "SELECT * FROM work_events WHERE worker_id=$1 ORDER BY timestamp DESC LIMIT 1",
+            "SELECT * FROM work_events WHERE worker_id=$1 AND type <> 'KM' ORDER BY timestamp DESC LIMIT 1",
             w["id"]
         )
         if not last or last["type"] == "COMPLETE":
@@ -2025,13 +2076,13 @@ async def daily_report(
             filter_ids
         )
         events = await fetch(
-            "SELECT * FROM work_events WHERE timestamp>=$1 AND timestamp<$2 AND worker_id=ANY($3) ORDER BY timestamp ASC LIMIT 5000",
+            "SELECT * FROM work_events WHERE timestamp>=$1 AND timestamp<$2 AND worker_id=ANY($3) AND type <> 'KM' ORDER BY timestamp ASC LIMIT 5000",
             day_start, day_end, filter_ids
         )
     else:
         workers = await fetch("SELECT id, username, full_name FROM users WHERE role='worker' LIMIT 500")
         events = await fetch(
-            "SELECT * FROM work_events WHERE timestamp>=$1 AND timestamp<$2 ORDER BY timestamp ASC LIMIT 5000",
+            "SELECT * FROM work_events WHERE timestamp>=$1 AND timestamp<$2 AND type <> 'KM' ORDER BY timestamp ASC LIMIT 5000",
             day_start, day_end
         )
 

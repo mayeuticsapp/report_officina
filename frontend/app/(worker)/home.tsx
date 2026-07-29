@@ -38,7 +38,8 @@ export default function WorkerHome() {
       const priority = list.filter((o) => o.status === "in_progress" || o.status === "paused");
       for (const o of priority) {
         const events = await api<any[]>(`/work-orders/${o.id}/events`);
-        const myEvents = events.filter((e) => e.worker_id === user.id);
+        // le correzioni dei km non cambiano lo stato: vanno ignorate
+        const myEvents = events.filter((e) => e.worker_id === user.id && e.type !== "KM");
         if (!myEvents.length) continue;
         const last = myEvents[myEvents.length - 1];
         if (last.type === "COMPLETE") continue;

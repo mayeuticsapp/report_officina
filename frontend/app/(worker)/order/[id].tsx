@@ -25,6 +25,14 @@ export default function OrderDetail() {
   const [modalOpen, setModalOpen] = useState<null | EventType>(null);
   const [reason, setReason] = useState("");
   const [km, setKm] = useState("");
+  // "li metto alla fine": il contachilometri non è leggibile adesso
+  const [kmDefer, setKmDefer] = useState(false);
+  const [kmDeferReason, setKmDeferReason] = useState("");
+  // correzione di un chilometraggio sbagliato
+  const [kmFixing, setKmFixing] = useState(false);
+  const [kmFixValue, setKmFixValue] = useState("");
+  const [kmFixReason, setKmFixReason] = useState("");
+  const [savingKmFix, setSavingKmFix] = useState(false);
   const [photos, setPhotos] = useState<string[]>([]);
   const [hoursEditing, setHoursEditing] = useState(false);
   const [hOre, setHOre] = useState("");
@@ -86,7 +94,10 @@ export default function OrderDetail() {
     } finally { setSavingHours(false); }
   };
 
-  const lastEvent = events[events.length - 1];
+  // le correzioni dei km non sono passaggi di lavoro: non contano per capire
+  // se il lavoro è in corso, in pausa o finito
+  const workEvents = events.filter((e) => e.type !== "KM");
+  const lastEvent = workEvents[workEvents.length - 1];
   const isPending = order?.status === "pending";
   const canStart = !isPending && !lastEvent;
   const canReopen = !isPending && !!lastEvent && lastEvent.type === "COMPLETE";
@@ -94,9 +105,15 @@ export default function OrderDetail() {
   const canResume = lastEvent && lastEvent.type === "PAUSE";
   const canComplete = lastEvent && lastEvent.type !== "COMPLETE";
 
+  // i km si danno una volta sola: se ci sono già, alla chiusura non si richiedono
+  const kmRegistrati = (order?.scheda_tecnica?.km || "").trim();
+  const kmDaChiedereAllaFine = !kmRegistrati;
+
   const openAction = (t: EventType) => {
     setReason("");
     setKm("");
+    setKmDefer(false);
+    setKmDeferReason("");
     setPhotos([]);
     setModalOpen(t);
   };
@@ -138,7 +155,19 @@ export default function OrderDetail() {
 
   const submitAction = async () => {
     if (!modalOpen || !order) return;
-    if (modalOpen === "COMPLETE" && !km.replace(/[^0-9]/g, "")) {
+    const kmPulito = km.replace(/[^0-9]/g, "");
+
+    if (modalOpen === "START" && !kmRegistrati) {
+      if (!kmDefer && !kmPulito) {
+        showAlert("KM DEL VEICOLO", "Scrivi i chilometri. Se non riesci a leggerli adesso, premi «Non riesco a leggerli ora».");
+        return;
+      }
+      if (kmDefer && !kmDeferReason.trim()) {
+        showAlert("Serve il motivo", "Scrivi perché non puoi leggere i km adesso: es. auto già sul ponte.");
+        return;
+      }
+    }
+    if (modalOpen === "COMPLETE" && kmDaChiedereAllaFine && !kmPulito) {
       showAlert("KM OBBLIGATORI", "Inserisci i chilometri del veicolo: senza km non puoi completare il lavoro.");
       return;
     }
@@ -148,15 +177,50 @@ export default function OrderDetail() {
     }
     setSubmitting(true);
     try {
+      const inviaKm =
+        (modalOpen === "START" && !kmDefer && !!kmPulito) ||
+        (modalOpen === "COMPLETE" && kmDaChiedereAllaFine);
       await api<WorkEvent>(`/work-orders/${order.id}/events`, {
         method: "POST",
-        body: { type: modalOpen, reason: reason.trim() || null, photos_base64: photos, km: modalOpen === "COMPLETE" ? km : null },
+        body: {
+          type: modalOpen,
+          reason: reason.trim() || null,
+          photos_base64: photos,
+          km: inviaKm ? kmPulito : null,
+          km_deferred_reason: modalOpen === "START" && kmDefer ? kmDeferReason.trim() : null,
+        },
       });
       setModalOpen(null);
       await load();
     } catch (e: any) {
       showAlert("Errore", e?.message || "Impossibile salvare");
     } finally { setSubmitting(false); }
+  };
+
+  const saveKmFix = async () => {
+    if (!order) return;
+    const pulito = kmFixValue.replace(/[^0-9]/g, "");
+    if (!pulito) {
+      showAlert("KM mancanti", "Scrivi il chilometraggio corretto.");
+      return;
+    }
+    if (!kmFixReason.trim()) {
+      showAlert("Serve l'osservazione", "Scrivi perché stai correggendo i km: es. avevo letto male il contachilometri.");
+      return;
+    }
+    setSavingKmFix(true);
+    try {
+      await api<WorkEvent>(`/work-orders/${order.id}/events`, {
+        method: "POST",
+        body: { type: "KM", reason: kmFixReason.trim(), photos_base64: [], km: pulito },
+      });
+      setKmFixing(false);
+      setKmFixValue("");
+      setKmFixReason("");
+      await load();
+    } catch (e: any) {
+      showAlert("Errore", e?.message || "Km non corretti");
+    } finally { setSavingKmFix(false); }
   };
 
   if (loading || !order) {
@@ -197,6 +261,67 @@ export default function OrderDetail() {
             <Text style={styles.desc}>{order.description}</Text>
           </View>
         </View>
+
+        {/* Chilometraggio: si registra su INIZIA, si corregge da qui */}
+        {!isPending && (
+          <View style={styles.kmCard}>
+            <Text style={styles.sectionLabel}>CHILOMETRAGGIO</Text>
+            {kmRegistrati ? (
+              <View style={styles.kmCardRow}>
+                <Text style={styles.kmCardValue}>{Number(kmRegistrati).toLocaleString("it-IT")} km</Text>
+              </View>
+            ) : (
+              <Text style={styles.kmCardMissing}>
+                Non ancora registrati — te li chiede l&apos;app quando completi il lavoro.
+              </Text>
+            )}
+            {kmRegistrati && !kmFixing ? (
+              <TouchableOpacity
+                testID="btn-fix-km"
+                style={styles.hoursBtn}
+                onPress={() => { setKmFixValue(kmRegistrati); setKmFixReason(""); setKmFixing(true); }}
+              >
+                <Ionicons name="create-outline" size={16} color={colors.text} />
+                <Text style={styles.hoursBtnText}>I km sono sbagliati? Correggi</Text>
+              </TouchableOpacity>
+            ) : null}
+            {kmFixing && (
+              <View style={styles.hoursEditBox}>
+                <TextInput
+                  testID="km-fix-value"
+                  style={styles.kmFixInput}
+                  value={kmFixValue}
+                  onChangeText={(v) => setKmFixValue(v.replace(/[^0-9]/g, ""))}
+                  keyboardType="number-pad"
+                  maxLength={7}
+                  placeholder="es. 154000"
+                  placeholderTextColor={colors.textSecondary}
+                />
+                <TextInput
+                  testID="km-fix-reason"
+                  style={styles.hoursReasonInput}
+                  value={kmFixReason}
+                  onChangeText={setKmFixReason}
+                  placeholder="Perché li correggi (es. avevo letto male il contachilometri)"
+                  placeholderTextColor={colors.textSecondary}
+                />
+                <View style={styles.hoursActions}>
+                  <TouchableOpacity
+                    testID="btn-save-km-fix"
+                    style={[styles.hoursSaveBtn, savingKmFix && { opacity: 0.5 }]}
+                    disabled={savingKmFix}
+                    onPress={saveKmFix}
+                  >
+                    {savingKmFix ? <ActivityIndicator color={colors.textInverse} /> : <Text style={styles.hoursSaveText}>SALVA KM</Text>}
+                  </TouchableOpacity>
+                  <TouchableOpacity style={styles.hoursMiniBtn} disabled={savingKmFix} onPress={() => setKmFixing(false)}>
+                    <Text style={styles.hoursMiniText}>Annulla</Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+            )}
+          </View>
+        )}
 
         {/* AI Voice Chat + Scheda Tecnica */}
         <VehicleHistory orderId={order.id} />
@@ -313,7 +438,57 @@ export default function OrderDetail() {
             </View>
 
             <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={{ padding: spacing.lg }}>
-              {modalOpen === "COMPLETE" && (
+              {modalOpen === "START" && !kmRegistrati && (
+                <View style={styles.kmBox}>
+                  <Text style={styles.kmLabel}>KM DEL VEICOLO</Text>
+                  {!kmDefer ? (
+                    <>
+                      <TextInput
+                        testID="km-input"
+                        style={styles.kmInput}
+                        value={km}
+                        onChangeText={(v) => setKm(v.replace(/[^0-9]/g, ""))}
+                        placeholder="es. 154000"
+                        placeholderTextColor="#FCA5A5"
+                        keyboardType="number-pad"
+                        maxLength={7}
+                        autoFocus
+                      />
+                      <Text style={styles.kmHint}>Leggi il contachilometri prima di mettere le mani sull&apos;auto.</Text>
+                      <TouchableOpacity
+                        testID="btn-km-defer"
+                        style={styles.kmDeferBtn}
+                        onPress={() => { setKm(""); setKmDefer(true); }}
+                      >
+                        <Ionicons name="time-outline" size={16} color={colors.text} />
+                        <Text style={styles.kmDeferBtnText}>NON RIESCO A LEGGERLI ORA</Text>
+                      </TouchableOpacity>
+                    </>
+                  ) : (
+                    <>
+                      <Text style={styles.kmHint}>Scrivi perché: li rimettiamo alla chiusura del lavoro.</Text>
+                      <TextInput
+                        testID="km-defer-reason"
+                        style={styles.kmDeferInput}
+                        value={kmDeferReason}
+                        onChangeText={setKmDeferReason}
+                        placeholder="es. auto già sul ponte"
+                        placeholderTextColor="#FCA5A5"
+                        autoFocus
+                      />
+                      <TouchableOpacity
+                        testID="btn-km-undefer"
+                        style={styles.kmDeferBtn}
+                        onPress={() => { setKmDefer(false); setKmDeferReason(""); }}
+                      >
+                        <Ionicons name="arrow-back" size={16} color={colors.text} />
+                        <Text style={styles.kmDeferBtnText}>NO, LI SCRIVO ADESSO</Text>
+                      </TouchableOpacity>
+                    </>
+                  )}
+                </View>
+              )}
+              {modalOpen === "COMPLETE" && kmDaChiedereAllaFine && (
                 <View style={styles.kmBox}>
                   <Text style={styles.kmLabel}>⚠ KM DEL VEICOLO — OBBLIGATORIO</Text>
                   <TextInput
@@ -328,6 +503,14 @@ export default function OrderDetail() {
                     autoFocus
                   />
                   <Text style={styles.kmHint}>Leggi il contachilometri: senza km non puoi completare.</Text>
+                </View>
+              )}
+              {modalOpen === "COMPLETE" && !kmDaChiedereAllaFine && (
+                <View style={styles.kmDoneBox}>
+                  <Ionicons name="checkmark-circle" size={18} color={colors.active} />
+                  <Text style={styles.kmDoneText}>
+                    KM già registrati: {Number(kmRegistrati).toLocaleString("it-IT")}
+                  </Text>
                 </View>
               )}
               <Text style={styles.label}>
@@ -411,8 +594,11 @@ function ActionBtn({ testID, label, color, textColor, onPress }: { testID: strin
 function TimelineItem({ ev }: { ev: WorkEvent }) {
   const colorMap: Record<string, string> = {
     START: colors.active, RESUME: colors.active, PAUSE: colors.paused, COMPLETE: colors.text,
+    KM: colors.primary,
   };
-  const labelMap: Record<string, string> = { START: "INIZIO", RESUME: "RIPRESA", PAUSE: "PAUSA", COMPLETE: "COMPLETATO" };
+  const labelMap: Record<string, string> = {
+    START: "INIZIO", RESUME: "RIPRESA", PAUSE: "PAUSA", COMPLETE: "COMPLETATO", KM: "KM CORRETTI",
+  };
   const d = new Date(ev.timestamp);
   const time = d.toLocaleTimeString("it-IT", { hour: "2-digit", minute: "2-digit" });
   const date = d.toLocaleDateString("it-IT", { day: "2-digit", month: "2-digit" });
@@ -427,6 +613,9 @@ function TimelineItem({ ev }: { ev: WorkEvent }) {
         <Text style={[styles.tlLabel, { color: colorMap[ev.type] }]}>{labelMap[ev.type]}</Text>
         <Text style={styles.tlWorker}>{ev.worker_full_name}</Text>
         {ev.km ? <Text style={styles.tlKm}>KM {Number(ev.km).toLocaleString("it-IT")}</Text> : null}
+        {ev.km_deferred_reason ? (
+          <Text style={styles.tlKmDeferred}>KM rimandati alla fine — &ldquo;{ev.km_deferred_reason}&rdquo;</Text>
+        ) : null}
         {ev.reason ? <Text style={styles.tlReason}>&ldquo;{ev.reason}&rdquo;</Text> : null}
         {ev.ai_interpretation ? (
           <View style={styles.aiBox}>
@@ -492,6 +681,7 @@ const styles = StyleSheet.create({
   tlLabel: { fontSize: 11, fontWeight: "900", letterSpacing: 2 },
   tlWorker: { fontSize: 13, color: colors.text, marginTop: 2, fontWeight: "600" },
   tlKm: { fontSize: 12, fontWeight: "900", color: colors.primary, marginTop: 2, letterSpacing: 0.5 },
+  tlKmDeferred: { fontSize: 12, color: colors.paused, fontWeight: "700", marginTop: 2 },
   tlReason: { fontSize: 13, color: colors.textSecondary, marginTop: 4, fontStyle: "italic" },
   aiBox: { marginTop: 8, padding: 8, backgroundColor: colors.bgMuted, flexDirection: "row", gap: 8 },
   aiLabel: { fontSize: 10, fontWeight: "900", letterSpacing: 2, color: colors.primary },
@@ -520,6 +710,32 @@ const styles = StyleSheet.create({
     color: colors.text, textAlign: "center", letterSpacing: 2, minHeight: 52,
   },
   kmHint: { fontSize: 11, color: colors.stopped, marginTop: 6, fontWeight: "600" },
+  kmDeferBtn: {
+    flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 6,
+    marginTop: spacing.md, paddingVertical: 12,
+    borderWidth: 1, borderColor: colors.borderStrong, backgroundColor: colors.bg,
+  },
+  kmDeferBtnText: { fontSize: 12, fontWeight: "900", letterSpacing: 1, color: colors.text },
+  kmDeferInput: {
+    borderWidth: 2, borderColor: colors.stopped, backgroundColor: colors.bg,
+    paddingHorizontal: 12, paddingVertical: 12, fontSize: 15, color: colors.text, minHeight: 48,
+    marginTop: 8,
+  },
+  kmDoneBox: {
+    flexDirection: "row", alignItems: "center", gap: 8,
+    borderWidth: 1, borderColor: colors.border, backgroundColor: colors.bgMuted,
+    padding: spacing.md, marginBottom: spacing.md,
+  },
+  kmDoneText: { fontSize: 13, fontWeight: "700", color: colors.text },
+  kmCard: { margin: spacing.lg, marginTop: 0, padding: spacing.lg, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.bgMuted },
+  kmCardRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingVertical: 3 },
+  kmCardValue: { fontSize: 20, fontWeight: "900", color: colors.text, letterSpacing: 0.5 },
+  kmCardMissing: { fontSize: 13, color: colors.textSecondary, fontStyle: "italic" },
+  kmFixInput: {
+    borderWidth: 1, borderColor: colors.borderStrong, backgroundColor: colors.bg,
+    paddingHorizontal: 12, paddingVertical: 10, fontSize: 18, fontWeight: "900",
+    color: colors.text, textAlign: "center", letterSpacing: 1, minHeight: 48, marginBottom: 8,
+  },
   modalBackdrop: { flex: 1, backgroundColor: "rgba(0,0,0,0.5)", justifyContent: "flex-end" },
   modalSheet: { backgroundColor: colors.bg, borderTopWidth: 2, borderTopColor: colors.borderStrong, maxHeight: "90%" },
   modalHeader: {

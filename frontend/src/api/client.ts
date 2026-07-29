@@ -44,7 +44,8 @@ export async function api<T = any>(path: string, opts: ApiOptions = {}): Promise
 }
 
 export type Role = "admin" | "worker";
-export type EventType = "START" | "PAUSE" | "RESUME" | "COMPLETE";
+/** KM non è un passaggio di lavoro: è la correzione di un chilometraggio sbagliato. */
+export type EventType = "START" | "PAUSE" | "RESUME" | "COMPLETE" | "KM";
 export type OrderStatus = "pending" | "open" | "in_progress" | "paused" | "completed";
 
 export type User = {
@@ -99,6 +100,8 @@ export type WorkEvent = {
   timestamp: string;
   ai_interpretation?: string | null;
   km?: string | null;
+  /** valorizzato su INIZIA quando il meccanico rinvia i km alla chiusura */
+  km_deferred_reason?: string | null;
 };
 
 export type LiveStatus = {

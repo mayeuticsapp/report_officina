@@ -102,8 +102,13 @@ function Row({ label, value }: { label: string; value: string }) {
 }
 
 function TimelineItem({ ev }: { ev: WorkEvent }) {
-  const colorMap: Record<string, string> = { START: colors.active, RESUME: colors.active, PAUSE: colors.paused, COMPLETE: colors.text };
-  const labelMap: Record<string, string> = { START: "INIZIO", RESUME: "RIPRESA", PAUSE: "PAUSA", COMPLETE: "COMPLETATO" };
+  const colorMap: Record<string, string> = {
+    START: colors.active, RESUME: colors.active, PAUSE: colors.paused, COMPLETE: colors.text,
+    KM: colors.primary,
+  };
+  const labelMap: Record<string, string> = {
+    START: "INIZIO", RESUME: "RIPRESA", PAUSE: "PAUSA", COMPLETE: "COMPLETATO", KM: "KM CORRETTI",
+  };
   const d = new Date(ev.timestamp);
   const time = d.toLocaleTimeString("it-IT", { hour: "2-digit", minute: "2-digit" });
   const date = d.toLocaleDateString("it-IT", { day: "2-digit", month: "2-digit" });
@@ -118,6 +123,9 @@ function TimelineItem({ ev }: { ev: WorkEvent }) {
         <Text style={[styles.tlLabel, { color: colorMap[ev.type] }]}>{labelMap[ev.type]}</Text>
         <Text style={styles.tlWorker}>{ev.worker_full_name}</Text>
         {ev.km ? <Text style={styles.tlKm}>KM {Number(ev.km).toLocaleString("it-IT")}</Text> : null}
+        {ev.km_deferred_reason ? (
+          <Text style={styles.tlKmDeferred}>KM rimandati alla fine — &ldquo;{ev.km_deferred_reason}&rdquo;</Text>
+        ) : null}
         {ev.reason ? <Text style={styles.tlReason}>&ldquo;{ev.reason}&rdquo;</Text> : null}
         {ev.ai_interpretation ? (
           <View style={styles.aiBox}>
@@ -163,6 +171,7 @@ const styles = StyleSheet.create({
   tlLabel: { fontSize: 11, fontWeight: "900", letterSpacing: 2 },
   tlWorker: { fontSize: 13, color: colors.text, marginTop: 2, fontWeight: "600" },
   tlKm: { fontSize: 12, fontWeight: "900", color: colors.primary, marginTop: 2, letterSpacing: 0.5 },
+  tlKmDeferred: { fontSize: 12, color: colors.paused, fontWeight: "700", marginTop: 2 },
   tlReason: { fontSize: 13, color: colors.textSecondary, marginTop: 4, fontStyle: "italic" },
   aiBox: { marginTop: 8, padding: 8, backgroundColor: colors.bgMuted, flexDirection: "row", gap: 8 },
   aiLabel: { fontSize: 10, fontWeight: "900", letterSpacing: 2, color: colors.primary },

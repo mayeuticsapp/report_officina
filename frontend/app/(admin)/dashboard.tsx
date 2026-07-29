@@ -115,7 +115,10 @@ function LiveRow({ w }: { w: LiveStatus }) {
 
 function RecentRow({ e }: { e: WorkEvent }) {
   const time = new Date(e.timestamp).toLocaleTimeString("it-IT", { hour: "2-digit", minute: "2-digit" });
-  const cMap: Record<string, string> = { START: colors.active, RESUME: colors.active, PAUSE: colors.paused, COMPLETE: colors.text };
+  const cMap: Record<string, string> = {
+    START: colors.active, RESUME: colors.active, PAUSE: colors.paused, COMPLETE: colors.text,
+    KM: colors.primary,
+  };
   return (
     <View style={styles.recentRow}>
       <Text style={styles.recentTime}>{time}</Text>
