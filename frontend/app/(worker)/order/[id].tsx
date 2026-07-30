@@ -33,6 +33,8 @@ export default function OrderDetail() {
   const [kmFixValue, setKmFixValue] = useState("");
   const [kmFixReason, setKmFixReason] = useState("");
   const [savingKmFix, setSavingKmFix] = useState(false);
+  // foto del libretto: obbligatoria su INIZIA, subito dopo i km
+  const [libretto, setLibretto] = useState<string | null>(null);
   // ore da fatturare, confermate alla chiusura
   const [oreProp, setOreProp] = useState<OreProposte | null>(null);
   const [oreCaricando, setOreCaricando] = useState(false);
@@ -119,6 +121,7 @@ export default function OrderDetail() {
     setKm("");
     setKmDefer(false);
     setKmDeferReason("");
+    setLibretto(null);
     setPhotos([]);
     setModalOpen(t);
     if (t === "COMPLETE" && order) {
@@ -135,6 +138,36 @@ export default function OrderDetail() {
         })
         .catch(() => setOreProp(null))
         .finally(() => setOreCaricando(false));
+    }
+  };
+
+  // Foto del libretto: obbligatoria per far partire il lavoro.
+  const scattaLibretto = async () => {
+    const perm = await ImagePicker.requestCameraPermissionsAsync();
+    if (perm.status !== "granted") {
+      if (!perm.canAskAgain) {
+        const goSettings = await confirmDialog("Permesso fotocamera", "Serve la fotocamera per la foto del libretto. Apri le Impostazioni per attivarla.", "Impostazioni");
+        if (goSettings) Linking.openSettings();
+      } else {
+        showAlert("Permesso negato", "Non posso accedere alla fotocamera senza permesso.");
+      }
+      return;
+    }
+    const res = await ImagePicker.launchCameraAsync({ quality: 0.6, base64: true, allowsEditing: false });
+    if (!res.canceled && res.assets[0]?.base64) {
+      setLibretto(`data:image/jpeg;base64,${res.assets[0].base64}`);
+    }
+  };
+
+  const libarettoDaGalleria = async () => {
+    const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (perm.status !== "granted") {
+      showAlert("Permesso galleria", "Serve accesso alla galleria per la foto del libretto.");
+      return;
+    }
+    const res = await ImagePicker.launchImageLibraryAsync({ quality: 0.6, base64: true, mediaTypes: ["images"] });
+    if (!res.canceled && res.assets[0]?.base64) {
+      setLibretto(`data:image/jpeg;base64,${res.assets[0].base64}`);
     }
   };
 
@@ -187,6 +220,10 @@ export default function OrderDetail() {
         return;
       }
     }
+    if (modalOpen === "START" && !libretto) {
+      showAlert("FOTO DEL LIBRETTO", "Scatta la foto del libretto: senza quella il lavoro non parte.");
+      return;
+    }
     if (modalOpen === "COMPLETE" && kmDaChiedereAllaFine && !kmPulito) {
       showAlert("KM OBBLIGATORI", "Inserisci i chilometri del veicolo: senza km non puoi completare il lavoro.");
       return;
@@ -226,6 +263,7 @@ export default function OrderDetail() {
           km: inviaKm ? kmPulito : null,
           km_deferred_reason: modalOpen === "START" && kmDefer ? kmDeferReason.trim() : null,
           minutes_effective: minutiConfermati,
+          libretto_base64: modalOpen === "START" ? libretto : null,
         },
       });
       setModalOpen(null);
@@ -543,6 +581,42 @@ export default function OrderDetail() {
                   <Text style={styles.kmHint}>Leggi il contachilometri: senza km non puoi completare.</Text>
                 </View>
               )}
+              {modalOpen === "START" && (
+                <View style={[styles.libBox, libretto ? styles.libBoxOk : null]}>
+                  <Text style={[styles.libLabel, libretto ? styles.libLabelOk : null]}>
+                    {libretto ? "✓ FOTO DEL LIBRETTO" : "📄 FOTO DEL LIBRETTO — OBBLIGATORIA"}
+                  </Text>
+                  {libretto ? (
+                    <>
+                      <Image source={{ uri: libretto }} style={styles.libPreview} resizeMode="cover" />
+                      <TouchableOpacity
+                        testID="btn-libretto-rifai"
+                        style={styles.libRifaiBtn}
+                        onPress={() => setLibretto(null)}
+                      >
+                        <Ionicons name="refresh" size={16} color={colors.text} />
+                        <Text style={styles.libRifaiText}>RIFALLA</Text>
+                      </TouchableOpacity>
+                    </>
+                  ) : (
+                    <>
+                      <Text style={styles.libHint}>
+                        Inquadra il libretto per intero: targa e telaio devono leggersi.
+                      </Text>
+                      <View style={styles.photoRow}>
+                        <TouchableOpacity testID="btn-libretto-camera" onPress={scattaLibretto} style={styles.photoBtn}>
+                          <Ionicons name="camera" size={22} color={colors.text} />
+                          <Text style={styles.photoBtnText}>FOTOCAMERA</Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity testID="btn-libretto-galleria" onPress={libarettoDaGalleria} style={styles.photoBtn}>
+                          <Ionicons name="image" size={22} color={colors.text} />
+                          <Text style={styles.photoBtnText}>GALLERIA</Text>
+                        </TouchableOpacity>
+                      </View>
+                    </>
+                  )}
+                </View>
+              )}
               {modalOpen === "COMPLETE" && (
                 <View style={styles.oreBox}>
                   <Text style={styles.oreLabel}>⏱ ORE LAVORATE — VANNO IN FATTURA</Text>
@@ -811,6 +885,22 @@ const styles = StyleSheet.create({
     color: colors.text, textAlign: "center", letterSpacing: 2, minHeight: 52,
   },
   kmHint: { fontSize: 11, color: colors.stopped, marginTop: 6, fontWeight: "600" },
+  libBox: {
+    borderWidth: 2, borderColor: colors.stopped, backgroundColor: "#FEF2F2",
+    padding: spacing.md, marginBottom: spacing.md,
+  },
+  libBoxOk: { borderColor: colors.active, backgroundColor: colors.bgMuted },
+  libLabel: { fontSize: 12, letterSpacing: 1.5, fontWeight: "900", color: colors.stopped, marginBottom: 8 },
+  libLabelOk: { color: colors.active },
+  libHint: { fontSize: 11, color: colors.stopped, marginBottom: 10, fontWeight: "600" },
+  libPreview: {
+    width: "100%", height: 170, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.bg,
+  },
+  libRifaiBtn: {
+    flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 6,
+    marginTop: 10, paddingVertical: 10, borderWidth: 1, borderColor: colors.borderStrong,
+  },
+  libRifaiText: { fontSize: 12, fontWeight: "900", letterSpacing: 1, color: colors.text },
   oreBox: {
     borderWidth: 2, borderColor: colors.text, backgroundColor: colors.bgMuted,
     padding: spacing.md, marginBottom: spacing.md,

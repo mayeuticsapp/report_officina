@@ -340,6 +340,9 @@ export type OrderPhoto = {
   content_type: string;
   size_bytes: number;
   created_at: string;
+  caption?: string | null;
+  /** "libretto" = la foto obbligatoria scattata all'inizio del lavoro */
+  kind?: string | null;
 };
 
 export async function listOrderPhotos(orderId: string): Promise<OrderPhoto[]> {

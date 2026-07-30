@@ -274,6 +274,8 @@ class WorkEventCreate(BaseModel):
     km_deferred_reason: Optional[str] = None
     # ore da mettere in fattura, confermate dal meccanico su COMPLETA (obbligatorie)
     minutes_effective: Optional[int] = None
+    # foto del libretto, obbligatoria su INIZIA (data URL o base64 puro)
+    libretto_base64: Optional[str] = None
 
 
 class WorkEvent(BaseModel):
@@ -538,6 +540,8 @@ async def startup():
         )
         # Didascalia AI della foto (Mistral vision la 'vede' una volta, poi entra nella memoria)
         await conn.execute("ALTER TABLE order_photos ADD COLUMN IF NOT EXISTS caption TEXT")
+        # Tipo di foto: "libretto" è quella obbligatoria all'inizio del lavoro
+        await conn.execute("ALTER TABLE order_photos ADD COLUMN IF NOT EXISTS kind TEXT")
         # Messaggi commessa (admin <-> operai) + notifiche push
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS order_messages (
@@ -1342,6 +1346,8 @@ class OrderPhoto(BaseModel):
     content_type: str
     size_bytes: int
     created_at: datetime
+    caption: Optional[str] = None
+    kind: Optional[str] = None  # "libretto" per la foto del libretto scattata su INIZIA
 
 
 _PHOTO_EXT = {
@@ -1379,6 +1385,44 @@ async def _caption_photo(photo_id: str, data: bytes, content_type: str):
             logger.info(f"didascalia foto {photo_id}: {caption[:60]}")
     except Exception as e:
         logger.warning(f"didascalia foto fallita per {photo_id}: {e}")
+
+
+async def _salva_foto_base64(order_id: str, user: dict, raw: str, kind: Optional[str] = None) -> str:
+    """Salva nell'archivio della commessa una foto arrivata come base64 (o data URL).
+    Serve alla foto del libretto, che il meccanico scatta dentro la schermata INIZIA.
+    Ritorna l'id della foto. Solleva HTTPException se il contenuto non va bene."""
+    testo = (raw or "").strip()
+    content_type = "image/jpeg"
+    if testo.startswith("data:"):
+        try:
+            intestazione, testo = testo.split(",", 1)
+            dichiarato = intestazione[5:].split(";")[0].lower()
+            if dichiarato:
+                content_type = dichiarato
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Foto del libretto non leggibile")
+    if content_type not in _PHOTO_EXT or content_type in _VIDEO_TYPES:
+        raise HTTPException(status_code=415, detail=f"La foto del libretto deve essere un'immagine, non {content_type}")
+    try:
+        data = base64.b64decode(testo, validate=False)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Foto del libretto non leggibile")
+    if not data:
+        raise HTTPException(status_code=400, detail="Foto del libretto vuota")
+    if len(data) > MAX_PHOTO_BYTES:
+        raise HTTPException(status_code=413, detail=f"Foto troppo grande (max {MAX_PHOTO_BYTES // (1024*1024)}MB)")
+
+    photo_id = str(uuid.uuid4())
+    path = _photo_path(order_id, photo_id, content_type)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
+    await execute(
+        """INSERT INTO order_photos (id, work_order_id, uploaded_by, uploaded_by_name, content_type, size_bytes, created_at, kind)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8)""",
+        photo_id, order_id, user["id"], user["full_name"], content_type, len(data), now_utc(), kind,
+    )
+    asyncio.create_task(_caption_photo(photo_id, data, content_type))
+    return photo_id
 
 
 @api.post("/work-orders/{order_id}/photos", response_model=OrderPhoto)
@@ -1766,6 +1810,17 @@ async def add_event(order_id: str, body: WorkEventCreate, user: dict = Depends(g
     km_clean = None
 
     if body.type == "START":
+        # Dopo i km serve la foto del libretto: si scatta una volta per commessa e
+        # senza quella il lavoro non parte.
+        libretto_esistente = await fetchrow(
+            "SELECT id FROM order_photos WHERE work_order_id=$1 AND kind='libretto' LIMIT 1", order_id
+        )
+        if not libretto_esistente and not (body.libretto_base64 or "").strip():
+            raise HTTPException(
+                status_code=400,
+                detail=("Scatta la foto del libretto per iniziare il lavoro. "
+                        "Se non vedi il campo, ricarica la pagina."),
+            )
         if km_digits:
             if not km_valido:
                 raise HTTPException(status_code=400, detail="Chilometraggio non valido")
@@ -1807,6 +1862,11 @@ async def add_event(order_id: str, body: WorkEventCreate, user: dict = Depends(g
         km_rinvio = None
     else:
         km_rinvio = None
+
+    # La foto del libretto va salvata PRIMA di registrare l'evento: se il file non
+    # è valido il lavoro non deve partire a metà.
+    if body.type == "START" and (body.libretto_base64 or "").strip():
+        await _salva_foto_base64(order_id, user, body.libretto_base64, kind="libretto")
 
     ai_note = (
         await _ai_interpret_reason(body.reason or "", body.type)

@@ -151,9 +151,17 @@ class TestWorkOrders:
 
 # ---------- Events + status transitions + AI ----------
 class TestEvents:
+    # 1x1 px JPEG: basta a soddisfare la foto del libretto nei test
+    LIBRETTO_FINTO = ("data:image/jpeg;base64,/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNCgsL"
+                      "DBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPDs0NDT/wAALCAABAAEBAREA/8QAFAAB"
+                      "AAAAAAAAAAAAAAAAAAAAAv/EABQQAQAAAAAAAAAAAAAAAAAAAAD/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oA"
+                      "DAMBAAIRAxEAPwCdABmX/9k=")
+
     def _post_event(self, session, headers, order_id, etype, reason=None, km=None,
-                    km_deferred_reason=None, minutes_effective=None):
+                    km_deferred_reason=None, minutes_effective=None, libretto=True):
         payload = {"type": etype}
+        if etype == "START" and libretto:
+            payload["libretto_base64"] = self.LIBRETTO_FINTO
         if reason:
             payload["reason"] = reason
         if km:
@@ -163,6 +171,13 @@ class TestEvents:
         if minutes_effective is not None:
             payload["minutes_effective"] = minutes_effective
         return session.post(f"{API}/work-orders/{order_id}/events", headers=headers, json=payload)
+
+    def test_start_senza_libretto_rifiutato(self, session, state):
+        """Dopo i km serve la foto del libretto: senza, il lavoro non parte."""
+        r = self._post_event(session, state["worker_headers"], state["order_id"], "START",
+                             km="154000", libretto=False)
+        assert r.status_code == 400, r.text
+        assert "libretto" in r.text.lower()
 
     def test_start_senza_km_e_senza_motivo_rifiutato(self, session, state):
         """I km si chiedono all'inizio: o il numero, o il perché non si può leggerlo."""
@@ -180,6 +195,10 @@ class TestEvents:
         assert r2.json()["status"] == "in_progress"
         # i km finiscono anche nella scheda tecnica
         assert r2.json()["scheda_tecnica"]["km"] == "154000"
+        # e la foto del libretto entra nell'archivio della commessa, marcata
+        foto = session.get(f"{API}/work-orders/{state['order_id']}/photos",
+                           headers=state["worker_headers"]).json()
+        assert any(f.get("kind") == "libretto" for f in foto), foto
 
     def test_pause_event_has_ai_interpretation(self, session, state):
         r = self._post_event(session, state["worker_headers"], state["order_id"],
@@ -262,7 +281,8 @@ class TestKmRimandati:
 
     def test_start_con_rinvio(self, session, state, order_id):
         r = session.post(f"{API}/work-orders/{order_id}/events", headers=state["worker_headers"],
-                         json={"type": "START", "km_deferred_reason": "auto già sul ponte"})
+                         json={"type": "START", "km_deferred_reason": "auto già sul ponte",
+                               "libretto_base64": TestEvents.LIBRETTO_FINTO})
         assert r.status_code == 200, r.text
         body = r.json()
         assert body["km"] is None

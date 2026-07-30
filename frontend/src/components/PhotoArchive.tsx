@@ -166,6 +166,11 @@ export function PhotoArchive({ orderId, canUpload, canDelete }: Props) {
                 ) : (
                   <Image source={{ uri: p.url }} style={styles.thumb} resizeMode="cover" />
                 )}
+                {p.kind === "libretto" ? (
+                  <View style={styles.kindBadge}>
+                    <Text style={styles.kindBadgeText}>LIBRETTO</Text>
+                  </View>
+                ) : null}
                 <Text style={styles.thumbMeta} numberOfLines={1}>
                   {p.uploaded_by_name.split(" ")[0]} · {fmtDate(p.created_at)}
                 </Text>
@@ -226,6 +231,11 @@ const styles = StyleSheet.create({
   thumbWrap: { width: THUMB },
   thumb: { width: THUMB, height: THUMB, backgroundColor: colors.bgMuted, borderWidth: 1, borderColor: colors.border },
   thumbMeta: { fontSize: 9, color: colors.textSecondary, marginTop: 2 },
+  kindBadge: {
+    position: "absolute", top: 4, left: 4,
+    backgroundColor: colors.text, paddingHorizontal: 5, paddingVertical: 2,
+  },
+  kindBadgeText: { color: colors.textInverse, fontSize: 8, fontWeight: "900", letterSpacing: 0.8 },
   videoTile: { backgroundColor: "#18181B", alignItems: "center", justifyContent: "center" },
   videoLabel: { color: "#A1A1AA", fontSize: 9, fontWeight: "900", letterSpacing: 2, marginTop: 2 },
   viewerBackdrop: { flex: 1, backgroundColor: "rgba(0,0,0,0.95)" },
