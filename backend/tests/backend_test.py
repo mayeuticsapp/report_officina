@@ -433,3 +433,42 @@ class TestZCleanup:
         if wid:
             r = session.delete(f"{API}/users/{wid}", headers=admin_headers)
             assert r.status_code == 200
+
+
+class TestRicercaPerMeccanico:
+    """Il titolare cerca il nome del meccanico e vede quali auto ha lui."""
+
+    def test_cerca_per_nome_meccanico(self, session, admin_headers, state):
+        nome = "TEST Mario Aggiornato"
+        r = session.get(f"{API}/work-orders", headers=admin_headers, params={"q": nome.split()[1]})
+        assert r.status_code == 200, r.text
+        trovate = r.json()
+        assert trovate, "cercando il nome del meccanico deve tornare almeno la sua commessa"
+        for o in trovate:
+            assert state["worker_id"] in o["assigned_worker_ids"], \
+                f"la commessa {o['plate']} non è assegnata a lui: la ricerca ha pescato troppo"
+
+    def test_nome_inesistente_non_torna_nulla(self, session, admin_headers):
+        r = session.get(f"{API}/work-orders", headers=admin_headers, params={"q": "ZZZnessunmeccanico"})
+        assert r.status_code == 200
+        assert r.json() == []
+
+    def test_la_ricerca_per_targa_funziona_ancora(self, session, admin_headers, state):
+        r = session.get(f"{API}/work-orders", headers=admin_headers, params={"q": "TEST-AB123CD"})
+        assert r.status_code == 200
+        assert any(o["id"] == state["order_id"] for o in r.json())
+
+    def test_filtro_secco_per_meccanico(self, session, admin_headers, state):
+        """Le scorciatoie usano ?worker=<id>: solo le auto assegnate, niente omonimi."""
+        r = session.get(f"{API}/work-orders", headers=admin_headers,
+                        params={"worker": state["worker_id"]})
+        assert r.status_code == 200, r.text
+        trovate = r.json()
+        assert trovate
+        for o in trovate:
+            assert state["worker_id"] in o["assigned_worker_ids"]
+
+    def test_filtro_meccanico_inesistente(self, session, admin_headers):
+        r = session.get(f"{API}/work-orders", headers=admin_headers, params={"worker": "non-esiste"})
+        assert r.status_code == 200
+        assert r.json() == []

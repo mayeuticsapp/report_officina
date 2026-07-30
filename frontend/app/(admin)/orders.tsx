@@ -34,13 +34,19 @@ export default function OrdersAdmin() {
   const [unread, setUnread] = useState<Record<string, number>>({});
 
   const [search, setSearch] = useState("");
+  // filtro secco per meccanico (le scorciatoie): non è una ricerca testuale
+  const [soloDi, setSoloDi] = useState<string | null>(null);
 
   // silent: usato dall'aggiornamento automatico — se la rete cade per un attimo
   // non deve comparire un avviso ogni 15 secondi
-  const load = useCallback(async (q?: string, silent = false) => {
+  const load = useCallback(async (q?: string, workerId?: string | null, silent = false) => {
     try {
+      const params = new URLSearchParams();
+      if (q && q.trim()) params.set("q", q.trim());
+      if (workerId) params.set("worker", workerId);
+      const qs = params.toString();
       const [o, u] = await Promise.all([
-        api<WorkOrder[]>(q && q.trim() ? `/work-orders?q=${encodeURIComponent(q.trim())}` : "/work-orders"),
+        api<WorkOrder[]>(qs ? `/work-orders?${qs}` : "/work-orders"),
         api<User[]>("/users"),
       ]);
       setOrders(o);
@@ -52,16 +58,18 @@ export default function OrdersAdmin() {
     finally { setLoading(false); setRefreshing(false); }
   }, []);
 
-  // la ricerca corrente letta da ref: l'aggiornamento automatico non azzera il filtro
+  // ricerca e filtro correnti letti da ref: l'aggiornamento automatico non li azzera
   const searchRef = useRef(search);
   searchRef.current = search;
+  const soloDiRef = useRef(soloDi);
+  soloDiRef.current = soloDi;
 
-  useAutoRefresh(useCallback(() => load(searchRef.current, true), [load]));
+  useAutoRefresh(useCallback(() => load(searchRef.current, soloDiRef.current, true), [load]));
 
   useEffect(() => {
-    const t = setTimeout(() => load(search), 350);
+    const t = setTimeout(() => load(search, soloDi), 350);
     return () => clearTimeout(t);
-  }, [search]);
+  }, [search, soloDi]);
 
   const openNew = () => {
     setEditing(null);
@@ -107,7 +115,7 @@ export default function OrdersAdmin() {
         await api("/work-orders", { method: "POST", body });
       }
       setModalOpen(false);
-      await load();
+      await load(searchRef.current, soloDiRef.current);
     } catch (e: any) { showAlert("Errore", e.message); }
     finally { setSubmitting(false); }
   };
@@ -115,19 +123,19 @@ export default function OrdersAdmin() {
   const remove = async (o: WorkOrder) => {
     const ok = await confirmDialog("Elimina commessa", `Eliminare ${o.plate}?`, "Elimina");
     if (!ok) return;
-    try { await api(`/work-orders/${o.id}`, { method: "DELETE" }); await load(); }
+    try { await api(`/work-orders/${o.id}`, { method: "DELETE" }); await load(searchRef.current, soloDiRef.current); }
     catch (e: any) { showAlert("Errore", e.message); }
   };
 
   const approve = async (o: WorkOrder) => {
-    try { await api(`/work-orders/${o.id}`, { method: "PUT", body: { status: "open" } }); await load(); }
+    try { await api(`/work-orders/${o.id}`, { method: "PUT", body: { status: "open" } }); await load(searchRef.current, soloDiRef.current); }
     catch (e: any) { showAlert("Errore", e.message); }
   };
 
   const reject = async (o: WorkOrder) => {
     const ok = await confirmDialog("Rifiuta commessa", `Rifiutare ed eliminare la proposta di ${o.plate}?`, "Rifiuta");
     if (!ok) return;
-    try { await api(`/work-orders/${o.id}`, { method: "DELETE" }); await load(); }
+    try { await api(`/work-orders/${o.id}`, { method: "DELETE" }); await load(searchRef.current, soloDiRef.current); }
     catch (e: any) { showAlert("Errore", e.message); }
   };
 
@@ -145,7 +153,7 @@ export default function OrdersAdmin() {
           <TouchableOpacity
             testID="btn-refresh-orders"
             style={styles.refreshBtn}
-            onPress={() => { setRefreshing(true); load(searchRef.current); }}
+            onPress={() => { setRefreshing(true); load(searchRef.current, soloDiRef.current); }}
             disabled={refreshing}
           >
             {refreshing ? (
@@ -172,7 +180,7 @@ export default function OrdersAdmin() {
           style={styles.searchInput}
           value={search}
           onChangeText={setSearch}
-          placeholder="Cerca targa, cliente, lavoro…"
+          placeholder="Cerca targa, cliente, lavoro, meccanico…"
           placeholderTextColor={colors.textSecondary}
           autoCapitalize="none"
         />
@@ -183,12 +191,39 @@ export default function OrdersAdmin() {
         ) : null}
       </View>
 
+      {/* Scorciatoie: un tocco e vedi le auto di quel meccanico */}
+      {workers.length > 0 && (
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          style={styles.chiScroller}
+          contentContainerStyle={styles.chiRow}
+        >
+          <Text style={styles.chiLabel}>CHI CE L&apos;HA:</Text>
+          {workers.map((w) => {
+            const attivo = soloDi === w.id;
+            return (
+              <TouchableOpacity
+                key={w.id}
+                testID={`chip-worker-${w.id}`}
+                style={[styles.chiChip, attivo && styles.chiChipOn]}
+                onPress={() => setSoloDi(attivo ? null : w.id)}
+              >
+                <Text style={[styles.chiChipText, attivo && styles.chiChipTextOn]}>
+                  {w.full_name.split(" ")[0]}
+                </Text>
+              </TouchableOpacity>
+            );
+          })}
+        </ScrollView>
+      )}
+
       {loading ? (
         <View style={styles.center}><ActivityIndicator color={colors.text} /></View>
       ) : (
         <ScrollView
           contentContainerStyle={{ padding: spacing.lg }}
-          refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); load(); }} />}
+          refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); load(searchRef.current, soloDiRef.current); }} />}
         >
           {pendingOrders.length > 0 && (
             <View style={{ marginBottom: spacing.lg }}>
@@ -355,6 +390,16 @@ const styles = StyleSheet.create({
     borderWidth: 1, borderColor: colors.borderStrong, paddingHorizontal: 12,
   },
   searchInput: { flex: 1, paddingVertical: 10, fontSize: 14, color: colors.text, minHeight: 44 },
+  chiScroller: { maxHeight: 52, marginTop: spacing.sm },
+  chiRow: { paddingHorizontal: spacing.lg, gap: 6, alignItems: "center", paddingVertical: 6 },
+  chiLabel: { fontSize: 10, letterSpacing: 1.2, fontWeight: "800", color: colors.textSecondary, marginRight: 2 },
+  chiChip: {
+    flexShrink: 0, height: 34, paddingHorizontal: 12, alignItems: "center", justifyContent: "center",
+    borderWidth: 1, borderColor: colors.border, backgroundColor: colors.bg,
+  },
+  chiChipOn: { borderColor: colors.text, backgroundColor: colors.text },
+  chiChipText: { fontSize: 12, fontWeight: "800", color: colors.text },
+  chiChipTextOn: { color: colors.textInverse },
   empty: { padding: spacing.lg, borderWidth: 1, borderColor: colors.border },
   emptyText: { color: colors.textSecondary },
   card: { borderWidth: 1, borderColor: colors.border, padding: spacing.md, marginBottom: spacing.sm },

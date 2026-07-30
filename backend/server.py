@@ -736,18 +736,37 @@ async def delete_user(user_id: str, admin: dict = Depends(require_admin)):
 
 # ---- Work Orders ----
 @api.get("/work-orders", response_model=List[WorkOrder])
-async def list_work_orders(q: Optional[str] = None, user: dict = Depends(get_current_user)):
+async def list_work_orders(q: Optional[str] = None, worker: Optional[str] = None,
+                           user: dict = Depends(get_current_user)):
+    """q = ricerca libera (targa, cliente, veicolo, lavoro, scheda, NOME DEL MECCANICO).
+    worker = filtro secco per id meccanico: solo le auto assegnate a lui, senza
+    che un cliente omonimo finisca nei risultati."""
     conds = []
     vals: list = []
     if user["role"] == "worker":
         vals.append(json.dumps([user["id"]]))
         conds.append(f"assigned_worker_ids @> ${len(vals)}::jsonb")
+    elif worker and worker.strip():
+        vals.append(json.dumps([worker.strip()]))
+        conds.append(f"assigned_worker_ids @> ${len(vals)}::jsonb")
     if q and q.strip():
-        vals.append(f"%{q.strip()}%")
+        termine = q.strip()
+        vals.append(f"%{termine}%")
         i = len(vals)
-        conds.append(
-            f"(plate ILIKE ${i} OR customer ILIKE ${i} OR vehicle ILIKE ${i} OR description ILIKE ${i} OR scheda_tecnica::text ILIKE ${i})"
+        oppure = [
+            f"plate ILIKE ${i}", f"customer ILIKE ${i}", f"vehicle ILIKE ${i}",
+            f"description ILIKE ${i}", f"scheda_tecnica::text ILIKE ${i}",
+        ]
+        # Si cerca anche per NOME DEL MECCANICO: "giuseppe" tira su le auto che ha lui.
+        # I nomi non stanno sulla commessa (ci sono gli id), quindi prima li traduciamo.
+        simili = await fetch(
+            "SELECT id FROM users WHERE role='worker' AND (full_name ILIKE $1 OR username ILIKE $1)",
+            f"%{termine}%",
         )
+        for u in simili:
+            vals.append(json.dumps([u["id"]]))
+            oppure.append(f"assigned_worker_ids @> ${len(vals)}::jsonb")
+        conds.append("(" + " OR ".join(oppure) + ")")
     where = f"WHERE {' AND '.join(conds)}" if conds else ""
     rows = await fetch(f"SELECT * FROM work_orders {where} ORDER BY created_at DESC LIMIT 500", *vals)
     return [_workorder_for_user(row_to_workorder(r), user) for r in rows]
