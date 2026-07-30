@@ -63,6 +63,49 @@ export default function AdminOrderDetail() {
         contentContainerStyle={{ paddingBottom: spacing.xxl }}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); load(); }} />}
       >
+        {/* Le ore per prime: sono quelle che finiscono in fattura */}
+        {(() => {
+          const timbri = order.minutes_calculated ?? 0;
+          const fattura = order.minutes_effective ?? timbri;
+          const confermate = order.minutes_effective != null;
+          const scostamento = confermate && Math.abs(fattura - timbri) > 30;
+          return (
+            <View style={styles.oreCard}>
+              <Text style={styles.oreLabel}>ORE DA FATTURARE</Text>
+              <View style={styles.oreMain}>
+                <Text style={styles.oreBig}>{fmtMin(fattura)}</Text>
+                <View style={[styles.oreStato, confermate ? styles.oreStatoOk : styles.oreStatoNo]}>
+                  <Ionicons
+                    name={confermate ? "checkmark-circle" : "alert-circle"}
+                    size={14}
+                    color={colors.textInverse}
+                  />
+                  <Text style={styles.oreStatoText}>
+                    {confermate ? "CONFERMATE DAL MECCANICO" : "SOLO TIMBRI — NON CONFERMATE"}
+                  </Text>
+                </View>
+              </View>
+              <View style={styles.oreRow}>
+                <Text style={styles.oreRowLabel}>Dai timbri</Text>
+                <Text style={[styles.oreRowVal, scostamento && styles.oreRowValDiff]}>{fmtMin(timbri)}</Text>
+              </View>
+              {order.minutes_effective_reason ? (
+                <Text style={styles.oreMotivo}>{order.minutes_effective_reason}</Text>
+              ) : null}
+              {scostamento ? (
+                <Text style={styles.oreAvviso}>
+                  Il meccanico ha corretto di {fmtMin(Math.abs(fattura - timbri))} rispetto ai timbri.
+                </Text>
+              ) : null}
+              {!confermate && order.status === "completed" ? (
+                <Text style={styles.oreAvviso}>
+                  Chiusa prima che le ore fossero obbligatorie: questo numero viene dai timbri, controllalo.
+                </Text>
+              ) : null}
+            </View>
+          );
+        })()}
+
         <View style={styles.detailsCard}>
           <Row label="VEICOLO" value={order.vehicle} />
           <Row label="CLIENTE" value={order.customer} />
@@ -90,6 +133,11 @@ export default function AdminOrderDetail() {
       </ScrollView>
     </SafeAreaView>
   );
+}
+
+function fmtMin(m: number) {
+  const h = Math.floor(m / 60), mm = m % 60;
+  return h > 0 ? `${h}h ${String(mm).padStart(2, "0")}m` : `${mm}m`;
 }
 
 function Row({ label, value }: { label: string; value: string }) {
@@ -155,6 +203,26 @@ const styles = StyleSheet.create({
   headerTitle: { fontSize: 22, fontWeight: "900", color: colors.text, marginTop: 2 },
   pill: { paddingHorizontal: 10, paddingVertical: 6 },
   pillText: { color: colors.textInverse, fontSize: 10, fontWeight: "900", letterSpacing: 1 },
+  oreCard: {
+    margin: spacing.lg, marginBottom: 0, padding: spacing.lg,
+    borderWidth: 2, borderColor: colors.text, backgroundColor: colors.bgMuted,
+  },
+  oreLabel: { fontSize: 11, letterSpacing: 2, fontWeight: "900", color: colors.textSecondary },
+  oreMain: { flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: 10, marginTop: 4 },
+  oreBig: { fontSize: 34, fontWeight: "900", color: colors.text, letterSpacing: -1 },
+  oreStato: { flexDirection: "row", alignItems: "center", gap: 4, paddingHorizontal: 8, paddingVertical: 4 },
+  oreStatoOk: { backgroundColor: colors.active },
+  oreStatoNo: { backgroundColor: colors.stopped },
+  oreStatoText: { color: colors.textInverse, fontSize: 9, fontWeight: "900", letterSpacing: 0.5 },
+  oreRow: {
+    flexDirection: "row", justifyContent: "space-between", alignItems: "center",
+    marginTop: 10, paddingTop: 8, borderTopWidth: 1, borderTopColor: colors.border,
+  },
+  oreRowLabel: { fontSize: 13, color: colors.textSecondary },
+  oreRowVal: { fontSize: 15, fontWeight: "800", color: colors.textSecondary },
+  oreRowValDiff: { color: colors.stopped, textDecorationLine: "line-through" },
+  oreMotivo: { fontSize: 12, color: colors.textSecondary, fontStyle: "italic", marginTop: 6 },
+  oreAvviso: { fontSize: 12, color: colors.stopped, fontWeight: "700", marginTop: 6 },
   detailsCard: { margin: spacing.lg, padding: spacing.lg, borderWidth: 1, borderColor: colors.border },
   rowLabel: { fontSize: 10, letterSpacing: 2.5, color: colors.textSecondary, fontWeight: "700" },
   rowValue: { fontSize: 16, color: colors.text, marginTop: 2, fontWeight: "600" },
