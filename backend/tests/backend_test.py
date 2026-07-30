@@ -264,6 +264,81 @@ class TestEvents:
         assert types == ["START", "PAUSE", "RESUME", "COMPLETE", "KM"], types
 
 
+class TestPlanning:
+    """Il titolare tocca un'auto del planning e la assegna: nasce la commessa.
+    Se poi arriva il documento STAR per quella targa, si aggancia invece di duplicare."""
+
+    OMNIUS_KEY = os.environ.get("OMNIUS_KEY", "")
+    APP = {
+        "giorno": "2026-08-03", "ora": "09:00", "ora_fine": "11:00", "ponte": "PONTE2",
+        "targa": "TESTPL01AA", "cliente": "TEST Cliente Planning",
+        "veicolo": "FORD Fiesta", "nota": "Spia avaria accesa, controllare carburazione",
+    }
+
+    def _planning_snapshot(self, session):
+        if not self.OMNIUS_KEY:
+            pytest.skip("OMNIUS_KEY non configurata: salto le prove sul planning")
+        r = session.post(f"{API}/v1/omnius/planning",
+                         headers={"X-Omnius-Key": self.OMNIUS_KEY, "Content-Type": "application/json"},
+                         json={"aggiornato": "2026-08-01T20:00:00", "giorni_coperti": 7,
+                               "appuntamenti": [self.APP]})
+        assert r.status_code == 200, r.text
+
+    def test_appuntamento_senza_meccanico_rifiutato(self, session, admin_headers, state):
+        self._planning_snapshot(session)
+        r = session.post(f"{API}/planning/crea-commessa", headers=admin_headers,
+                         json={**self.APP, "assigned_worker_ids": []})
+        assert r.status_code == 400, r.text
+
+    def test_crea_commessa_dal_planning(self, session, admin_headers, state):
+        r = session.post(f"{API}/planning/crea-commessa", headers=admin_headers,
+                         json={**self.APP, "assigned_worker_ids": [state["worker_id"]]})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["gia_esistente"] is False
+        wo = body["work_order"]
+        assert wo["plate"] == self.APP["targa"]
+        assert wo["customer"] == self.APP["cliente"]
+        assert wo["vehicle"] == self.APP["veicolo"]
+        assert wo["description"] == self.APP["nota"]
+        assert wo["status"] == "open", "creata dal titolare: aperta, non da approvare"
+        assert state["worker_id"] in wo["assigned_worker_ids"]
+        assert "PONTE2" in (wo["scheda_tecnica"].get("note") or ""), "l'appuntamento resta scritto nella scheda"
+        state["planning_order_id"] = wo["id"]
+
+    def test_secondo_click_non_duplica(self, session, admin_headers, state):
+        r = session.post(f"{API}/planning/crea-commessa", headers=admin_headers,
+                         json={**self.APP, "assigned_worker_ids": [state["worker_id"]]})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["gia_esistente"] is True
+        assert body["work_order"]["id"] == state["planning_order_id"]
+
+    def test_planning_mostra_gia_smistata(self, session, admin_headers, state):
+        r = session.get(f"{API}/planning", headers=admin_headers)
+        assert r.status_code == 200
+        app = [a for a in r.json()["appuntamenti"] if a["targa"] == self.APP["targa"]][0]
+        assert app["commessa_id"] == state["planning_order_id"]
+        assert app["assegnata_a"], "deve dire a chi è assegnata"
+
+    def test_documento_star_si_aggancia(self, session, admin_headers, state):
+        """La prova che conta: STAR non deve creare una seconda commessa per la stessa auto."""
+        r = session.post(f"{API}/v1/omnius/commesse",
+                         headers={"X-Omnius-Key": self.OMNIUS_KEY, "Content-Type": "application/json"},
+                         json={"star_doc_id": f"STAR-TEST-{_run_id}", "plate": self.APP["targa"],
+                               "customer": self.APP["cliente"], "vehicle": self.APP["veicolo"],
+                               "note": "FILTRO OLIO; FILTRO ARIA"})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["action"] == "adopted", f"atteso aggancio, ricevuto {body['action']}"
+        assert body["work_order"]["id"] == state["planning_order_id"], "deve essere LA STESSA commessa"
+
+        # una sola commessa per quella targa, e ora è agganciata a STAR
+        tutte = session.get(f"{API}/work-orders", headers=admin_headers).json()
+        mie = [o for o in tutte if o["plate"] == self.APP["targa"]]
+        assert len(mie) == 1, f"doppione: {len(mie)} commesse per la stessa auto"
+
+
 class TestKmRimandati:
     """Auto già sul ponte: il meccanico rimanda i km alla chiusura, spiegando il perché."""
 

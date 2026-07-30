@@ -1,12 +1,13 @@
 import { useCallback, useState } from "react";
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity, ActivityIndicator, RefreshControl,
-  Linking,
+  Linking, Modal,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
-import { api } from "@/src/api/client";
+import { api, User, WorkOrder } from "@/src/api/client";
+import { showAlert } from "@/src/utils/dialog";
 import { useAutoRefresh } from "@/src/hooks/use-auto-refresh";
 import { colors, spacing } from "@/src/theme";
 
@@ -21,6 +22,10 @@ type Appuntamento = {
   veicolo?: string;
   telefono?: string;
   cellulare?: string;
+  // aggiunti dal server: dicono se l'appuntamento è già diventato una commessa
+  commessa_id?: string | null;
+  commessa_status?: string | null;
+  assegnata_a?: string[];
 };
 
 type Planning = {
@@ -39,6 +44,12 @@ export default function PlanningAdmin() {
   const [refreshing, setRefreshing] = useState(false);
   const [notReady, setNotReady] = useState(false);
 
+  // assegnazione di un'auto del planning a uno o più meccanici
+  const [scelto, setScelto] = useState<Appuntamento | null>(null);
+  const [operai, setOperai] = useState<User[]>([]);
+  const [selezionati, setSelezionati] = useState<string[]>([]);
+  const [creando, setCreando] = useState(false);
+
   const load = useCallback(async () => {
     try {
       setPlanning(await api<Planning>("/planning"));
@@ -47,6 +58,48 @@ export default function PlanningAdmin() {
       if (String(e?.message || "").includes("non ancora")) setNotReady(true);
     } finally { setLoading(false); setRefreshing(false); }
   }, []);
+
+  const apriAssegnazione = async (a: Appuntamento) => {
+    if (a.commessa_id) {
+      router.push(`/(admin)/order/${a.commessa_id}` as any);
+      return;
+    }
+    setScelto(a);
+    setSelezionati([]);
+    if (operai.length === 0) {
+      try {
+        const tutti = await api<User[]>("/users");
+        setOperai(tutti.filter((u) => u.role === "worker"));
+      } catch { /* la lista resta vuota: l'avviso lo dà il pulsante */ }
+    }
+  };
+
+  const creaCommessa = async () => {
+    if (!scelto) return;
+    if (selezionati.length === 0) {
+      showAlert("Scegli il meccanico", "Seleziona almeno un meccanico a cui assegnare il lavoro.");
+      return;
+    }
+    setCreando(true);
+    try {
+      const out = await api<{ work_order: WorkOrder; gia_esistente: boolean }>("/planning/crea-commessa", {
+        method: "POST",
+        body: {
+          giorno: scelto.giorno, ora: scelto.ora, ora_fine: scelto.ora_fine, ponte: scelto.ponte,
+          targa: scelto.targa, cliente: scelto.cliente, veicolo: scelto.veicolo, nota: scelto.nota,
+          assigned_worker_ids: selezionati,
+        },
+      });
+      setScelto(null);
+      await load();
+      if (out.gia_esistente) {
+        showAlert("Già in officina", "Questa auto era già stata assegnata: apro la commessa esistente.");
+      }
+      router.push(`/(admin)/order/${out.work_order.id}` as any);
+    } catch (e: any) {
+      showAlert("Errore", e?.message || "Commessa non creata");
+    } finally { setCreando(false); }
+  };
 
   useAutoRefresh(load);
 
@@ -115,7 +168,13 @@ export default function PlanningAdmin() {
             <View key={day} style={{ marginBottom: spacing.md }}>
               <Text style={styles.dayLabel}>{fmtGiorno(day)}</Text>
               {byDay[day].map((a, i) => (
-                <View key={i} testID={`planning-item-${day}-${i}`} style={styles.card}>
+                <TouchableOpacity
+                  key={i}
+                  testID={`planning-item-${day}-${i}`}
+                  style={[styles.card, a.commessa_id ? styles.cardSmistata : null]}
+                  activeOpacity={0.85}
+                  onPress={() => apriAssegnazione(a)}
+                >
                   <View style={styles.cardLeft}>
                     <Text style={styles.ora}>{a.ora || "—"}</Text>
                     {a.ora_fine ? <Text style={styles.oraFine}>{a.ora_fine}</Text> : null}
@@ -147,13 +206,84 @@ export default function PlanningAdmin() {
                         ))}
                       </View>
                     ) : null}
+                    {a.commessa_id ? (
+                      <View style={styles.smistataRow}>
+                        <Ionicons name="checkmark-circle" size={14} color={colors.active} />
+                        <Text style={styles.smistataText}>
+                          GIÀ IN OFFICINA{a.assegnata_a?.length ? ` · ${a.assegnata_a.join(", ")}` : ""}
+                        </Text>
+                      </View>
+                    ) : (
+                      <View style={styles.assegnaRow}>
+                        <Ionicons name="person-add-outline" size={14} color={colors.text} />
+                        <Text style={styles.assegnaText}>TOCCA PER ASSEGNARE A UN MECCANICO</Text>
+                      </View>
+                    )}
                   </View>
-                </View>
+                </TouchableOpacity>
               ))}
             </View>
           ))}
         </ScrollView>
       )}
+
+      {/* Assegnazione: da appuntamento a commessa */}
+      <Modal visible={!!scelto} transparent animationType="slide" onRequestClose={() => setScelto(null)}>
+        <View style={styles.mBackdrop}>
+          <View style={styles.mSheet}>
+            <View style={styles.mHeader}>
+              <Text style={styles.mTitle}>ASSEGNA A UN MECCANICO</Text>
+              <TouchableOpacity testID="btn-close-assegna" onPress={() => setScelto(null)}>
+                <Ionicons name="close" size={26} color={colors.text} />
+              </TouchableOpacity>
+            </View>
+            <ScrollView contentContainerStyle={{ padding: spacing.lg }}>
+              <Text style={styles.mTarga}>{scelto?.targa}</Text>
+              {scelto?.veicolo ? <Text style={styles.mVeicolo}>{scelto.veicolo}</Text> : null}
+              {scelto?.cliente ? <Text style={styles.mCliente}>{scelto.cliente}</Text> : null}
+              {scelto?.nota ? <Text style={styles.mNota}>{scelto.nota}</Text> : null}
+              <Text style={styles.mAppunto}>
+                {[scelto?.giorno, scelto?.ora && scelto?.ora_fine ? `${scelto.ora}–${scelto.ora_fine}` : scelto?.ora, scelto?.ponte]
+                  .filter(Boolean).join(" · ")}
+              </Text>
+
+              <Text style={styles.mLabel}>MECCANICI</Text>
+              {operai.length === 0 ? (
+                <Text style={styles.mVuoto}>Nessun meccanico trovato.</Text>
+              ) : operai.map((w) => {
+                const on = selezionati.includes(w.id);
+                return (
+                  <TouchableOpacity
+                    key={w.id}
+                    testID={`chk-worker-${w.id}`}
+                    style={[styles.mWorker, on && styles.mWorkerOn]}
+                    onPress={() => setSelezionati((s) => on ? s.filter((x) => x !== w.id) : [...s, w.id])}
+                  >
+                    <Ionicons
+                      name={on ? "checkbox" : "square-outline"}
+                      size={22}
+                      color={on ? colors.textInverse : colors.text}
+                    />
+                    <Text style={[styles.mWorkerText, on && styles.mWorkerTextOn]}>{w.full_name}</Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </ScrollView>
+            <View style={styles.mFooter}>
+              <TouchableOpacity
+                testID="btn-crea-commessa"
+                style={[styles.mCreaBtn, creando && { opacity: 0.6 }]}
+                disabled={creando}
+                onPress={creaCommessa}
+              >
+                {creando
+                  ? <ActivityIndicator color={colors.textInverse} />
+                  : <Text style={styles.mCreaText}>CREA COMMESSA</Text>}
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -181,6 +311,7 @@ const styles = StyleSheet.create({
     flexDirection: "row", gap: 12, borderWidth: 1, borderColor: colors.border,
     padding: spacing.md, marginBottom: 6,
   },
+  cardSmistata: { borderColor: colors.active, backgroundColor: colors.bgMuted },
   cardLeft: { width: 52, alignItems: "center" },
   ora: { fontSize: 15, fontWeight: "900", color: colors.text },
   oraFine: { fontSize: 11, color: colors.textSecondary },
@@ -197,4 +328,35 @@ const styles = StyleSheet.create({
   },
   phoneText: { color: colors.textInverse, fontSize: 12, fontWeight: "800", letterSpacing: 0.5 },
   nota: { fontSize: 12, color: colors.textSecondary, marginTop: 2 },
+  smistataRow: { flexDirection: "row", alignItems: "center", gap: 5, marginTop: 8 },
+  smistataText: { fontSize: 10, fontWeight: "900", letterSpacing: 0.8, color: colors.active },
+  assegnaRow: { flexDirection: "row", alignItems: "center", gap: 5, marginTop: 8 },
+  assegnaText: { fontSize: 10, fontWeight: "800", letterSpacing: 0.8, color: colors.text },
+  mBackdrop: { flex: 1, backgroundColor: "rgba(0,0,0,0.5)", justifyContent: "flex-end" },
+  mSheet: { backgroundColor: colors.bg, borderTopWidth: 2, borderTopColor: colors.borderStrong, maxHeight: "90%" },
+  mHeader: {
+    padding: spacing.lg, borderBottomWidth: 1, borderBottomColor: colors.border,
+    flexDirection: "row", justifyContent: "space-between", alignItems: "center",
+  },
+  mTitle: { fontSize: 15, fontWeight: "900", letterSpacing: 1.5, color: colors.text },
+  mTarga: { fontSize: 26, fontWeight: "900", color: colors.text, letterSpacing: 1 },
+  mVeicolo: { fontSize: 14, color: colors.textSecondary, fontStyle: "italic", marginTop: 2 },
+  mCliente: { fontSize: 14, color: colors.text, fontWeight: "600", marginTop: 4 },
+  mNota: { fontSize: 13, color: colors.text, marginTop: 8, lineHeight: 19 },
+  mAppunto: { fontSize: 12, color: colors.textSecondary, marginTop: 8 },
+  mLabel: {
+    fontSize: 11, letterSpacing: 2, fontWeight: "800", color: colors.textSecondary,
+    marginTop: spacing.lg, marginBottom: 8,
+  },
+  mVuoto: { fontSize: 13, color: colors.textSecondary },
+  mWorker: {
+    flexDirection: "row", alignItems: "center", gap: 10,
+    borderWidth: 1, borderColor: colors.border, padding: spacing.md, marginBottom: 6,
+  },
+  mWorkerOn: { backgroundColor: colors.text, borderColor: colors.text },
+  mWorkerText: { fontSize: 15, fontWeight: "700", color: colors.text },
+  mWorkerTextOn: { color: colors.textInverse },
+  mFooter: { padding: spacing.lg, borderTopWidth: 1, borderTopColor: colors.border },
+  mCreaBtn: { backgroundColor: colors.text, paddingVertical: 18, alignItems: "center" },
+  mCreaText: { color: colors.textInverse, fontWeight: "900", letterSpacing: 3, fontSize: 14 },
 });

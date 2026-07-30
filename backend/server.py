@@ -495,6 +495,14 @@ async def startup():
         await conn.execute("ALTER TABLE work_orders ADD COLUMN IF NOT EXISTS created_by_name TEXT")
         await conn.execute("ALTER TABLE work_orders ADD COLUMN IF NOT EXISTS star_doc_id TEXT")
         # Ore effettive corrette dal meccanico (per la fattura); le calcolate restano nei timbri
+        # Commessa nata da un appuntamento del planning: la chiave è giorno|ora|targa,
+        # perché gli appuntamenti di STAR non hanno un id stabile (lo snapshot viene
+        # riscritto da zero a ogni invio di Omnius). Unica: due click non fanno due commesse.
+        await conn.execute("ALTER TABLE work_orders ADD COLUMN IF NOT EXISTS planning_key TEXT")
+        await conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_work_orders_planning_key "
+            "ON work_orders (planning_key) WHERE planning_key IS NOT NULL"
+        )
         await conn.execute("ALTER TABLE work_orders ADD COLUMN IF NOT EXISTS minutes_effective INTEGER")
         await conn.execute("ALTER TABLE work_orders ADD COLUMN IF NOT EXISTS minutes_effective_reason TEXT")
         await conn.execute("""
@@ -832,7 +840,8 @@ def _riga_label(r: dict) -> str:
 
 
 class OmniusSchedaOut(BaseModel):
-    action: Literal["created", "updated"]
+    # "adopted" = il documento STAR si è agganciato a una commessa già smistata dal planning
+    action: Literal["created", "updated", "adopted"]
     work_order: WorkOrder
 
 
@@ -860,6 +869,22 @@ async def omnius_ingest_scheda(body: OmniusSchedaIn):
     existing = await fetchrow("SELECT * FROM work_orders WHERE star_doc_id=$1", star_doc_id)
     now = now_utc()
 
+    # Se l'auto era già stata smistata dal planning dal titolare, il documento STAR si
+    # AGGANCIA a quella commessa invece di crearne una seconda per la stessa macchina.
+    # Così il lavoro che il meccanico ha già iniziato è anche quello che va in fattura.
+    adottata = False
+    if not existing:
+        existing = await fetchrow(
+            """SELECT * FROM work_orders
+               WHERE plate=$1 AND planning_key IS NOT NULL AND star_doc_id IS NULL
+                 AND status IN ('open', 'in_progress', 'paused')
+               ORDER BY created_at DESC LIMIT 1""",
+            plate,
+        )
+        adottata = existing is not None
+        if adottata:
+            logger.info(f"STAR {star_doc_id} agganciato alla commessa {existing['id']} nata dal planning ({plate})")
+
     if existing:
         scheda_raw = existing.get("scheda_tecnica") or {}
         if isinstance(scheda_raw, str):
@@ -886,9 +911,12 @@ async def omnius_ingest_scheda(body: OmniusSchedaIn):
             parts.append(f"description=${i}"); vals.append(body.description.strip()); i += 1
         if body.vin and body.vin.strip():
             parts.append(f"vin=${i}"); vals.append(body.vin.strip()); i += 1
+        if adottata:
+            # da qui in poi questa commessa è quella che Omnius ritira per la fattura
+            parts.append(f"star_doc_id=${i}"); vals.append(star_doc_id); i += 1
         vals.append(existing["id"])
         row = await fetchrow(f"UPDATE work_orders SET {', '.join(parts)} WHERE id=${i} RETURNING *", *vals)
-        return OmniusSchedaOut(action="updated", work_order=row_to_workorder(row))
+        return OmniusSchedaOut(action="adopted" if adottata else "updated", work_order=row_to_workorder(row))
 
     new_id = str(uuid.uuid4())
     scheda = SchedaTecnica(
@@ -935,19 +963,134 @@ async def omnius_planning(body: PlanningIn):
     return {"ok": True, "appuntamenti": len(body.appuntamenti)}
 
 
+def _planning_key(giorno: Optional[str], ora: Optional[str], targa: Optional[str]) -> str:
+    """Identifica un appuntamento del planning. Gli appuntamenti di STAR non hanno un id
+    e lo snapshot viene riscritto ogni volta: giorno+ora+targa è la cosa più stabile che c'è."""
+    g = (giorno or "").strip()
+    o = (ora or "").strip()
+    t = (targa or "").strip().upper().replace(" ", "")
+    return f"{g}|{o}|{t}"
+
+
+class PlanningCreaIn(BaseModel):
+    giorno: Optional[str] = None
+    ora: Optional[str] = None
+    ora_fine: Optional[str] = None
+    ponte: Optional[str] = None
+    targa: str
+    cliente: Optional[str] = None
+    veicolo: Optional[str] = None
+    nota: Optional[str] = None
+    assigned_worker_ids: List[str] = Field(default_factory=list)
+
+
+class PlanningCreaOut(BaseModel):
+    work_order: WorkOrder
+    gia_esistente: bool  # True se l'appuntamento era già stato smistato
+
+
 @api.get("/planning", response_model=PlanningOut)
 async def get_planning(admin: dict = Depends(require_admin)):
-    """Il planning STAR per la pagina admin (sola lettura, fonte: Omnius)."""
+    """Il planning STAR per la pagina admin. Ogni appuntamento porta con sé se è già
+    diventato una commessa (commessa_id + a chi è assegnata), così il titolare vede
+    a colpo d'occhio cosa ha già smistato."""
     row = await fetchrow("SELECT * FROM officina_planning WHERE id=1")
     if not row:
         raise HTTPException(status_code=404, detail="Planning non ancora ricevuto da Omnius")
     apps = row.get("appuntamenti") or []
     if isinstance(apps, str):
         apps = json.loads(apps)
+
+    smistate = await fetch(
+        "SELECT id, planning_key, status, assigned_worker_ids FROM work_orders WHERE planning_key IS NOT NULL"
+    )
+    nomi = {u["id"]: u["full_name"] for u in await fetch("SELECT id, full_name FROM users")}
+    per_chiave: dict = {}
+    for w in smistate:
+        ids = w.get("assigned_worker_ids") or []
+        if isinstance(ids, str):
+            ids = json.loads(ids)
+        per_chiave[w["planning_key"]] = {
+            "commessa_id": w["id"],
+            "commessa_status": w["status"],
+            "assegnata_a": [nomi.get(i) for i in ids if nomi.get(i)],
+        }
+
+    arricchiti = []
+    for a in apps:
+        a = dict(a)
+        trovata = per_chiave.get(_planning_key(a.get("giorno"), a.get("ora"), a.get("targa")))
+        a.update(trovata or {"commessa_id": None, "commessa_status": None, "assegnata_a": []})
+        arricchiti.append(a)
+
     return PlanningOut(
         aggiornato=row.get("aggiornato"), giorni_coperti=row.get("giorni_coperti"),
-        appuntamenti=apps, received_at=row["received_at"],
+        appuntamenti=arricchiti, received_at=row["received_at"],
     )
+
+
+@api.post("/planning/crea-commessa", response_model=PlanningCreaOut)
+async def planning_crea_commessa(body: PlanningCreaIn, admin: dict = Depends(require_admin)):
+    """Il titolare tocca un'auto del planning e la assegna a uno o più meccanici:
+    nasce la commessa, con targa, cliente, veicolo e lavoro già dentro."""
+    targa = (body.targa or "").strip().upper().replace(" ", "")
+    if not targa:
+        raise HTTPException(status_code=400, detail="Targa mancante nell'appuntamento")
+    chiave = _planning_key(body.giorno, body.ora, targa)
+
+    # già smistato? restituiamo quella commessa invece di crearne un'altra
+    esistente = await fetchrow("SELECT * FROM work_orders WHERE planning_key=$1", chiave)
+    if esistente:
+        wo = row_to_workorder(esistente)
+        return PlanningCreaOut(work_order=_workorder_for_user(wo, admin), gia_esistente=True)
+
+    validi = {u["id"] for u in await fetch("SELECT id FROM users WHERE role='worker'")}
+    operai = [w for w in body.assigned_worker_ids if w in validi]
+    if not operai:
+        raise HTTPException(status_code=400, detail="Scegli almeno un meccanico a cui assegnare il lavoro")
+
+    # l'appuntamento (giorno, orario, ponte) resta scritto nella scheda
+    appunto = " · ".join(filter(None, [
+        f"Appuntamento {body.giorno}" if body.giorno else None,
+        f"{body.ora}–{body.ora_fine}" if body.ora and body.ora_fine else (body.ora or None),
+        body.ponte or None,
+    ]))
+    scheda = SchedaTecnica(note=f"Dal planning STAR — {appunto}" if appunto else "Dal planning STAR").model_dump()
+
+    new_id = str(uuid.uuid4())
+    now = now_utc()
+    await execute(
+        """INSERT INTO work_orders (id, plate, customer, vehicle, description, assigned_worker_ids,
+               status, scheda_tecnica, created_by, created_by_name, planning_key, created_at, updated_at)
+           VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8::jsonb,$9,$10,$11,$12,$13)""",
+        new_id, targa,
+        (body.cliente or "").strip() or "DA INSERIRE",
+        (body.veicolo or "").strip() or "Da identificare",
+        (body.nota or "").strip() or "Dal planning: lavoro da concordare",
+        json.dumps(operai), "open", json.dumps(scheda),
+        admin["id"], admin["full_name"], chiave, now, now,
+    )
+
+    # i dati veicolo li chiediamo a STAR come per le altre commesse
+    if OMNIUS_KEY:
+        try:
+            await execute(
+                """INSERT INTO plate_lookup_requests (id, work_order_id, plate, status, requested_by_name, created_at)
+                   VALUES ($1,$2,$3,'pending',$4,$5)""",
+                str(uuid.uuid4()), new_id, targa, admin["full_name"], now
+            )
+        except Exception as e:
+            logger.warning(f"planning: richiesta dati veicolo non messa in coda ({e})")
+
+    # il meccanico va avvisato: prima assegnare una commessa non notificava nessuno
+    asyncio.create_task(_push_to_users(
+        operai, "Nuovo lavoro assegnato",
+        f"[{targa}] {(body.nota or '').strip()[:80] or 'dal planning'}",
+        url=f"/(worker)/order/{new_id}",
+    ))
+
+    creata = await fetchrow("SELECT * FROM work_orders WHERE id=$1", new_id)
+    return PlanningCreaOut(work_order=_workorder_for_user(row_to_workorder(creata), admin), gia_esistente=False)
 
 
 # ---- Sportello di lettura report per Omnius (Fase 2) ----
