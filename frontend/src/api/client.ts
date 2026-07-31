@@ -16,7 +16,7 @@ export async function clearToken(): Promise<void> {
 }
 
 export type ApiOptions = {
-  method?: "GET" | "POST" | "PUT" | "DELETE";
+  method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
   body?: any;
   auth?: boolean;
 };
@@ -410,4 +410,89 @@ export async function transcribeAudio(uri: string, mimeType: string = "audio/m4a
   let data: any; try { data = JSON.parse(text); } catch { data = text; }
   if (!res.ok) throw new Error((data && data.detail) || `Errore ${res.status}`);
   return (data && data.text) || "";
+}
+
+// ---------------- Cartellino presenze ----------------
+
+export type Timbratura = {
+  id: string;
+  worker_id: string;
+  worker_name: string;
+  tipo: "ENTRATA" | "USCITA";
+  timestamp: string;
+  giorno: string;
+  lat?: number | null;
+  lon?: number | null;
+  accuracy_m?: number | null;
+  distanza_m?: number | null;
+  fuori_zona: boolean;
+  posizione_assente: boolean;
+  corretta_da_nome?: string | null;
+  motivo_correzione?: string | null;
+};
+
+export type Giornata = {
+  giorno: string;
+  minuti_presenza: number;
+  minuti_target: number;
+  differenza: number;
+  incompleta: boolean;
+  dentro_adesso: boolean;
+  timbrature: Timbratura[];
+};
+
+export type Cartellino = {
+  worker_id: string;
+  worker_name: string;
+  giornate: Giornata[];
+  saldo_minuti: number;
+  giorni_incompleti: number;
+};
+
+export type PosizioneOfficina = {
+  lat?: number | null;
+  lon?: number | null;
+  raggio_m: number;
+  impostata_da_nome?: string | null;
+  impostata_il?: string | null;
+  configurata: boolean;
+};
+
+/** Un tocco solo: se sei fuori entri, se sei dentro esci. */
+export async function timbra(pos: { lat: number; lon: number; accuracy_m?: number } | null): Promise<Timbratura> {
+  return api<Timbratura>("/timbrature", { method: "POST", body: pos ?? {} });
+}
+
+export async function mioCartellino(giorni = 60): Promise<Cartellino> {
+  return api<Cartellino>(`/timbrature/mio-cartellino?giorni=${giorni}`);
+}
+
+export async function cartellini(giorni = 30): Promise<Cartellino[]> {
+  return api<Cartellino[]>(`/timbrature/cartellini?giorni=${giorni}`);
+}
+
+export async function correggiTimbratura(
+  id: string, body: { timestamp?: string; tipo?: "ENTRATA" | "USCITA"; motivo: string },
+): Promise<Timbratura> {
+  return api<Timbratura>(`/timbrature/${id}`, { method: "PATCH", body });
+}
+
+export async function eliminaTimbratura(id: string): Promise<void> {
+  await api(`/timbrature/${id}`, { method: "DELETE" });
+}
+
+export async function leggiPosizioneOfficina(): Promise<PosizioneOfficina> {
+  return api<PosizioneOfficina>("/officina/posizione");
+}
+
+export async function impostaPosizioneOfficina(lat: number, lon: number, raggio_m = 500): Promise<PosizioneOfficina> {
+  return api<PosizioneOfficina>("/officina/posizione", { method: "POST", body: { lat, lon, raggio_m } });
+}
+
+/** "8h 30m" · "+15 min" · "−1h 05m" */
+export function fmtDurata(minuti: number): string {
+  const seg = minuti < 0 ? "−" : "";
+  const m = Math.abs(minuti);
+  const h = Math.floor(m / 60), mm = m % 60;
+  return h > 0 ? `${seg}${h}h ${String(mm).padStart(2, "0")}m` : `${seg}${mm}m`;
 }

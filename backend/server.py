@@ -11,8 +11,10 @@ import re
 import base64
 import tempfile
 import io
+import math
 from pathlib import Path
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, date, timezone, timedelta
+from zoneinfo import ZoneInfo
 from typing import List, Optional, Literal
 
 import asyncpg
@@ -168,7 +170,55 @@ OrderStatus = Literal["pending", "open", "in_progress", "paused", "completed"]
 # Segnaposto che significano "veicolo non ancora identificato": non sono dati,
 # e all'AI non vanno passati come se lo fossero.
 PLACEHOLDER_VEICOLO = ("", "DA IDENTIFICARE", "VEICOLO DA DEFINIRE", "DA DEFINIRE", "DA INSERIRE")
+
+# ---- Cartellino presenze ----
+# Orario concordato: 8:30–13:00 + 14:30–18:30 = 8 ore e mezza al giorno.
+# Il conto si fa sul TOTALE della giornata, non sulle fasce: così il recupero
+# funziona comunque lo faccia (entrando dopo, uscendo prima a pranzo o la sera).
+TARGET_MINUTI_GIORNO = 510
+RAGGIO_OFFICINA_M = 500
 PLACEHOLDER_CLIENTE = ("", "DA INSERIRE", "CLIENTE DA DEFINIRE")
+
+
+class TimbraturaIn(BaseModel):
+    lat: Optional[float] = None
+    lon: Optional[float] = None
+    accuracy_m: Optional[float] = None
+
+
+class Timbratura(BaseModel):
+    id: str
+    worker_id: str
+    worker_name: str
+    tipo: Literal["ENTRATA", "USCITA"]
+    timestamp: datetime
+    giorno: str
+    lat: Optional[float] = None
+    lon: Optional[float] = None
+    accuracy_m: Optional[int] = None
+    distanza_m: Optional[int] = None
+    fuori_zona: bool = False
+    posizione_assente: bool = False
+    corretta_da_nome: Optional[str] = None
+    motivo_correzione: Optional[str] = None
+
+
+class GiornataOut(BaseModel):
+    giorno: str
+    minuti_presenza: int
+    minuti_target: int
+    differenza: int                 # + straordinario da recuperare, − da restituire
+    incompleta: bool                # manca una timbratura di uscita
+    dentro_adesso: bool
+    timbrature: List[Timbratura]
+
+
+class CartellinoOut(BaseModel):
+    worker_id: str
+    worker_name: str
+    giornate: List[GiornataOut]
+    saldo_minuti: int               # il monte ore a recupero, cumulativo
+    giorni_incompleti: int
 
 
 class UserPublic(BaseModel):
@@ -566,6 +616,41 @@ async def startup():
             "CREATE INDEX IF NOT EXISTS idx_order_messages_order ON order_messages (work_order_id, created_at)"
         )
         await conn.execute("ALTER TABLE order_messages ADD COLUMN IF NOT EXISTS edited_at TIMESTAMPTZ")
+        # Cartellino presenze: timbrature con posizione
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS timbrature (
+                id TEXT PRIMARY KEY,
+                worker_id TEXT NOT NULL,
+                worker_name TEXT NOT NULL,
+                tipo TEXT NOT NULL,
+                timestamp TIMESTAMPTZ NOT NULL,
+                giorno DATE NOT NULL,
+                lat DOUBLE PRECISION,
+                lon DOUBLE PRECISION,
+                accuracy_m INTEGER,
+                distanza_m INTEGER,
+                fuori_zona BOOLEAN NOT NULL DEFAULT FALSE,
+                posizione_assente BOOLEAN NOT NULL DEFAULT FALSE,
+                corretta_da TEXT,
+                corretta_da_nome TEXT,
+                corretta_il TIMESTAMPTZ,
+                motivo_correzione TEXT,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """)
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_timbrature_worker_giorno ON timbrature (worker_id, giorno)"
+        )
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS officina_posizione (
+                id INTEGER PRIMARY KEY,
+                lat DOUBLE PRECISION NOT NULL,
+                lon DOUBLE PRECISION NOT NULL,
+                raggio_m INTEGER NOT NULL DEFAULT 500,
+                impostata_da_nome TEXT,
+                impostata_il TIMESTAMPTZ
+            )
+        """)
         await conn.execute("ALTER TABLE work_events ADD COLUMN IF NOT EXISTS km TEXT")
         await conn.execute("ALTER TABLE work_events ADD COLUMN IF NOT EXISTS km_deferred_reason TEXT")
         await conn.execute("""
@@ -980,6 +1065,256 @@ async def omnius_planning(body: PlanningIn):
         body.aggiornato, body.giorni_coperti, json.dumps(body.appuntamenti), now_utc()
     )
     return {"ok": True, "appuntamenti": len(body.appuntamenti)}
+
+
+# ---------------- Cartellino presenze ----------------
+FUSO_ITALIA = ZoneInfo("Europe/Rome")
+
+
+def _giorno_italiano(dt: datetime) -> date:
+    """Il server ragiona in UTC, l'officina vive in Italia: una timbratura delle
+    00:30 italiane non deve finire nel giorno prima."""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(FUSO_ITALIA).date()
+
+
+def _distanza_m(lat1: float, lon1: float, lat2: float, lon2: float) -> int:
+    """Distanza in metri tra due punti (formula dell'emisenoverso)."""
+    r = 6371000.0
+    f1, f2 = math.radians(lat1), math.radians(lat2)
+    df, dl = math.radians(lat2 - lat1), math.radians(lon2 - lon1)
+    a = math.sin(df / 2) ** 2 + math.cos(f1) * math.cos(f2) * math.sin(dl / 2) ** 2
+    return int(round(2 * r * math.atan2(math.sqrt(a), math.sqrt(1 - a))))
+
+
+def _riga_timbratura(r: dict) -> Timbratura:
+    return Timbratura(
+        id=r["id"], worker_id=r["worker_id"], worker_name=r["worker_name"], tipo=r["tipo"],
+        timestamp=r["timestamp"], giorno=r["giorno"].isoformat(),
+        lat=r.get("lat"), lon=r.get("lon"), accuracy_m=r.get("accuracy_m"),
+        distanza_m=r.get("distanza_m"), fuori_zona=r.get("fuori_zona") or False,
+        posizione_assente=r.get("posizione_assente") or False,
+        corretta_da_nome=r.get("corretta_da_nome"), motivo_correzione=r.get("motivo_correzione"),
+    )
+
+
+def _giornata(giorno: date, righe: List[dict], oggi: date) -> GiornataOut:
+    """Somma i pezzi ENTRATA→USCITA. Se l'ultima timbratura è un'entrata:
+    oggi si conta fino ad adesso, nei giorni passati la giornata è incompleta
+    (si è dimenticato di timbrare l'uscita) e non entra nel saldo."""
+    righe = sorted(righe, key=lambda r: r["timestamp"])
+    minuti, aperta, incompleta = 0, None, False
+    for r in righe:
+        ts = r["timestamp"]
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        if r["tipo"] == "ENTRATA":
+            if aperta is None:
+                aperta = ts
+        else:
+            if aperta is not None:
+                minuti += max(0, int((ts - aperta).total_seconds() // 60))
+                aperta = None
+    dentro = aperta is not None
+    if dentro:
+        if giorno == oggi:
+            minuti += max(0, int((now_utc() - aperta).total_seconds() // 60))
+        else:
+            incompleta = True
+    return GiornataOut(
+        giorno=giorno.isoformat(), minuti_presenza=minuti, minuti_target=TARGET_MINUTI_GIORNO,
+        differenza=minuti - TARGET_MINUTI_GIORNO, incompleta=incompleta,
+        dentro_adesso=dentro and giorno == oggi,
+        timbrature=[_riga_timbratura(r) for r in righe],
+    )
+
+
+async def _cartellino(worker_id: str, worker_name: str, da: Optional[date] = None) -> CartellinoOut:
+    """Il cartellino di un meccanico. Il bersaglio delle 8h30 vale SOLO nei giorni
+    in cui ha timbrato: chi non viene (sabato di riposo, ferie, malattia) non
+    accumula debito — quella è assenza, non monte ore."""
+    if da:
+        righe = await fetch(
+            "SELECT * FROM timbrature WHERE worker_id=$1 AND giorno>=$2 ORDER BY timestamp ASC",
+            worker_id, da)
+    else:
+        righe = await fetch(
+            "SELECT * FROM timbrature WHERE worker_id=$1 ORDER BY timestamp ASC", worker_id)
+
+    per_giorno: dict = {}
+    for r in righe:
+        per_giorno.setdefault(r["giorno"], []).append(dict(r))
+
+    oggi = _giorno_italiano(now_utc())
+    giornate = [_giornata(g, rs, oggi) for g, rs in sorted(per_giorno.items(), reverse=True)]
+    saldo = sum(g.differenza for g in giornate if not g.incompleta)
+    return CartellinoOut(
+        worker_id=worker_id, worker_name=worker_name, giornate=giornate,
+        saldo_minuti=saldo, giorni_incompleti=sum(1 for g in giornate if g.incompleta),
+    )
+
+
+async def _posizione_officina() -> Optional[dict]:
+    row = await fetchrow("SELECT * FROM officina_posizione WHERE id=1")
+    return dict(row) if row else None
+
+
+@api.post("/timbrature", response_model=Timbratura)
+async def timbra(body: TimbraturaIn, user: dict = Depends(get_current_user)):
+    """Un tocco solo: se sei fuori entri, se sei dentro esci. La posizione viene
+    sempre registrata e, se è lontana dall'officina, la timbratura resta valida
+    ma segnalata — meglio saperlo che bloccare fuori chi ha il GPS ballerino."""
+    ultima = await fetchrow(
+        "SELECT tipo FROM timbrature WHERE worker_id=$1 ORDER BY timestamp DESC LIMIT 1", user["id"])
+    tipo = "USCITA" if (ultima and ultima["tipo"] == "ENTRATA") else "ENTRATA"
+
+    lat, lon = body.lat, body.lon
+    distanza = None
+    fuori = False
+    assente = lat is None or lon is None
+    if not assente:
+        centro = await _posizione_officina()
+        if centro:
+            distanza = _distanza_m(lat, lon, centro["lat"], centro["lon"])
+            fuori = distanza > (centro.get("raggio_m") or RAGGIO_OFFICINA_M)
+
+    ora = now_utc()
+    tid = str(uuid.uuid4())
+    await execute(
+        """INSERT INTO timbrature (id, worker_id, worker_name, tipo, timestamp, giorno,
+               lat, lon, accuracy_m, distanza_m, fuori_zona, posizione_assente, created_at)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)""",
+        tid, user["id"], user["full_name"], tipo, ora, _giorno_italiano(ora),
+        lat, lon, int(body.accuracy_m) if body.accuracy_m is not None else None,
+        distanza, fuori, assente, ora,
+    )
+    if fuori or assente:
+        logger.info(f"timbratura {tipo} di {user['full_name']}: "
+                    f"{'posizione assente' if assente else f'{distanza} m dall officina'}")
+    row = await fetchrow("SELECT * FROM timbrature WHERE id=$1", tid)
+    return _riga_timbratura(dict(row))
+
+
+@api.get("/timbrature/mio-cartellino", response_model=CartellinoOut)
+async def mio_cartellino(giorni: int = 60, user: dict = Depends(get_current_user)):
+    """Il meccanico vede le sue giornate e il suo saldo, senza chiedere a nessuno."""
+    da = _giorno_italiano(now_utc()) - timedelta(days=max(1, min(giorni, 400)))
+    return await _cartellino(user["id"], user["full_name"], da)
+
+
+@api.get("/timbrature/cartellini", response_model=List[CartellinoOut])
+async def cartellini(giorni: int = 30, admin: dict = Depends(require_admin)):
+    """Tutti i cartellini per il titolare: chi è dentro adesso, le giornate, i saldi."""
+    da = _giorno_italiano(now_utc()) - timedelta(days=max(1, min(giorni, 400)))
+    operai = await fetch("SELECT id, full_name FROM users WHERE role='worker' ORDER BY full_name")
+    return [await _cartellino(w["id"], w["full_name"], da) for w in operai]
+
+
+class TimbraturaCorreggiIn(BaseModel):
+    timestamp: Optional[datetime] = None
+    tipo: Optional[Literal["ENTRATA", "USCITA"]] = None
+    motivo: str
+
+
+@api.patch("/timbrature/{timbratura_id}", response_model=Timbratura)
+async def correggi_timbratura(timbratura_id: str, body: TimbraturaCorreggiIn,
+                              admin: dict = Depends(require_admin)):
+    """Il titolare corregge una timbratura sbagliata. Il motivo è obbligatorio e
+    resta scritto: chi ha corretto, quando e perché."""
+    row = await fetchrow("SELECT * FROM timbrature WHERE id=$1", timbratura_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Timbratura non trovata")
+    if not (body.motivo or "").strip():
+        raise HTTPException(status_code=400, detail="Scrivi il motivo della correzione")
+    ts = body.timestamp or row["timestamp"]
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    await execute(
+        """UPDATE timbrature SET timestamp=$1, giorno=$2, tipo=$3,
+               corretta_da=$4, corretta_da_nome=$5, corretta_il=$6, motivo_correzione=$7
+           WHERE id=$8""",
+        ts, _giorno_italiano(ts), body.tipo or row["tipo"],
+        admin["id"], admin["full_name"], now_utc(), body.motivo.strip(), timbratura_id,
+    )
+    return _riga_timbratura(dict(await fetchrow("SELECT * FROM timbrature WHERE id=$1", timbratura_id)))
+
+
+class TimbraturaManualeIn(BaseModel):
+    worker_id: str
+    tipo: Literal["ENTRATA", "USCITA"]
+    timestamp: datetime
+    motivo: str
+
+
+@api.post("/timbrature/manuale", response_model=Timbratura)
+async def timbratura_manuale(body: TimbraturaManualeIn, admin: dict = Depends(require_admin)):
+    """Aggiunge una timbratura mancante (il classico: si è dimenticato di uscire)."""
+    if not (body.motivo or "").strip():
+        raise HTTPException(status_code=400, detail="Scrivi il motivo")
+    w = await fetchrow("SELECT id, full_name FROM users WHERE id=$1", body.worker_id)
+    if not w:
+        raise HTTPException(status_code=404, detail="Meccanico non trovato")
+    ts = body.timestamp if body.timestamp.tzinfo else body.timestamp.replace(tzinfo=timezone.utc)
+    tid = str(uuid.uuid4())
+    await execute(
+        """INSERT INTO timbrature (id, worker_id, worker_name, tipo, timestamp, giorno,
+               posizione_assente, corretta_da, corretta_da_nome, corretta_il, motivo_correzione, created_at)
+           VALUES ($1,$2,$3,$4,$5,$6,TRUE,$7,$8,$9,$10,$11)""",
+        tid, w["id"], w["full_name"], body.tipo, ts, _giorno_italiano(ts),
+        admin["id"], admin["full_name"], now_utc(), body.motivo.strip(), now_utc(),
+    )
+    return _riga_timbratura(dict(await fetchrow("SELECT * FROM timbrature WHERE id=$1", tid)))
+
+
+@api.delete("/timbrature/{timbratura_id}")
+async def elimina_timbratura(timbratura_id: str, admin: dict = Depends(require_admin)):
+    """Toglie una timbratura doppia (due tocchi per sbaglio)."""
+    row = await fetchrow("SELECT id FROM timbrature WHERE id=$1", timbratura_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Timbratura non trovata")
+    await execute("DELETE FROM timbrature WHERE id=$1", timbratura_id)
+    return {"ok": True}
+
+
+class PosizioneOfficinaIn(BaseModel):
+    lat: float
+    lon: float
+    raggio_m: int = RAGGIO_OFFICINA_M
+
+
+class PosizioneOfficinaOut(BaseModel):
+    lat: Optional[float] = None
+    lon: Optional[float] = None
+    raggio_m: int = RAGGIO_OFFICINA_M
+    impostata_da_nome: Optional[str] = None
+    impostata_il: Optional[datetime] = None
+    configurata: bool = False
+
+
+@api.get("/officina/posizione", response_model=PosizioneOfficinaOut)
+async def leggi_posizione_officina(user: dict = Depends(get_current_user)):
+    centro = await _posizione_officina()
+    if not centro:
+        return PosizioneOfficinaOut(configurata=False)
+    return PosizioneOfficinaOut(
+        lat=centro["lat"], lon=centro["lon"], raggio_m=centro["raggio_m"],
+        impostata_da_nome=centro.get("impostata_da_nome"), impostata_il=centro.get("impostata_il"),
+        configurata=True,
+    )
+
+
+@api.post("/officina/posizione", response_model=PosizioneOfficinaOut)
+async def imposta_posizione_officina(body: PosizioneOfficinaIn, admin: dict = Depends(require_admin)):
+    """Il titolare, STANDO IN OFFICINA, fissa qui il centro: da lì si misurano i metri."""
+    ora = now_utc()
+    await execute(
+        """INSERT INTO officina_posizione (id, lat, lon, raggio_m, impostata_da_nome, impostata_il)
+           VALUES (1,$1,$2,$3,$4,$5)
+           ON CONFLICT (id) DO UPDATE SET lat=$1, lon=$2, raggio_m=$3, impostata_da_nome=$4, impostata_il=$5""",
+        body.lat, body.lon, max(50, min(body.raggio_m, 20000)), admin["full_name"], ora,
+    )
+    return await leggi_posizione_officina(admin)
 
 
 def _planning_key(giorno: Optional[str], ora: Optional[str], targa: Optional[str]) -> str:

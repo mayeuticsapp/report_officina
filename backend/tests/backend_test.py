@@ -271,7 +271,9 @@ class TestPlanning:
     OMNIUS_KEY = os.environ.get("OMNIUS_KEY", "")
     APP = {
         "giorno": "2026-08-03", "ora": "09:00", "ora_fine": "11:00", "ponte": "PONTE2",
-        "targa": "TESTPL01AA", "cliente": "TEST Cliente Planning",
+        # targa unica per esecuzione: la chiave del planning e giorno|ora|targa,
+        # con dati fissi il secondo giro trovava la commessa gia creata
+        "targa": f"TESTPL{_run_id[:4].upper()}", "cliente": "TEST Cliente Planning",
         "veicolo": "FORD Fiesta", "nota": "Spia avaria accesa, controllare carburazione",
     }
 
@@ -390,7 +392,9 @@ class TestLiveAndReports:
         }
         o = session.post(f"{API}/work-orders", headers=admin_headers, json=payload).json()
         state["order2_id"] = o["id"]
-        session.post(f"{API}/work-orders/{o['id']}/events", headers=state["worker_headers"], json={"type": "START"})
+        session.post(f"{API}/work-orders/{o['id']}/events", headers=state["worker_headers"],
+                     json={"type": "START", "km": "120000",
+                           "libretto_base64": TestEvents.LIBRETTO_FINTO})
 
         r = session.get(f"{API}/workers/live-status", headers=admin_headers)
         assert r.status_code == 200
@@ -423,18 +427,6 @@ class TestLiveAndReports:
 
 
 # ---------- Cleanup ----------
-class TestZCleanup:
-    def test_cleanup_orders_and_worker(self, session, admin_headers, state):
-        for k in ("order_id", "order2_id"):
-            oid = state.get(k)
-            if oid:
-                session.delete(f"{API}/work-orders/{oid}", headers=admin_headers)
-        wid = state.get("worker_id")
-        if wid:
-            r = session.delete(f"{API}/users/{wid}", headers=admin_headers)
-            assert r.status_code == 200
-
-
 class TestRicercaPerMeccanico:
     """Il titolare cerca il nome del meccanico e vede quali auto ha lui."""
 
@@ -472,3 +464,90 @@ class TestRicercaPerMeccanico:
         r = session.get(f"{API}/work-orders", headers=admin_headers, params={"worker": "non-esiste"})
         assert r.status_code == 200
         assert r.json() == []
+
+
+class TestCartellino:
+    """Timbrature, saldo a recupero, geolocalizzazione registrata ma mai bloccante."""
+
+    OFFICINA = (38.6759, 16.1006)
+    VICINO = (38.6762, 16.1010)      # ~50 m
+    LONTANO = (38.7100, 16.1500)     # ~5 km
+
+    def test_admin_fissa_posizione_officina(self, session, admin_headers):
+        r = session.post(f"{API}/officina/posizione", headers=admin_headers,
+                         json={"lat": self.OFFICINA[0], "lon": self.OFFICINA[1], "raggio_m": 500})
+        assert r.status_code == 200, r.text
+        assert r.json()["configurata"] is True
+
+    def test_operaio_non_puo_fissare_posizione(self, session, state):
+        r = session.post(f"{API}/officina/posizione", headers=state["worker_headers"],
+                         json={"lat": 0, "lon": 0})
+        assert r.status_code == 403
+
+    def test_timbratura_in_officina(self, session, state):
+        r = session.post(f"{API}/timbrature", headers=state["worker_headers"],
+                         json={"lat": self.VICINO[0], "lon": self.VICINO[1], "accuracy_m": 12})
+        assert r.status_code == 200, r.text
+        t = r.json()
+        assert t["tipo"] == "ENTRATA", "la prima timbratura è un'entrata"
+        assert t["fuori_zona"] is False
+        assert t["distanza_m"] < 500
+        state["timbratura_id"] = t["id"]
+
+    def test_timbratura_lontana_accettata_ma_segnalata(self, session, state):
+        r = session.post(f"{API}/timbrature", headers=state["worker_headers"],
+                         json={"lat": self.LONTANO[0], "lon": self.LONTANO[1]})
+        assert r.status_code == 200, "lontano si timbra lo stesso: non si blocca chi ha il GPS ballerino"
+        t = r.json()
+        assert t["tipo"] == "USCITA", "la seconda è un'uscita: il pulsante fa da interruttore"
+        assert t["fuori_zona"] is True
+        assert t["distanza_m"] > 500
+
+    def test_timbratura_senza_posizione_accettata(self, session, state):
+        r = session.post(f"{API}/timbrature", headers=state["worker_headers"], json={})
+        assert r.status_code == 200
+        assert r.json()["posizione_assente"] is True
+
+    def test_mio_cartellino(self, session, state):
+        r = session.get(f"{API}/timbrature/mio-cartellino", headers=state["worker_headers"])
+        assert r.status_code == 200, r.text
+        c = r.json()
+        assert c["worker_id"] == state["worker_id"]
+        assert c["giornate"], "la giornata di oggi deve esserci"
+        assert c["giornate"][0]["minuti_target"] == 510, "8 ore e mezza"
+
+    def test_operaio_non_vede_i_cartellini_di_tutti(self, session, state):
+        r = session.get(f"{API}/timbrature/cartellini", headers=state["worker_headers"])
+        assert r.status_code == 403
+
+    def test_correzione_richiede_motivo(self, session, admin_headers, state):
+        r = session.patch(f"{API}/timbrature/{state['timbratura_id']}", headers=admin_headers,
+                          json={"motivo": ""})
+        assert r.status_code == 400
+
+    def test_correzione_lascia_traccia(self, session, admin_headers, state):
+        r = session.patch(f"{API}/timbrature/{state['timbratura_id']}", headers=admin_headers,
+                          json={"motivo": "aveva timbrato in ritardo"})
+        assert r.status_code == 200, r.text
+        assert r.json()["motivo_correzione"] == "aveva timbrato in ritardo"
+        assert r.json()["corretta_da_nome"]
+
+    def test_timbratura_manuale_senza_motivo_rifiutata(self, session, admin_headers, state):
+        r = session.post(f"{API}/timbrature/manuale", headers=admin_headers, json={
+            "worker_id": state["worker_id"], "tipo": "USCITA",
+            "timestamp": "2026-08-01T16:30:00+00:00", "motivo": ""})
+        assert r.status_code == 400
+
+
+class TestZCleanup:
+    def test_cleanup_orders_and_worker(self, session, admin_headers, state):
+        for k in ("order_id", "order2_id"):
+            oid = state.get(k)
+            if oid:
+                session.delete(f"{API}/work-orders/{oid}", headers=admin_headers)
+        wid = state.get("worker_id")
+        if wid:
+            r = session.delete(f"{API}/users/{wid}", headers=admin_headers)
+            assert r.status_code == 200
+
+

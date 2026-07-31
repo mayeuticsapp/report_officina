@@ -5,10 +5,15 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useRouter } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
-import { api, LiveStatus, WorkOrder } from "@/src/api/client";
+import { api, LiveStatus, WorkOrder, Cartellino, mioCartellino, timbra, fmtDurata } from "@/src/api/client";
 import { useAuth } from "@/src/auth/AuthContext";
 import { useAutoRefresh } from "@/src/hooks/use-auto-refresh";
+import { leggiPosizione } from "@/src/utils/posizione";
+import { showAlert } from "@/src/utils/dialog";
 import { colors, spacing } from "@/src/theme";
+
+const fmtOra = (iso: string) =>
+  new Date(iso).toLocaleTimeString("it-IT", { hour: "2-digit", minute: "2-digit" });
 
 type MyState = {
   status: "working" | "paused" | "idle";
@@ -24,10 +29,17 @@ export default function WorkerHome() {
   const [orders, setOrders] = useState<WorkOrder[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [cart, setCart] = useState<Cartellino | null>(null);
+  const [timbrando, setTimbrando] = useState(false);
+
+  const caricaCartellino = useCallback(async () => {
+    try { setCart(await mioCartellino(60)); } catch (e) { console.warn("cartellino", e); }
+  }, []);
 
   const load = useCallback(async () => {
     if (!user) return;
     try {
+      void caricaCartellino();
       const list = await api<WorkOrder[]>("/work-orders");
       setOrders(list);
 
@@ -56,9 +68,31 @@ export default function WorkerHome() {
       setLoading(false);
       setRefreshing(false);
     }
-  }, [user]);
+  }, [user, caricaCartellino]);
 
   useAutoRefresh(load);
+
+  const oggiIso = new Date().toLocaleDateString("sv-SE");   // AAAA-MM-GG ora locale
+  const oggi = cart?.giornate.find((g) => g.giorno === oggiIso) || null;
+  const dentro = !!oggi?.dentro_adesso;
+
+  const eseguiTimbratura = async () => {
+    setTimbrando(true);
+    try {
+      // la posizione non deve mai bloccare la timbratura: se non arriva, si timbra lo stesso
+      const pos = await leggiPosizione();
+      const t = await timbra(pos);
+      await caricaCartellino();
+      if (t.fuori_zona) {
+        showAlert("Timbratura registrata",
+          `Risulti a ${t.distanza_m} m dall'officina. La timbratura è valida ma il titolare la vede segnalata.`);
+      } else if (t.posizione_assente) {
+        showAlert("Timbratura registrata", "Non sono riuscito a leggere la posizione: la timbratura è valida lo stesso.");
+      }
+    } catch (e: any) {
+      showAlert("Errore", e?.message || "Timbratura non registrata");
+    } finally { setTimbrando(false); }
+  };
 
   useEffect(() => {
     const t = setInterval(() => {
@@ -93,6 +127,44 @@ export default function WorkerHome() {
             <View style={[styles.dot, { backgroundColor: statusColor }]} />
             <Text style={[styles.badgeText, { color: statusColor }]}>{statusLabel}</Text>
           </View>
+        </View>
+
+        {/* Cartellino: entrata/uscita con un tocco solo */}
+        <View style={[styles.cartCard, dentro && styles.cartCardDentro]}>
+          <View style={styles.cartTop}>
+            <View>
+              <Text style={styles.cartLabel}>CARTELLINO</Text>
+              <Text style={styles.cartOggi}>
+                {oggi ? `Oggi ${fmtDurata(oggi.minuti_presenza)} su 8h 30m` : "Oggi non hai ancora timbrato"}
+              </Text>
+            </View>
+            {cart ? (
+              <View style={[styles.saldoBox, cart.saldo_minuti < 0 && styles.saldoBoxNeg]}>
+                <Text style={styles.saldoLabel}>{cart.saldo_minuti >= 0 ? "A TUO FAVORE" : "DA RECUPERARE"}</Text>
+                <Text style={styles.saldoVal}>{fmtDurata(Math.abs(cart.saldo_minuti))}</Text>
+              </View>
+            ) : null}
+          </View>
+          <TouchableOpacity
+            testID="btn-timbra"
+            style={[styles.timbraBtn, dentro ? styles.timbraBtnEsci : styles.timbraBtnEntra, timbrando && { opacity: 0.6 }]}
+            disabled={timbrando}
+            onPress={eseguiTimbratura}
+          >
+            {timbrando ? (
+              <ActivityIndicator color={colors.textInverse} />
+            ) : (
+              <>
+                <Ionicons name={dentro ? "log-out-outline" : "log-in-outline"} size={24} color={colors.textInverse} />
+                <Text style={styles.timbraText}>{dentro ? "ESCO" : "ENTRO"}</Text>
+              </>
+            )}
+          </TouchableOpacity>
+          {oggi?.timbrature.length ? (
+            <Text style={styles.cartTimbrate}>
+              {oggi.timbrature.map((t) => `${t.tipo === "ENTRATA" ? "▸" : "◂"} ${fmtOra(t.timestamp)}`).join("   ")}
+            </Text>
+          ) : null}
         </View>
 
         {/* Current job */}
@@ -165,6 +237,26 @@ function OrderCard({ order, onPress }: { order: WorkOrder; onPress: () => void }
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: colors.bg },
   center: { flex: 1, alignItems: "center", justifyContent: "center", backgroundColor: colors.bg },
+  cartCard: {
+    margin: spacing.lg, marginBottom: 0, padding: spacing.lg,
+    borderWidth: 2, borderColor: colors.borderStrong, backgroundColor: colors.bgMuted,
+  },
+  cartCardDentro: { borderColor: colors.active },
+  cartTop: { flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start" },
+  cartLabel: { fontSize: 11, letterSpacing: 2, fontWeight: "900", color: colors.textSecondary },
+  cartOggi: { fontSize: 15, fontWeight: "700", color: colors.text, marginTop: 4 },
+  saldoBox: { alignItems: "flex-end" },
+  saldoBoxNeg: {},
+  saldoLabel: { fontSize: 9, letterSpacing: 0.8, fontWeight: "800", color: colors.textSecondary },
+  saldoVal: { fontSize: 20, fontWeight: "900", color: colors.text },
+  timbraBtn: {
+    flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 10,
+    paddingVertical: 20, marginTop: spacing.md,
+  },
+  timbraBtnEntra: { backgroundColor: colors.active },
+  timbraBtnEsci: { backgroundColor: colors.stopped },
+  timbraText: { color: colors.textInverse, fontSize: 20, fontWeight: "900", letterSpacing: 4 },
+  cartTimbrate: { fontSize: 12, color: colors.textSecondary, marginTop: 10, letterSpacing: 0.5 },
   header: {
     flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start",
     padding: spacing.lg, borderBottomWidth: 1, borderBottomColor: colors.border,

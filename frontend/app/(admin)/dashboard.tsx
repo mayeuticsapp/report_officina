@@ -44,10 +44,20 @@ export default function Dashboard() {
           <Text style={styles.headerLabel}>DASHBOARD</Text>
           <Text style={styles.headerTitle}>LIVE</Text>
         </View>
-        <TouchableOpacity testID="btn-ask-ai" style={dashAskStyles.btn} onPress={() => router.push("/(admin)/ask" as any)}>
-          <Ionicons name="sparkles" size={18} color={colors.textInverse} />
-          <Text style={dashAskStyles.btnText}>CHIEDI ALL'AI</Text>
-        </TouchableOpacity>
+        <View style={{ flexDirection: "row", gap: 8, alignItems: "center" }}>
+          <TouchableOpacity
+            testID="btn-cartellini"
+            style={dashAskStyles.btnAlt}
+            onPress={() => router.push("/(admin)/cartellini" as any)}
+          >
+            <Ionicons name="time-outline" size={18} color={colors.text} />
+            <Text style={dashAskStyles.btnAltText}>CARTELLINI</Text>
+          </TouchableOpacity>
+          <TouchableOpacity testID="btn-ask-ai" style={dashAskStyles.btn} onPress={() => router.push("/(admin)/ask" as any)}>
+            <Ionicons name="sparkles" size={18} color={colors.textInverse} />
+            <Text style={dashAskStyles.btnText}>CHIEDI ALL'AI</Text>
+          </TouchableOpacity>
+        </View>
       </View>
 
       <ScrollView
@@ -180,4 +190,9 @@ const dashAskStyles = StyleSheet.create({
     backgroundColor: colors.primary, paddingHorizontal: 14, paddingVertical: 12,
   },
   btnText: { color: colors.textInverse, fontWeight: "900", letterSpacing: 1.5, fontSize: 11 },
+  btnAlt: {
+    flexDirection: "row", alignItems: "center", gap: 6,
+    borderWidth: 1, borderColor: colors.borderStrong, paddingHorizontal: 12, paddingVertical: 11,
+  },
+  btnAltText: { color: colors.text, fontWeight: "900", letterSpacing: 1.5, fontSize: 11 },
 });
