@@ -135,7 +135,9 @@ export default function WorkerHome() {
             <View>
               <Text style={styles.cartLabel}>CARTELLINO</Text>
               <Text style={styles.cartOggi}>
-                {oggi ? `Oggi ${fmtDurata(oggi.minuti_presenza)} su 8h 30m` : "Oggi non hai ancora timbrato"}
+                {oggi
+                  ? `Oggi ${fmtDurata(oggi.minuti_presenza)}${oggi.minuti_target ? ` su ${fmtDurata(oggi.minuti_target)}` : ""}`
+                  : "Oggi non hai ancora timbrato"}
               </Text>
             </View>
             {cart ? (

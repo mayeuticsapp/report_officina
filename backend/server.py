@@ -172,11 +172,23 @@ OrderStatus = Literal["pending", "open", "in_progress", "paused", "completed"]
 PLACEHOLDER_VEICOLO = ("", "DA IDENTIFICARE", "VEICOLO DA DEFINIRE", "DA DEFINIRE", "DA INSERIRE")
 
 # ---- Cartellino presenze ----
-# Orario concordato: 8:30–13:00 + 14:30–18:30 = 8 ore e mezza al giorno.
+# Orario concordato con Roberto:
+#   lunedì–venerdì  8:30–13:00 + 14:30–18:30 = 8 ore e mezza  (510 min)
+#   sabato          8:00–13:30               = 5 ore e mezza  (330 min)
+#   domenica        chiuso: chi viene mette tutto a credito   (0 min)
 # Il conto si fa sul TOTALE della giornata, non sulle fasce: così il recupero
 # funziona comunque lo faccia (entrando dopo, uscendo prima a pranzo o la sera).
-TARGET_MINUTI_GIORNO = 510
+TARGET_FERIALE = 510
+TARGET_SABATO = 330
 RAGGIO_OFFICINA_M = 500
+
+
+def _target_minuti(giorno: date) -> int:
+    """Quanto deve fare quel giorno. weekday(): 0=lunedì … 5=sabato, 6=domenica."""
+    g = giorno.weekday()
+    if g == 6:
+        return 0
+    return TARGET_SABATO if g == 5 else TARGET_FERIALE
 PLACEHOLDER_CLIENTE = ("", "DA INSERIRE", "CLIENTE DA DEFINIRE")
 
 
@@ -1122,9 +1134,10 @@ def _giornata(giorno: date, righe: List[dict], oggi: date) -> GiornataOut:
             minuti += max(0, int((now_utc() - aperta).total_seconds() // 60))
         else:
             incompleta = True
+    target = _target_minuti(giorno)
     return GiornataOut(
-        giorno=giorno.isoformat(), minuti_presenza=minuti, minuti_target=TARGET_MINUTI_GIORNO,
-        differenza=minuti - TARGET_MINUTI_GIORNO, incompleta=incompleta,
+        giorno=giorno.isoformat(), minuti_presenza=minuti, minuti_target=target,
+        differenza=minuti - target, incompleta=incompleta,
         dentro_adesso=dentro and giorno == oggi,
         timbrature=[_riga_timbratura(r) for r in righe],
     )

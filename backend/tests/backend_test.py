@@ -514,7 +514,11 @@ class TestCartellino:
         c = r.json()
         assert c["worker_id"] == state["worker_id"]
         assert c["giornate"], "la giornata di oggi deve esserci"
-        assert c["giornate"][0]["minuti_target"] == 510, "8 ore e mezza"
+        # il bersaglio dipende dal giorno: 8h30 dal lunedì al venerdì, 5h30 il sabato,
+        # zero la domenica (chi viene mette tutto a credito)
+        import datetime as _dt
+        atteso = {5: 330, 6: 0}.get(_dt.date.today().weekday(), 510)
+        assert c["giornate"][0]["minuti_target"] == atteso, f"atteso {atteso}"
 
     def test_operaio_non_vede_i_cartellini_di_tutti(self, session, state):
         r = session.get(f"{API}/timbrature/cartellini", headers=state["worker_headers"])
