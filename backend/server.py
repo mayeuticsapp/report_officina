@@ -1161,7 +1161,11 @@ async def _cartellino(worker_id: str, worker_name: str, da: Optional[date] = Non
 
     oggi = _giorno_italiano(now_utc())
     giornate = [_giornata(g, rs, oggi) for g, rs in sorted(per_giorno.items(), reverse=True)]
-    saldo = sum(g.differenza for g in giornate if not g.incompleta)
+    # La giornata IN CORSO non entra nel saldo: altrimenti alle 8:05 uno si vede
+    # otto ore di debito solo perché la giornata è appena cominciata. Entra a fine
+    # giornata, col segno giusto. Fuori anche i giorni senza uscita, da correggere.
+    saldo = sum(g.differenza for g in giornate
+                if not g.incompleta and g.giorno != oggi.isoformat())
     return CartellinoOut(
         worker_id=worker_id, worker_name=worker_name, giornate=giornate,
         saldo_minuti=saldo, giorni_incompleti=sum(1 for g in giornate if g.incompleta),

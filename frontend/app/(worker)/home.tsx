@@ -144,6 +144,7 @@ export default function WorkerHome() {
               <View style={[styles.saldoBox, cart.saldo_minuti < 0 && styles.saldoBoxNeg]}>
                 <Text style={styles.saldoLabel}>{cart.saldo_minuti >= 0 ? "A TUO FAVORE" : "DA RECUPERARE"}</Text>
                 <Text style={styles.saldoVal}>{fmtDurata(Math.abs(cart.saldo_minuti))}</Text>
+                <Text style={styles.saldoNota}>a fine giornata</Text>
               </View>
             ) : null}
           </View>
@@ -251,6 +252,7 @@ const styles = StyleSheet.create({
   saldoBoxNeg: {},
   saldoLabel: { fontSize: 9, letterSpacing: 0.8, fontWeight: "800", color: colors.textSecondary },
   saldoVal: { fontSize: 20, fontWeight: "900", color: colors.text },
+  saldoNota: { fontSize: 9, color: colors.textSecondary },
   timbraBtn: {
     flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 10,
     paddingVertical: 20, marginTop: spacing.md,
