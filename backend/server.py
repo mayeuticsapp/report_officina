@@ -1280,6 +1280,60 @@ async def timbratura_manuale(body: TimbraturaManualeIn, admin: dict = Depends(re
     return _riga_timbratura(dict(await fetchrow("SELECT * FROM timbrature WHERE id=$1", tid)))
 
 
+class GiornataStandardIn(BaseModel):
+    worker_id: str
+    giorno: str          # AAAA-MM-GG
+    motivo: str
+
+
+# Le fasce concordate, per ricostruire una giornata intera in un colpo solo.
+ORARIO_STANDARD = {
+    "feriale": [("ENTRATA", 8, 30), ("USCITA", 13, 0), ("ENTRATA", 14, 30), ("USCITA", 18, 30)],
+    "sabato": [("ENTRATA", 8, 0), ("USCITA", 13, 30)],
+}
+
+
+@api.post("/timbrature/giornata-standard", response_model=List[Timbratura])
+async def timbratura_giornata_standard(body: GiornataStandardIn, admin: dict = Depends(require_admin)):
+    """Il caso vero: l'operaio ha lavorato tutto il giorno ma non è riuscito a
+    entrare nell'app e non ha timbrato niente. Il titolare gli mette la giornata
+    intera con un tocco, sulle fasce concordate."""
+    if not (body.motivo or "").strip():
+        raise HTTPException(status_code=400, detail="Scrivi il motivo")
+    w = await fetchrow("SELECT id, full_name FROM users WHERE id=$1", body.worker_id)
+    if not w:
+        raise HTTPException(status_code=404, detail="Meccanico non trovato")
+    try:
+        giorno = date.fromisoformat(body.giorno)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Data non valida")
+    if giorno.weekday() == 6:
+        raise HTTPException(status_code=400, detail="La domenica non ha un orario standard: aggiungi le timbrature a mano")
+
+    gia = await fetchrow(
+        "SELECT id FROM timbrature WHERE worker_id=$1 AND giorno=$2 LIMIT 1", body.worker_id, giorno)
+    if gia:
+        raise HTTPException(
+            status_code=409,
+            detail="Quel giorno ha già delle timbrature: correggile invece di sovrascrivere la giornata")
+
+    fasce = ORARIO_STANDARD["sabato" if giorno.weekday() == 5 else "feriale"]
+    creati: List[Timbratura] = []
+    ora = now_utc()
+    for tipo, hh, mm in fasce:
+        ts = datetime(giorno.year, giorno.month, giorno.day, hh, mm, tzinfo=FUSO_ITALIA).astimezone(timezone.utc)
+        tid = str(uuid.uuid4())
+        await execute(
+            """INSERT INTO timbrature (id, worker_id, worker_name, tipo, timestamp, giorno,
+                   posizione_assente, corretta_da, corretta_da_nome, corretta_il, motivo_correzione, created_at)
+               VALUES ($1,$2,$3,$4,$5,$6,TRUE,$7,$8,$9,$10,$11)""",
+            tid, w["id"], w["full_name"], tipo, ts, giorno,
+            admin["id"], admin["full_name"], ora, body.motivo.strip(), ora,
+        )
+        creati.append(_riga_timbratura(dict(await fetchrow("SELECT * FROM timbrature WHERE id=$1", tid))))
+    return creati
+
+
 @api.delete("/timbrature/{timbratura_id}")
 async def elimina_timbratura(timbratura_id: str, admin: dict = Depends(require_admin)):
     """Toglie una timbratura doppia (due tocchi per sbaglio)."""

@@ -496,3 +496,18 @@ export function fmtDurata(minuti: number): string {
   const h = Math.floor(m / 60), mm = m % 60;
   return h > 0 ? `${seg}${h}h ${String(mm).padStart(2, "0")}m` : `${seg}${mm}m`;
 }
+
+/** Aggiunge una timbratura mancante (l'operaio non è riuscito a timbrare). */
+export async function timbraturaManuale(body: {
+  worker_id: string; tipo: "ENTRATA" | "USCITA"; timestamp: string; motivo: string;
+}): Promise<Timbratura> {
+  return api<Timbratura>("/timbrature/manuale", { method: "POST", body });
+}
+
+/** Ricostruisce una giornata intera sulle fasce concordate, per chi non ha timbrato nulla. */
+export async function giornataStandard(worker_id: string, giorno: string, motivo: string): Promise<Timbratura[]> {
+  return api<Timbratura[]>("/timbrature/giornata-standard", {
+    method: "POST",
+    body: { worker_id, giorno, motivo },
+  });
+}

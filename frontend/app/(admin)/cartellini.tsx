@@ -9,6 +9,7 @@ import { useRouter } from "expo-router";
 import {
   Cartellino, Giornata, Timbratura, cartellini, correggiTimbratura, eliminaTimbratura,
   fmtDurata, leggiPosizioneOfficina, impostaPosizioneOfficina, PosizioneOfficina,
+  timbraturaManuale, giornataStandard,
 } from "@/src/api/client";
 import { confirmDialog, showAlert } from "@/src/utils/dialog";
 import { leggiPosizione } from "@/src/utils/posizione";
@@ -40,6 +41,13 @@ export default function CartelliniAdmin() {
   const [nuovaOra, setNuovaOra] = useState("");
   const [motivo, setMotivo] = useState("");
   const [salvando, setSalvando] = useState(false);
+
+  // aggiunta di timbrature mai fatte (l'operaio non è riuscito a timbrare)
+  const [aggiungi, setAggiungi] = useState<Cartellino | null>(null);
+  const [aData, setAData] = useState("");
+  const [aTipo, setATipo] = useState<"ENTRATA" | "USCITA">("ENTRATA");
+  const [aOra, setAOra] = useState("");
+  const [aMotivo, setAMotivo] = useState("");
 
   const load = useCallback(async () => {
     try {
@@ -99,6 +107,71 @@ export default function CartelliniAdmin() {
       await load();
     } catch (e: any) {
       showAlert("Errore", e?.message || "Correzione non salvata");
+    } finally { setSalvando(false); }
+  };
+
+  const apriAggiunta = (c: Cartellino) => {
+    setAggiungi(c);
+    setAData(new Date().toLocaleDateString("sv-SE"));   // oggi, AAAA-MM-GG
+    setATipo("ENTRATA");
+    setAOra("");
+    setAMotivo("");
+  };
+
+  const salvaAggiunta = async () => {
+    if (!aggiungi) return;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(aData)) {
+      showAlert("Data non valida", "Scrivi la data come 2026-08-01");
+      return;
+    }
+    if (!aMotivo.trim()) {
+      showAlert("Serve il motivo", "Scrivi perché la stai aggiungendo: resta scritto nel cartellino.");
+      return;
+    }
+    const m = aOra.match(/^(\d{1,2})[:.](\d{2})$/);
+    if (!m) {
+      showAlert("Ora non valida", "Scrivi l'ora come 08:30");
+      return;
+    }
+    setSalvando(true);
+    try {
+      const [aa, mm, gg] = aData.split("-").map(Number);
+      const d = new Date(aa, mm - 1, gg, parseInt(m[1], 10), parseInt(m[2], 10), 0, 0);
+      await timbraturaManuale({
+        worker_id: aggiungi.worker_id, tipo: aTipo,
+        timestamp: d.toISOString(), motivo: aMotivo.trim(),
+      });
+      setAggiungi(null);
+      await load();
+    } catch (e: any) {
+      showAlert("Errore", e?.message || "Timbratura non aggiunta");
+    } finally { setSalvando(false); }
+  };
+
+  const salvaGiornataIntera = async () => {
+    if (!aggiungi) return;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(aData)) {
+      showAlert("Data non valida", "Scrivi la data come 2026-08-01");
+      return;
+    }
+    if (!aMotivo.trim()) {
+      showAlert("Serve il motivo", "Scrivi perché la stai inserendo: es. non è riuscito a entrare nell'app.");
+      return;
+    }
+    const ok = await confirmDialog(
+      "Giornata intera",
+      `Inserire a ${aggiungi.worker_name} la giornata del ${aData} sull'orario concordato?`,
+      "Inserisci",
+    );
+    if (!ok) return;
+    setSalvando(true);
+    try {
+      const creati = await giornataStandard(aggiungi.worker_id, aData, aMotivo.trim());
+      setAggiungi(null);
+      await load();
+      showAlert("Fatto", `Inserite ${creati.length} timbrature sull'orario concordato.`);
+    } catch (e: any) {
+      showAlert("Errore", e?.message || "Giornata non inserita");
     } finally { setSalvando(false); }
   };
 
@@ -193,15 +266,113 @@ export default function CartelliniAdmin() {
                 <Ionicons name={espanso ? "chevron-up" : "chevron-down"} size={20} color={colors.textSecondary} />
               </TouchableOpacity>
 
-              {espanso && (c.giornate.length === 0 ? (
-                <Text style={styles.vuoto}>Nessuna timbratura negli ultimi 30 giorni.</Text>
-              ) : c.giornate.map((g) => (
-                <GiornataRiga key={g.giorno} g={g} onCorreggi={apriCorrezione} onElimina={elimina} />
-              )))}
+              {espanso && (
+                <>
+                  <TouchableOpacity
+                    testID={`btn-aggiungi-${c.worker_id}`}
+                    style={styles.aggiungiBtn}
+                    onPress={() => apriAggiunta(c)}
+                  >
+                    <Ionicons name="add-circle-outline" size={18} color={colors.text} />
+                    <Text style={styles.aggiungiText}>NON HA TIMBRATO? AGGIUNGI TU</Text>
+                  </TouchableOpacity>
+                  {c.giornate.length === 0 ? (
+                    <Text style={styles.vuoto}>Nessuna timbratura negli ultimi 30 giorni.</Text>
+                  ) : c.giornate.map((g) => (
+                    <GiornataRiga key={g.giorno} g={g} onCorreggi={apriCorrezione} onElimina={elimina} />
+                  ))}
+                </>
+              )}
             </View>
           );
         })}
       </ScrollView>
+
+      {/* Aggiunta di timbrature mai fatte */}
+      <Modal visible={!!aggiungi} transparent animationType="slide" onRequestClose={() => setAggiungi(null)}>
+        <View style={styles.mBackdrop}>
+          <View style={styles.mSheet}>
+            <View style={styles.mHeader}>
+              <Text style={styles.mTitle}>AGGIUNGI TIMBRATURA</Text>
+              <TouchableOpacity onPress={() => setAggiungi(null)}>
+                <Ionicons name="close" size={26} color={colors.text} />
+              </TouchableOpacity>
+            </View>
+            <ScrollView contentContainerStyle={{ padding: spacing.lg }} keyboardShouldPersistTaps="handled">
+              <Text style={styles.mSub}>{aggiungi?.worker_name}</Text>
+
+              <Text style={styles.label}>GIORNO</Text>
+              <TextInput
+                testID="input-data-aggiunta"
+                style={styles.motivoInput}
+                value={aData}
+                onChangeText={setAData}
+                placeholder="2026-08-01"
+                placeholderTextColor={colors.textSecondary}
+              />
+
+              <Text style={[styles.label, { marginTop: spacing.md }]}>MOTIVO (obbligatorio)</Text>
+              <TextInput
+                testID="input-motivo-aggiunta"
+                style={styles.motivoInput}
+                value={aMotivo}
+                onChangeText={setAMotivo}
+                placeholder="es. non è riuscito a entrare nell'app"
+                placeholderTextColor={colors.textSecondary}
+              />
+
+              {/* La scorciatoia per il caso più comune */}
+              <TouchableOpacity
+                testID="btn-giornata-intera"
+                style={[styles.giornataBtn, salvando && { opacity: 0.6 }]}
+                disabled={salvando}
+                onPress={salvaGiornataIntera}
+              >
+                <Ionicons name="calendar" size={18} color={colors.textInverse} />
+                <Text style={styles.giornataText}>INSERISCI LA GIORNATA INTERA</Text>
+              </TouchableOpacity>
+              <Text style={styles.giornataNota}>
+                Mette l&apos;orario concordato: 8:30–13:00 e 14:30–18:30, il sabato 8:00–13:30.
+              </Text>
+
+              <View style={styles.separatore}>
+                <View style={styles.linea} />
+                <Text style={styles.separatoreText}>oppure una timbratura sola</Text>
+                <View style={styles.linea} />
+              </View>
+
+              <View style={styles.tipoRow}>
+                {(["ENTRATA", "USCITA"] as const).map((t) => (
+                  <TouchableOpacity
+                    key={t}
+                    testID={`tipo-${t}`}
+                    style={[styles.tipoChip, aTipo === t && styles.tipoChipOn]}
+                    onPress={() => setATipo(t)}
+                  >
+                    <Text style={[styles.tipoChipText, aTipo === t && styles.tipoChipTextOn]}>{t}</Text>
+                  </TouchableOpacity>
+                ))}
+                <TextInput
+                  testID="input-ora-aggiunta"
+                  style={styles.oraPiccola}
+                  value={aOra}
+                  onChangeText={setAOra}
+                  placeholder="08:30"
+                  placeholderTextColor={colors.textSecondary}
+                />
+              </View>
+              <TouchableOpacity
+                testID="btn-salva-aggiunta"
+                style={[styles.salvaBtn, salvando && { opacity: 0.6 }]}
+                disabled={salvando}
+                onPress={salvaAggiunta}
+              >
+                {salvando ? <ActivityIndicator color={colors.textInverse} /> : <Text style={styles.salvaText}>AGGIUNGI</Text>}
+              </TouchableOpacity>
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
 
       {/* Correzione timbratura */}
       <Modal visible={!!correggi} transparent animationType="slide" onRequestClose={() => setCorreggi(null)}>
@@ -380,6 +551,31 @@ const styles = StyleSheet.create({
   motivoInput: {
     borderWidth: 1, borderColor: colors.borderStrong, paddingHorizontal: 12, paddingVertical: 12,
     fontSize: 15, color: colors.text, marginTop: 6, minHeight: 48,
+  },
+  aggiungiBtn: {
+    flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 6,
+    borderTopWidth: 1, borderTopColor: colors.border, paddingVertical: 12,
+  },
+  aggiungiText: { fontSize: 11, fontWeight: "900", letterSpacing: 1, color: colors.text },
+  giornataBtn: {
+    flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8,
+    backgroundColor: colors.active, paddingVertical: 16, marginTop: spacing.lg,
+  },
+  giornataText: { color: colors.textInverse, fontWeight: "900", letterSpacing: 1.5, fontSize: 13 },
+  giornataNota: { fontSize: 11, color: colors.textSecondary, marginTop: 6, textAlign: "center" },
+  separatore: { flexDirection: "row", alignItems: "center", gap: 8, marginVertical: spacing.lg },
+  linea: { flex: 1, height: 1, backgroundColor: colors.border },
+  separatoreText: { fontSize: 11, color: colors.textSecondary },
+  tipoRow: { flexDirection: "row", alignItems: "center", gap: 8 },
+  tipoChip: {
+    paddingHorizontal: 12, paddingVertical: 12, borderWidth: 1, borderColor: colors.border,
+  },
+  tipoChipOn: { backgroundColor: colors.text, borderColor: colors.text },
+  tipoChipText: { fontSize: 11, fontWeight: "900", letterSpacing: 1, color: colors.text },
+  tipoChipTextOn: { color: colors.textInverse },
+  oraPiccola: {
+    flex: 1, borderWidth: 2, borderColor: colors.borderStrong, paddingHorizontal: 12, paddingVertical: 10,
+    fontSize: 18, fontWeight: "900", color: colors.text, textAlign: "center", minHeight: 46,
   },
   salvaBtn: { backgroundColor: colors.text, paddingVertical: 18, alignItems: "center", marginTop: spacing.lg },
   salvaText: { color: colors.textInverse, fontWeight: "900", letterSpacing: 3, fontSize: 14 },
