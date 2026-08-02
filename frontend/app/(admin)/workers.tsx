@@ -68,6 +68,22 @@ export default function WorkersAdmin() {
     finally { setSubmitting(false); }
   };
 
+  const cambiaCartellino = async (u: User) => {
+    const attivo = u.cartellino_attivo !== false;
+    const ok = await confirmDialog(
+      attivo ? "Togliere il cartellino?" : "Rimettere il cartellino?",
+      attivo
+        ? `${u.full_name} non vedrà più il pulsante ENTRO/ESCO e non comparirà nei cartellini.`
+        : `${u.full_name} tornerà a timbrare entrata e uscita.`,
+      attivo ? "Togli" : "Rimetti",
+    );
+    if (!ok) return;
+    try {
+      await api(`/users/${u.id}`, { method: "PUT", body: { cartellino_attivo: !attivo } });
+      await load();
+    } catch (e: any) { showAlert("Errore", e.message); }
+  };
+
   const remove = async (u: User) => {
     const ok = await confirmDialog("Elimina utente", `Eliminare ${u.full_name}?`, "Elimina");
     if (!ok) return;
@@ -100,6 +116,22 @@ export default function WorkersAdmin() {
               <View style={{ flex: 1 }}>
                 <Text style={styles.name}>{u.full_name}</Text>
                 <Text style={styles.meta}>@{u.username} · {u.role === "admin" ? "Amministratore" : "Operaio"}</Text>
+                {u.role === "worker" ? (
+                  <TouchableOpacity
+                    testID={`btn-cartellino-${u.id}`}
+                    style={styles.cartRow}
+                    onPress={() => cambiaCartellino(u)}
+                  >
+                    <Ionicons
+                      name={u.cartellino_attivo === false ? "square-outline" : "checkbox"}
+                      size={16}
+                      color={u.cartellino_attivo === false ? colors.textSecondary : colors.active}
+                    />
+                    <Text style={[styles.cartText, u.cartellino_attivo === false && { color: colors.textSecondary }]}>
+                      {u.cartellino_attivo === false ? "Non timbra il cartellino" : "Timbra il cartellino"}
+                    </Text>
+                  </TouchableOpacity>
+                ) : null}
               </View>
               <TouchableOpacity testID={`btn-edit-${u.id}`} style={styles.iconBtn} onPress={() => openEdit(u)}>
                 <Ionicons name="create-outline" size={20} color={colors.text} />
@@ -173,6 +205,8 @@ const styles = StyleSheet.create({
   addBtnText: { color: colors.textInverse, fontWeight: "900", letterSpacing: 2, fontSize: 12 },
   card: { flexDirection: "row", alignItems: "center", borderWidth: 1, borderColor: colors.border, padding: spacing.md, marginBottom: 8, gap: 8 },
   name: { fontSize: 15, fontWeight: "800", color: colors.text },
+  cartRow: { flexDirection: "row", alignItems: "center", gap: 6, marginTop: 6 },
+  cartText: { fontSize: 12, fontWeight: "700", color: colors.text },
   meta: { fontSize: 12, color: colors.textSecondary, marginTop: 2 },
   iconBtn: { width: 40, height: 40, alignItems: "center", justifyContent: "center", borderWidth: 1, borderColor: colors.border },
   mBackdrop: { flex: 1, backgroundColor: "rgba(0,0,0,0.5)", justifyContent: "flex-end" },

@@ -54,6 +54,8 @@ export type User = {
   full_name: string;
   role: Role;
   created_at: string;
+  /** false = questo utente non timbra il cartellino e non lo vede */
+  cartellino_attivo?: boolean;
 };
 
 export type WorkOrder = {

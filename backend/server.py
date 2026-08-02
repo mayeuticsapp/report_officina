@@ -142,7 +142,7 @@ async def _user_from_token(token: Optional[str]) -> dict:
     except jwt.InvalidTokenError:
         raise HTTPException(status_code=401, detail="Token non valido")
     user = await fetchrow(
-        "SELECT id, username, full_name, role, created_at FROM users WHERE id=$1",
+        "SELECT id, username, full_name, role, created_at, cartellino_attivo FROM users WHERE id=$1",
         payload["sub"]
     )
     if not user:
@@ -239,6 +239,8 @@ class UserPublic(BaseModel):
     full_name: str
     role: Role
     created_at: datetime
+    # chi non timbra il cartellino (es. chi ha un accordo diverso) non lo vede proprio
+    cartellino_attivo: bool = True
 
 
 class UserCreate(BaseModel):
@@ -252,6 +254,7 @@ class UserUpdate(BaseModel):
     full_name: Optional[str] = None
     password: Optional[str] = None
     role: Optional[Role] = None
+    cartellino_attivo: Optional[bool] = None
 
 
 class LoginIn(BaseModel):
@@ -663,6 +666,8 @@ async def startup():
                 impostata_il TIMESTAMPTZ
             )
         """)
+        await conn.execute(
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS cartellino_attivo BOOLEAN NOT NULL DEFAULT TRUE")
         await conn.execute("ALTER TABLE work_events ADD COLUMN IF NOT EXISTS km TEXT")
         await conn.execute("ALTER TABLE work_events ADD COLUMN IF NOT EXISTS km_deferred_reason TEXT")
         await conn.execute("""
@@ -751,7 +756,8 @@ async def login(body: LoginIn):
     if not user or not verify_password(body.password, user["password_hash"]):
         raise HTTPException(status_code=401, detail="Credenziali non valide")
     token = create_token(user["id"], user["username"], user["role"])
-    public = UserPublic(**{k: user[k] for k in ("id", "username", "full_name", "role", "created_at")})
+    public = UserPublic(**{k: user[k] for k in ("id", "username", "full_name", "role", "created_at")},
+                        cartellino_attivo=user.get("cartellino_attivo", True))
     return LoginOut(token=token, user=public)
 
 
@@ -779,7 +785,8 @@ async def me(user: dict = Depends(get_current_user)):
 # ---- Users (admin only) ----
 @api.get("/users", response_model=List[UserPublic])
 async def list_users(user: dict = Depends(require_admin)):
-    rows = await fetch("SELECT id, username, full_name, role, created_at FROM users ORDER BY created_at DESC LIMIT 500")
+    rows = await fetch("SELECT id, username, full_name, role, created_at, cartellino_attivo "
+                       "FROM users ORDER BY created_at DESC LIMIT 500")
     return [UserPublic(**r) for r in rows]
 
 
@@ -808,11 +815,14 @@ async def update_user(user_id: str, body: UserUpdate, admin: dict = Depends(requ
         parts.append(f"password_hash=${i}"); vals.append(hash_password(body.password)); i += 1
     if body.role is not None:
         parts.append(f"role=${i}"); vals.append(body.role); i += 1
+    if body.cartellino_attivo is not None:
+        parts.append(f"cartellino_attivo=${i}"); vals.append(body.cartellino_attivo); i += 1
     if not parts:
         raise HTTPException(status_code=400, detail="Nessun campo da aggiornare")
     vals.append(user_id)
     row = await fetchrow(
-        f"UPDATE users SET {', '.join(parts)} WHERE id=${i} RETURNING id, username, full_name, role, created_at",
+        f"UPDATE users SET {', '.join(parts)} WHERE id=${i} "
+        f"RETURNING id, username, full_name, role, created_at, cartellino_attivo",
         *vals
     )
     if not row:
@@ -1182,6 +1192,8 @@ async def timbra(body: TimbraturaIn, user: dict = Depends(get_current_user)):
     """Un tocco solo: se sei fuori entri, se sei dentro esci. La posizione viene
     sempre registrata e, se è lontana dall'officina, la timbratura resta valida
     ma segnalata — meglio saperlo che bloccare fuori chi ha il GPS ballerino."""
+    if not user.get("cartellino_attivo", True):
+        raise HTTPException(status_code=403, detail="Il cartellino non è attivo per questo utente")
     ultima = await fetchrow(
         "SELECT tipo FROM timbrature WHERE worker_id=$1 ORDER BY timestamp DESC LIMIT 1", user["id"])
     tipo = "USCITA" if (ultima and ultima["tipo"] == "ENTRATA") else "ENTRATA"
@@ -1224,7 +1236,8 @@ async def mio_cartellino(giorni: int = 60, user: dict = Depends(get_current_user
 async def cartellini(giorni: int = 30, admin: dict = Depends(require_admin)):
     """Tutti i cartellini per il titolare: chi è dentro adesso, le giornate, i saldi."""
     da = _giorno_italiano(now_utc()) - timedelta(days=max(1, min(giorni, 400)))
-    operai = await fetch("SELECT id, full_name FROM users WHERE role='worker' ORDER BY full_name")
+    operai = await fetch(
+        "SELECT id, full_name FROM users WHERE role='worker' AND cartellino_attivo ORDER BY full_name")
     return [await _cartellino(w["id"], w["full_name"], da) for w in operai]
 
 

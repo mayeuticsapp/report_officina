@@ -129,8 +129,8 @@ export default function WorkerHome() {
           </View>
         </View>
 
-        {/* Cartellino: entrata/uscita con un tocco solo */}
-        <View style={[styles.cartCard, dentro && styles.cartCardDentro]}>
+        {/* Cartellino: entrata/uscita con un tocco solo (nascosto a chi non timbra) */}
+        {user?.cartellino_attivo !== false && <View style={[styles.cartCard, dentro && styles.cartCardDentro]}>
           <View style={styles.cartTop}>
             <View>
               <Text style={styles.cartLabel}>CARTELLINO</Text>
@@ -168,7 +168,7 @@ export default function WorkerHome() {
               {oggi.timbrature.map((t) => `${t.tipo === "ENTRATA" ? "▸" : "◂"} ${fmtOra(t.timestamp)}`).join("   ")}
             </Text>
           ) : null}
-        </View>
+        </View>}
 
         {/* Current job */}
         {myState.order ? (
