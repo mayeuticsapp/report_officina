@@ -205,8 +205,40 @@ SYSTEM_PHOTO_CAPTION = (
 
 # Il libretto non è una foto qualsiasi: è la carta d'identità della macchina, e
 # quello che c'è scritto lì batte qualsiasi cosa il modello creda di sapere.
-# Con la descrizione generica veniva fuori "si vede il bollo in alto a destra",
-# inutile. Qui si chiedono i campi che servono al meccanico.
+#
+# Si legge in DUE passaggi, e il motivo è pratico: la carta di circolazione è un
+# foglio piegato, fitto, coi valori identificati da sigle — (D.2), (P.3), (V.9).
+# Il modello che "guarda" le immagini descrive bene una scena ma sbaglia
+# l'allineamento tra sigla e valore (una volta ha messo il telaio nella casella
+# del codice motore). Quindi: prima l'OCR trascrive TUTTO il documento — è il suo
+# mestiere — poi il modello di testo pesca i campi dal testo, dove "(P.3) METANO"
+# è inequivocabile perché sigla e valore sono attaccati.
+SYSTEM_LIBRETTO_CAMPI = (
+    "Ricevi la TRASCRIZIONE GREZZA di una carta di circolazione italiana, ottenuta con l'OCR. "
+    "Devi estrarre i campi del veicolo. Nelle carte italiane i valori sono identificati da sigle "
+    "tra parentesi: (A) targa, (B) data immatricolazione, (D.1) marca, (D.2) tipo/variante/versione, "
+    "(D.3) modello commerciale, (E) numero di telaio, (F.2) massa massima, (G) massa in ordine di "
+    "marcia, (J) categoria, (P.1) cilindrata cm³, (P.2) potenza kW, (P.3) alimentazione, "
+    "(S.1) numero posti, (V.9) classe ambientale (Euro).\n"
+    "Rispondi SOLO con questo JSON, senza testo intorno:\n"
+    "{\n"
+    '  "targa": "…", "marca": "…", "modello": "…", "alimentazione": "…",\n'
+    '  "codice_motore": "…", "cilindrata_cc": "…", "potenza_kw": "…",\n'
+    '  "classe_euro": "…", "pneumatici": "…", "massa_max_kg": "…", "posti": "…",\n'
+    '  "immatricolazione": "…", "telaio": "…", "intestatario": "…"\n'
+    "}\n"
+    "REGOLE FERREE:\n"
+    "1. Ogni campo che non riesci a leggere con sicurezza va messo a null. MAI indovinare, "
+    "mai dedurre dal modello: qui i dati servono a decidere che olio mettere in un motore.\n"
+    "2. NON confondere le caselle. Il TELAIO (E) è una sigla di 17 caratteri che comincia con la "
+    "sigla del costruttore (WV, ZFA, VF…): non va mai messo in codice_motore. Il CODICE MOTORE, "
+    "quando c'è, è una sigla corta (K9K, H4D, AFC, N47…) e spesso sta dentro (D.2).\n"
+    "3. ALIMENTAZIONE è il campo più importante: benzina, gasolio, GPL, metano, ibrida, elettrica. "
+    "Sta in (P.3). Se non si legge, null — non dedurla dal modello dell'auto.\n"
+    "4. I numeri vanno riportati come stanno scritti, senza convertirli."
+)
+
+# Fallback: se l'OCR non è disponibile si torna al modello che guarda le foto.
 SYSTEM_LIBRETTO = (
     "Stai leggendo la CARTA DI CIRCOLAZIONE (libretto) di un veicolo, fotografata in officina. "
     "Il tuo compito è TRASCRIVERE i dati, non descrivere la foto.\n"
@@ -236,6 +268,68 @@ async def describe_image(data_url: str, kind: Optional[str] = None) -> str:
         max_tokens=250 if kind == "libretto" else 120,
     )
     return (resp.choices[0].message.content or "").strip()
+
+
+ETICHETTE_LIBRETTO = [
+    ("targa", ""), ("marca", ""), ("modello", ""), ("alimentazione", ""),
+    ("codice_motore", "motore"), ("cilindrata_cc", "cm³"), ("potenza_kw", "kW"),
+    ("classe_euro", ""), ("pneumatici", "gomme"), ("massa_max_kg", "kg max"),
+    ("posti", "posti"), ("immatricolazione", "imm."), ("telaio", "telaio"),
+]
+
+
+def libretto_in_riga(campi: dict) -> str:
+    """Dai campi estratti costruisce la riga leggibile che finisce sotto la foto
+    e nel contesto dell'assistente."""
+    pezzi = []
+    for chiave, etichetta in ETICHETTE_LIBRETTO:
+        v = campi.get(chiave)
+        if v is None or str(v).strip() in ("", "null", "None"):
+            continue
+        v = str(v).strip()
+        pezzi.append(f"{etichetta} {v}".strip() if etichetta else v)
+    if not campi.get("alimentazione"):
+        pezzi.append("alimentazione NON leggibile")
+    return "LIBRETTO: " + " · ".join(pezzi) if pezzi else "LIBRETTO: non leggibile"
+
+
+async def leggi_libretto(data_url: str) -> tuple[dict, str]:
+    """Carta di circolazione -> (campi strutturati, riga leggibile).
+    Due passaggi: OCR trascrive tutto il documento, poi il modello di testo pesca
+    i campi. Se l'OCR fallisce si ripiega sul modello che guarda le immagini."""
+    import json as _json
+    testo = ""
+    try:
+        testo = await ocr_image(data_url)
+    except Exception:
+        testo = ""
+    if testo.strip():
+        resp = await _client.chat.complete_async(
+            model=TEXT_MODEL,
+            messages=[{"role": "system", "content": SYSTEM_LIBRETTO_CAMPI},
+                      {"role": "user", "content": testo[:12000]}],
+            response_format={"type": "json_object"},
+            max_tokens=600,
+        )
+        try:
+            campi = _json.loads(resp.choices[0].message.content or "{}")
+            if isinstance(campi, dict):
+                riga = libretto_in_riga(campi)
+                # L'ALIMENTAZIONE è il campo che non possiamo permetterci di perdere:
+                # su una carta piegata l'OCR a volte manca la casella (P.3) mentre
+                # l'occhio che guarda la foto la legge. Se manca, si chiede anche a lui.
+                if not campi.get("alimentazione"):
+                    try:
+                        dalla_foto = await describe_image(data_url, kind="libretto")
+                        if dalla_foto:
+                            riga += f"\nDalla foto: {dalla_foto.replace('LIBRETTO: ', '')}"
+                    except Exception:
+                        pass
+                return campi, riga
+        except Exception:
+            pass
+    # niente OCR: si torna a guardare la foto
+    return {}, await describe_image(data_url, kind="libretto")
 
 
 async def transcribe(content: bytes, filename: str) -> str:

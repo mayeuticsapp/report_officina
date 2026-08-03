@@ -615,6 +615,8 @@ async def startup():
         await conn.execute("ALTER TABLE order_photos ADD COLUMN IF NOT EXISTS caption TEXT")
         # Tipo di foto: "libretto" è quella obbligatoria all'inizio del lavoro
         await conn.execute("ALTER TABLE order_photos ADD COLUMN IF NOT EXISTS kind TEXT")
+        # campi del libretto estratti dall'OCR (alimentazione, motore, euro, gomme…)
+        await conn.execute("ALTER TABLE order_photos ADD COLUMN IF NOT EXISTS dati JSONB")
         # Messaggi commessa (admin <-> operai) + notifiche push
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS order_messages (
@@ -1928,6 +1930,7 @@ class OrderPhoto(BaseModel):
     size_bytes: int
     created_at: datetime
     caption: Optional[str] = None
+    dati: Optional[dict] = None  # campi del libretto estratti dall'OCR
     kind: Optional[str] = None  # "libretto" per la foto del libretto scattata su INIZIA
 
 
@@ -1960,9 +1963,15 @@ async def _caption_photo(photo_id: str, data: bytes, content_type: str, kind: Op
     Così anche 'Chiedi all'AI' del titolare sa cosa c'è nelle foto senza rimandarle."""
     try:
         data_url = f"data:{content_type};base64,{base64.b64encode(data).decode()}"
-        caption = await ai.describe_image(data_url, kind=kind)
+        if kind == "libretto":
+            campi, caption = await ai.leggi_libretto(data_url)
+            if campi:
+                await execute("UPDATE order_photos SET dati=$1::jsonb WHERE id=$2",
+                              json.dumps(campi), photo_id)
+        else:
+            caption = await ai.describe_image(data_url, kind=kind)
         if caption:
-            await execute("UPDATE order_photos SET caption=$1 WHERE id=$2", caption[:500], photo_id)
+            await execute("UPDATE order_photos SET caption=$1 WHERE id=$2", caption[:800], photo_id)
             logger.info(f"didascalia foto {photo_id}: {caption[:60]}")
     except Exception as e:
         logger.warning(f"didascalia foto fallita per {photo_id}: {e}")
@@ -2043,7 +2052,14 @@ async def list_order_photos(order_id: str, user: dict = Depends(get_current_user
     rows = await fetch(
         "SELECT * FROM order_photos WHERE work_order_id=$1 ORDER BY created_at DESC", order_id
     )
-    return [OrderPhoto(**dict(r)) for r in rows]
+    out = []
+    for r in rows:
+        d = dict(r)
+        if isinstance(d.get("dati"), str):
+            try: d["dati"] = json.loads(d["dati"])
+            except Exception: d["dati"] = None
+        out.append(OrderPhoto(**d))
+    return out
 
 
 @api.get("/photos/{photo_id}/file")

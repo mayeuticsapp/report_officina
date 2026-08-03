@@ -345,6 +345,8 @@ export type OrderPhoto = {
   caption?: string | null;
   /** "libretto" = la foto obbligatoria scattata all'inizio del lavoro */
   kind?: string | null;
+  /** campi del libretto estratti dall'OCR: alimentazione, motore, euro, gomme… */
+  dati?: Record<string, string | null> | null;
 };
 
 export async function listOrderPhotos(orderId: string): Promise<OrderPhoto[]> {
