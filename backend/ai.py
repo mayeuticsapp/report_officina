@@ -235,7 +235,11 @@ SYSTEM_LIBRETTO_CAMPI = (
     "quando c'è, è una sigla corta (K9K, H4D, AFC, N47…) e spesso sta dentro (D.2).\n"
     "3. ALIMENTAZIONE è il campo più importante: benzina, gasolio, GPL, metano, ibrida, elettrica. "
     "Sta in (P.3). Se non si legge, null — non dedurla dal modello dell'auto.\n"
-    "4. I numeri vanno riportati come stanno scritti, senza convertirli."
+    "4. I numeri vanno riportati come stanno scritti, senza convertirli.\n"
+    "5. INTESTATARIO: SOLO nome e cognome (o la ragione sociale, se è un'azienda). "
+    "MAI indirizzo, MAI data e luogo di nascita, MAI codice fiscale: sono dati personali che "
+    "non servono a riparare un'auto e non devono finire in giro. Se leggi solo l'indirizzo e "
+    "non il nome, metti null."
 )
 
 # Fallback: se l'OCR non è disponibile si torna al modello che guarda le foto.
@@ -275,6 +279,7 @@ ETICHETTE_LIBRETTO = [
     ("codice_motore", "motore"), ("cilindrata_cc", "cm³"), ("potenza_kw", "kW"),
     ("classe_euro", ""), ("pneumatici", "gomme"), ("massa_max_kg", "kg max"),
     ("posti", "posti"), ("immatricolazione", "imm."), ("telaio", "telaio"),
+    ("intestatario", "intestato a"),
 ]
 
 
