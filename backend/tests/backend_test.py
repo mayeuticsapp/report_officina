@@ -545,8 +545,12 @@ class TestCartellino:
     def test_giornata_intera_per_chi_non_ha_timbrato(self, session, admin_headers, state):
         """Il caso vero: l'operaio ha lavorato ma non e riuscito a entrare nell'app."""
         import datetime as _dt
-        # un lunedi qualsiasi, cosi il bersaglio e quello feriale
-        g = _dt.date(2026, 8, 3)
+        # un giorno FERIALE nel passato: date fisse finivano per cadere "oggi",
+        # dove i test precedenti hanno gia timbrato -> 409
+        g = _dt.date.today() - _dt.timedelta(days=30)
+        while g.weekday() >= 5:
+            g -= _dt.timedelta(days=1)
+        state["giorno_standard"] = g
         r = session.post(f"{API}/timbrature/giornata-standard", headers=admin_headers, json={
             "worker_id": state["worker_id"], "giorno": g.isoformat(),
             "motivo": "non e riuscito a entrare nell'app"})
@@ -565,13 +569,16 @@ class TestCartellino:
     def test_giornata_intera_non_sovrascrive(self, session, admin_headers, state):
         import datetime as _dt
         r = session.post(f"{API}/timbrature/giornata-standard", headers=admin_headers, json={
-            "worker_id": state["worker_id"], "giorno": _dt.date(2026, 8, 3).isoformat(),
+            "worker_id": state["worker_id"], "giorno": state["giorno_standard"].isoformat(),
             "motivo": "secondo tentativo"})
         assert r.status_code == 409, "quel giorno ha gia le timbrature: non si sovrascrive"
 
     def test_giornata_intera_sabato_e_piu_corta(self, session, admin_headers, state):
         import datetime as _dt
-        g = _dt.date(2026, 8, 8)   # sabato
+        # il sabato piu recente nel passato
+        g = _dt.date.today() - _dt.timedelta(days=1)
+        while g.weekday() != 5:
+            g -= _dt.timedelta(days=1)
         r = session.post(f"{API}/timbrature/giornata-standard", headers=admin_headers, json={
             "worker_id": state["worker_id"], "giorno": g.isoformat(), "motivo": "app non funzionante"})
         assert r.status_code == 200, r.text
@@ -583,7 +590,8 @@ class TestCartellino:
     def test_solo_admin_aggiunge_giornate(self, session, state):
         import datetime as _dt
         r = session.post(f"{API}/timbrature/giornata-standard", headers=state["worker_headers"], json={
-            "worker_id": state["worker_id"], "giorno": _dt.date(2026, 8, 10).isoformat(), "motivo": "x"})
+            "worker_id": state["worker_id"],
+            "giorno": (_dt.date.today() - _dt.timedelta(days=60)).isoformat(), "motivo": "x"})
         assert r.status_code == 403
 
 

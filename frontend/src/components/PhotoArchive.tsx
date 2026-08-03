@@ -14,12 +14,15 @@ import { colors, spacing } from "@/src/theme";
 type Props = {
   orderId: string;
   canUpload?: boolean;
+  /** true = puo eliminare qualsiasi foto (titolare) */
   canDelete?: boolean;
+  /** id dell'utente: il meccanico elimina le foto che ha caricato lui */
+  currentUserId?: string;
 };
 
 type PhotoWithUrl = OrderPhoto & { url: string };
 
-export function PhotoArchive({ orderId, canUpload, canDelete }: Props) {
+export function PhotoArchive({ orderId, canUpload, canDelete, currentUserId }: Props) {
   const [photos, setPhotos] = useState<PhotoWithUrl[]>([]);
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
@@ -97,7 +100,13 @@ export function PhotoArchive({ orderId, canUpload, canDelete }: Props) {
   };
 
   const removePhoto = async (p: PhotoWithUrl) => {
-    const ok = await confirmDialog("Elimina foto", `Eliminare la foto di ${p.uploaded_by_name}?`, "Elimina");
+    const ok = await confirmDialog(
+      "Elimina foto",
+      p.kind === "libretto"
+        ? "È la foto del LIBRETTO: da lì l'app legge alimentazione e codice motore. Se la elimini, rifalla subito."
+        : `Eliminare la foto di ${p.uploaded_by_name}?`,
+      "Elimina",
+    );
     if (!ok) return;
     try {
       await deleteOrderPhoto(p.id);
@@ -107,6 +116,9 @@ export function PhotoArchive({ orderId, canUpload, canDelete }: Props) {
       showAlert("Errore", e?.message || "Impossibile eliminare");
     }
   };
+
+  const puoEliminare = (p: PhotoWithUrl) =>
+    !!canDelete || (!!currentUserId && p.uploaded_by === currentUserId);
 
   const fmtDate = (iso: string) => {
     const d = new Date(iso);
@@ -202,7 +214,7 @@ export function PhotoArchive({ orderId, canUpload, canDelete }: Props) {
                 ) : null}
               </View>
               <View style={{ flexDirection: "row", gap: 12 }}>
-                {canDelete && (
+                {puoEliminare(viewer) && (
                   <TouchableOpacity testID="btn-photo-delete" onPress={() => removePhoto(viewer)} style={styles.viewerBtn}>
                     <Ionicons name="trash-outline" size={22} color="#F87171" />
                   </TouchableOpacity>

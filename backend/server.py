@@ -2080,10 +2080,17 @@ async def get_photo_file(photo_id: str, token: Optional[str] = None, omnius_key:
 
 
 @api.delete("/photos/{photo_id}")
-async def delete_photo(photo_id: str, admin: dict = Depends(require_admin)):
+async def delete_photo(photo_id: str, user: dict = Depends(get_current_user)):
+    """Il titolare cancella qualsiasi foto. Il meccanico cancella LE SUE — quella
+    venuta mossa la rifà lui, senza chiedere il permesso a nessuno — ma non tocca
+    quelle dei colleghi."""
     row = await fetchrow("SELECT * FROM order_photos WHERE id=$1", photo_id)
     if not row:
         raise HTTPException(status_code=404, detail="Foto non trovata")
+    if user["role"] != "admin":
+        await _order_or_403(row["work_order_id"], user)
+        if row["uploaded_by"] != user["id"]:
+            raise HTTPException(status_code=403, detail="Questa foto l'ha caricata un altro: non puoi eliminarla")
     _photo_path(row["work_order_id"], photo_id, row["content_type"]).unlink(missing_ok=True)
     await execute("DELETE FROM order_photos WHERE id=$1", photo_id)
     return {"ok": True}

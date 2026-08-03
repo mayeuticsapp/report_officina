@@ -9,6 +9,7 @@ import { Ionicons } from "@expo/vector-icons";
 import * as ImagePicker from "expo-image-picker";
 import { api, WorkEvent, WorkOrder, EventType, setEffectiveHours, oreProposte, OreProposte } from "@/src/api/client";
 import { confirmDialog, showAlert } from "@/src/utils/dialog";
+import { useAuth } from "@/src/auth/AuthContext";
 import { VoiceChat } from "@/src/components/VoiceChat";
 import { VehicleHistory } from "@/src/components/VehicleHistory";
 import { PhotoArchive } from "@/src/components/PhotoArchive";
@@ -17,6 +18,7 @@ import { colors, spacing } from "@/src/theme";
 
 export default function OrderDetail() {
   const { id } = useLocalSearchParams<{ id: string }>();
+  const { user } = useAuth();
   const router = useRouter();
   const [order, setOrder] = useState<WorkOrder | null>(null);
   const [events, setEvents] = useState<WorkEvent[]>([]);
@@ -455,7 +457,7 @@ export default function OrderDetail() {
           );
         })()}
 
-        <PhotoArchive orderId={order.id} canUpload />
+        <PhotoArchive orderId={order.id} canUpload currentUserId={user?.id} />
 
         <OrderMessages orderId={order.id} />
 
