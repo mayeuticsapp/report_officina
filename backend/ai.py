@@ -21,7 +21,7 @@ ATTENZIONE — limiti noti del "cambio in un file solo":
 """
 import os
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 from dotenv import load_dotenv
 from mistralai.client import Mistral
@@ -198,19 +198,42 @@ async def ocr_image(data_url: str) -> str:
 SYSTEM_PHOTO_CAPTION = (
     "Sei un occhio tecnico d'officina. Guarda la foto e descrivi in UNA frase breve, in italiano, "
     "solo ciò che si VEDE: componente inquadrato, stato o danno visibile, e qualsiasi testo/codice/"
-    "spia leggibile. Niente ipotesi o diagnosi non visibili. Se non è chiara, dillo."
+    "spia leggibile. Niente ipotesi o diagnosi non visibili. Se non è chiara, dillo. "
+    "Se sulla foto si legge un CODICE RICAMBIO o un numero di catalogo, TRASCRIVILO ESATTAMENTE: "
+    "è il dato più utile della foto."
+)
+
+# Il libretto non è una foto qualsiasi: è la carta d'identità della macchina, e
+# quello che c'è scritto lì batte qualsiasi cosa il modello creda di sapere.
+# Con la descrizione generica veniva fuori "si vede il bollo in alto a destra",
+# inutile. Qui si chiedono i campi che servono al meccanico.
+SYSTEM_LIBRETTO = (
+    "Stai leggendo la CARTA DI CIRCOLAZIONE (libretto) di un veicolo, fotografata in officina. "
+    "Il tuo compito è TRASCRIVERE i dati, non descrivere la foto.\n"
+    "Riporta, quando sono leggibili, in questo ordine e su una riga sola separati da ' · ':\n"
+    "  targa · marca e modello · ALIMENTAZIONE (benzina, gasolio, GPL, metano, ibrida, elettrica) · "
+    "codice motore (sigla tipo K9K, H4D, N47…) · cilindrata · potenza kW · data prima immatricolazione · "
+    "numero di telaio.\n"
+    "REGOLE:\n"
+    "- Scrivi SOLO ciò che leggi davvero. Un campo illeggibile si salta, non si indovina.\n"
+    "- L'ALIMENTAZIONE è il dato più importante: se la leggi, mettila sempre. Se non si legge, "
+    "scrivi 'alimentazione non leggibile' — è un'informazione anche quella.\n"
+    "- Ignora bolli, timbri, loghi e diciture amministrative: non servono a nessuno.\n"
+    "Inizia la risposta con 'LIBRETTO: '."
 )
 
 
-async def describe_image(data_url: str) -> str:
-    """Vision: descrive in una frase cosa mostra una foto (per la memoria dell'officina)."""
+async def describe_image(data_url: str, kind: Optional[str] = None) -> str:
+    """Vision: legge una foto della commessa. Per il libretto usa un prompt dedicato
+    che TRASCRIVE i dati del veicolo invece di descrivere l'immagine."""
+    istruzione = SYSTEM_LIBRETTO if kind == "libretto" else SYSTEM_PHOTO_CAPTION
     resp = await _client.chat.complete_async(
         model=VISION_MODEL,
         messages=[{"role": "user", "content": [
-            {"type": "text", "text": SYSTEM_PHOTO_CAPTION},
+            {"type": "text", "text": istruzione},
             {"type": "image_url", "image_url": data_url},
         ]}],
-        max_tokens=120,
+        max_tokens=250 if kind == "libretto" else 120,
     )
     return (resp.choices[0].message.content or "").strip()
 

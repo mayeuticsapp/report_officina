@@ -1955,12 +1955,12 @@ def _photo_path(order_id: str, photo_id: str, content_type: str) -> Path:
     return UPLOADS_DIR / order_id / f"{photo_id}.{ext}"
 
 
-async def _caption_photo(photo_id: str, data: bytes, content_type: str):
+async def _caption_photo(photo_id: str, data: bytes, content_type: str, kind: Optional[str] = None):
     """Mistral 'guarda' la foto una volta e ne scrive una didascalia, salvata per sempre.
     Così anche 'Chiedi all'AI' del titolare sa cosa c'è nelle foto senza rimandarle."""
     try:
         data_url = f"data:{content_type};base64,{base64.b64encode(data).decode()}"
-        caption = await ai.describe_image(data_url)
+        caption = await ai.describe_image(data_url, kind=kind)
         if caption:
             await execute("UPDATE order_photos SET caption=$1 WHERE id=$2", caption[:500], photo_id)
             logger.info(f"didascalia foto {photo_id}: {caption[:60]}")
@@ -2002,7 +2002,7 @@ async def _salva_foto_base64(order_id: str, user: dict, raw: str, kind: Optional
            VALUES ($1,$2,$3,$4,$5,$6,$7,$8)""",
         photo_id, order_id, user["id"], user["full_name"], content_type, len(data), now_utc(), kind,
     )
-    asyncio.create_task(_caption_photo(photo_id, data, content_type))
+    asyncio.create_task(_caption_photo(photo_id, data, content_type, kind))
     return photo_id
 
 

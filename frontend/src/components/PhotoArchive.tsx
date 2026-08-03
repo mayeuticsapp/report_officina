@@ -174,6 +174,11 @@ export function PhotoArchive({ orderId, canUpload, canDelete }: Props) {
                 <Text style={styles.thumbMeta} numberOfLines={1}>
                   {p.uploaded_by_name.split(" ")[0]} · {fmtDate(p.created_at)}
                 </Text>
+                {isVideo ? null : p.caption ? (
+                  <Text style={styles.thumbCaption} numberOfLines={3}>{p.caption}</Text>
+                ) : (
+                  <Text style={styles.thumbCaptionAttesa}>l&apos;AI sta leggendo la foto…</Text>
+                )}
               </TouchableOpacity>
             );
           })}
@@ -188,9 +193,14 @@ export function PhotoArchive({ orderId, canUpload, canDelete }: Props) {
           </ScrollView>
           {viewer && (
             <View style={styles.viewerBar}>
-              <Text style={styles.viewerMeta}>
-                {viewer.uploaded_by_name} · {fmtDate(viewer.created_at)}
-              </Text>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.viewerMeta}>
+                  {viewer.uploaded_by_name} · {fmtDate(viewer.created_at)}
+                </Text>
+                {viewer.caption ? (
+                  <Text style={styles.viewerCaption}>{viewer.caption}</Text>
+                ) : null}
+              </View>
               <View style={{ flexDirection: "row", gap: 12 }}>
                 {canDelete && (
                   <TouchableOpacity testID="btn-photo-delete" onPress={() => removePhoto(viewer)} style={styles.viewerBtn}>
@@ -231,6 +241,9 @@ const styles = StyleSheet.create({
   thumbWrap: { width: THUMB },
   thumb: { width: THUMB, height: THUMB, backgroundColor: colors.bgMuted, borderWidth: 1, borderColor: colors.border },
   thumbMeta: { fontSize: 9, color: colors.textSecondary, marginTop: 2 },
+  // quello che l'AI ha letto nella foto: se e sbagliato lo si vede subito
+  thumbCaption: { fontSize: 10, color: colors.text, marginTop: 3, lineHeight: 13 },
+  thumbCaptionAttesa: { fontSize: 10, color: colors.textSecondary, marginTop: 3, fontStyle: "italic" },
   kindBadge: {
     position: "absolute", top: 4, left: 4,
     backgroundColor: colors.text, paddingHorizontal: 5, paddingVertical: 2,
@@ -246,6 +259,7 @@ const styles = StyleSheet.create({
     justifyContent: "space-between", alignItems: "center", padding: spacing.md,
     backgroundColor: "rgba(0,0,0,0.6)",
   },
+  viewerCaption: { color: "#E5E7EB", fontSize: 12, marginTop: 4, lineHeight: 16 },
   viewerMeta: { color: "#fff", fontSize: 12 },
   viewerBtn: { padding: 8 },
 });
