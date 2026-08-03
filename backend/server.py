@@ -3447,6 +3447,32 @@ async def voice_turn(order_id: str, body: VoiceTurnIn, user: dict = Depends(get_
     except Exception as e:
         logger.warning(f"eventi block fallito: {e}")
 
+    # LE FOTO DELLA COMMESSA. Il modello che guarda le immagini le ha già lette e
+    # descritte: nel libretto c'è l'alimentazione e il codice motore, sulle scatole
+    # dei ricambi ci sono i codici veri. Finora l'assistente del meccanico NON le
+    # riceveva — e il 3 agosto ha dato per diesel una Clio che il libretto,
+    # fotografato mezz'ora prima, dichiarava BENZINA/GPL.
+    foto_block = ""
+    try:
+        foto = await fetch(
+            """SELECT kind, caption, created_at FROM order_photos
+               WHERE work_order_id=$1 AND caption IS NOT NULL AND caption <> ''
+               ORDER BY (kind='libretto') DESC, created_at DESC LIMIT 8""",
+            order_id,
+        )
+        if foto:
+            righe_foto = []
+            for f in foto:
+                etichetta = "LIBRETTO DEL VEICOLO" if f["kind"] == "libretto" else "foto"
+                righe_foto.append(f"[{etichetta}] {f['caption']}")
+            foto_block = (
+                "\n\nFOTO SCATTATE SU QUESTO LAVORO (lette una per una, sono dati REALI di "
+                "questa macchina — valgono più di quello che credi di sapere sul modello):\n  "
+                + "\n  ".join(righe_foto)
+            )
+    except Exception as e:
+        logger.warning(f"foto block fallito: {e}")
+
     try:
         messages = [{"role": "system", "content": ai.SYSTEM_ASSISTANT}]
         # Elenchiamo SOLO i dati che abbiamo davvero: i "?" facevano sembrare
@@ -3470,6 +3496,7 @@ async def voice_turn(order_id: str, body: VoiceTurnIn, user: dict = Depends(get_
             f"{veicolo_block}\n"
             f"SCHEDA ATTUALE COMPLETA: {json.dumps(current_scheda, ensure_ascii=False)}"
             f"{eventi_block}"
+            f"{foto_block}"
             f"{rag_block}"
         )
         for t in turns[-6:]:
