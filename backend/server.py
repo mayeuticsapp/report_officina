@@ -2696,8 +2696,39 @@ async def stats_overview(days: int = 30, admin: dict = Depends(require_admin)):
 
 
 # ---- Chiedi all'AI (domande libere del titolare sui dati veri) ----
+def _totali_per_operaio(events: List[dict], days: int) -> str:
+    """I TOTALI li calcola il registro, non il modello.
+
+    Prima passavamo solo l'elenco delle commesse e l'AI doveva sommare a mano 136
+    righe: due domande identiche davano due risposte diverse, e nessuna delle due
+    era giusta (Luciano risultava 19 o 20 macchine invece di 44). Sommare righe di
+    testo è la cosa che un modello linguistico sbaglia più facilmente. Qui i conti
+    sono già fatti: all'AI resta il mestiere suo, spiegarli."""
+    per: dict = {}
+    for e in events:
+        per.setdefault(e["worker_full_name"], {}).setdefault(e["work_order_id"], []).append(dict(e))
+
+    righe = []
+    for nome, ordini in sorted(per.items()):
+        completate = sum(1 for evs in ordini.values() if any(x["type"] == "COMPLETE" for x in evs))
+        minuti = sum(_worker_minutes(evs) for evs in ordini.values())
+        media = round(minuti / completate) if completate else 0
+        righe.append(
+            f"  {nome}: commesse COMPLETATE={completate} | commesse toccate={len(ordini)} | "
+            f"minuti lavorati={minuti} ({round(minuti / 60, 1)} ore) | media per commessa completata={media} min"
+        )
+    if not righe:
+        return ""
+    return (
+        f"\nTOTALI GIÀ CALCOLATI DAL REGISTRO — ULTIMI {days} GIORNI "
+        "(cifre esatte: USA QUESTE, non rifare le somme riga per riga):\n"
+        + "\n".join(righe) + "\n"
+    )
+
+
 async def _build_admin_digest(days: int = 60) -> str:
-    """Digest compatto del registro officina per l'AI: commesse, eventi, minuti per operaio."""
+    """Digest compatto del registro officina per l'AI: totali già calcolati in cima,
+    poi il dettaglio commessa per commessa."""
     since = now_utc() - timedelta(days=days)
     oggi = now_utc().strftime("%Y-%m-%d")
     orders = await fetch(
@@ -2728,7 +2759,10 @@ async def _build_admin_digest(days: int = 60) -> str:
         for p in await fetch("SELECT work_order_id, caption FROM order_photos WHERE work_order_id = ANY($1) AND caption IS NOT NULL", order_ids):
             cap_by_order.setdefault(p["work_order_id"], []).append((p["caption"] or "").strip())
 
-    lines = [f"OGGI: {oggi}. REGISTRO ULTIMI {days} GIORNI ({len(orders)} commesse, {len(events)} eventi):"]
+    intestazione = (f"OGGI: {oggi}. REGISTRO ULTIMI {days} GIORNI "
+                    f"({len(orders)} commesse, {len(events)} eventi):"
+                    + _totali_per_operaio([dict(e) for e in events], days))
+    lines = [intestazione]
     for o in orders:
         evs = ev_by_order.get(o["id"], [])
         per_worker: dict = {}
@@ -2777,7 +2811,23 @@ async def _build_admin_digest(days: int = 60) -> str:
             comp_date = next((e["timestamp"].strftime("%Y-%m-%d") for e in reversed(wevs) if e["type"] == "COMPLETE"), None)
             parts.append(f"operaio={w}({mins}min{', COMPLETATA il ' + comp_date if completata else ''})")
         lines.append(" | ".join(parts))
-    return "\n".join(lines)[:48000]
+
+    # Il tetto serve a non sforare il contesto del modello. Ma i TOTALI non si
+    # toccano mai: si tagliano i dettagli delle commesse più vecchie, e si scrive
+    # quante ne restano fuori — un troncamento silenzioso sembra "ho visto tutto".
+    TETTO = 48000
+    testa = lines[0]
+    dettagli = lines[1:]
+    fuori = 0
+    while dettagli and len(testa) + sum(len(x) + 1 for x in dettagli) > TETTO:
+        dettagli.pop()
+        fuori += 1
+    if fuori:
+        dettagli.append(
+            f"[…{fuori} commesse più vecchie non elencate qui per ragioni di spazio: "
+            f"i TOTALI in cima le comprendono comunque tutte.]"
+        )
+    return "\n".join([testa] + dettagli)
 
 
 class AskIn(BaseModel):
