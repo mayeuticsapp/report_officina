@@ -8,9 +8,21 @@ import { Ionicons } from "@expo/vector-icons";
 import { useFocusEffect } from "expo-router";
 import {
   KnowledgeDoc, listKnowledge, addKnowledgeText, deleteKnowledgeDoc, uploadKnowledgePdf,
+  leggiDocumento, correggiDocumento,
 } from "@/src/api/client";
 import { confirmDialog, showAlert } from "@/src/utils/dialog";
 import { colors, spacing } from "@/src/theme";
+
+// La traccia di un caso. Le righe che valgono di più sono SEMBRAVA e LA PROVA:
+// la causa vera si trova ovunque, il vicolo cieco e il modo per escluderlo li sa
+// solo chi c'era — ed è quello che trasforma l'assistente da manuale a collega.
+const MODELLO_CASO = `VEICOLO: (marca, modello, motore)
+SINTOMO: 
+SEMBRAVA: 
+LA PROVA CHE HA DISTINTO: 
+CAUSA VERA: 
+SOSTITUITO: 
+NOTA: `;
 
 export default function KnowledgeAdmin() {
   const [docs, setDocs] = useState<KnowledgeDoc[]>([]);
@@ -20,6 +32,9 @@ export default function KnowledgeAdmin() {
   const [title, setTitle] = useState("");
   const [content, setContent] = useState("");
   const [busy, setBusy] = useState(false);
+  // documento aperto in correzione (null = si sta scrivendo un testo nuovo)
+  const [inCorrezione, setInCorrezione] = useState<string | null>(null);
+  const [aprendo, setAprendo] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -30,9 +45,43 @@ export default function KnowledgeAdmin() {
 
   useFocusEffect(useCallback(() => { load(); }, [load]));
 
+  const apriNuovo = () => {
+    setInCorrezione(null);
+    setTitle("");
+    setContent("");
+    setModalOpen(true);
+  };
+
+  const apriDocumento = async (d: KnowledgeDoc) => {
+    setAprendo(d.doc_id);
+    try {
+      const pieno = await leggiDocumento(d.doc_id);
+      setInCorrezione(pieno.doc_id);
+      setTitle(pieno.title);
+      setContent(pieno.content);
+      setModalOpen(true);
+    } catch (e: any) {
+      showAlert("Errore", e?.message || "Impossibile aprire il documento");
+    } finally { setAprendo(null); }
+  };
+
   const submitText = async () => {
     if (!title.trim() || !content.trim()) {
       showAlert("Campi obbligatori", "Servono titolo e contenuto.");
+      return;
+    }
+    if (inCorrezione) {
+      setBusy(true);
+      try {
+        await correggiDocumento(inCorrezione, title.trim(), content);
+        setModalOpen(false);
+        setInCorrezione(null);
+        setTitle(""); setContent("");
+        await load();
+        showAlert("Salvato", "Il documento è stato corretto e reindicizzato: il secondo meccanico legge la versione nuova.");
+      } catch (e: any) {
+        showAlert("Errore", e?.message || "Correzione non salvata");
+      } finally { setBusy(false); }
       return;
     }
     setBusy(true);
@@ -92,7 +141,7 @@ export default function KnowledgeAdmin() {
       </View>
 
       <View style={styles.actionsRow}>
-        <TouchableOpacity testID="btn-add-knowledge-text" style={styles.actionBtn} onPress={() => setModalOpen(true)} disabled={busy}>
+        <TouchableOpacity testID="btn-add-knowledge-text" style={styles.actionBtn} onPress={apriNuovo} disabled={busy}>
           <Ionicons name="create-outline" size={18} color={colors.textInverse} />
           <Text style={styles.actionBtnText}>AGGIUNGI TESTO</Text>
         </TouchableOpacity>
@@ -122,12 +171,27 @@ export default function KnowledgeAdmin() {
             </View>
           ) : docs.map((d) => (
             <View key={d.doc_id} testID={`knowledge-doc-${d.doc_id}`} style={styles.card}>
-              <View style={{ flex: 1 }}>
+              <TouchableOpacity
+                testID={`btn-open-knowledge-${d.doc_id}`}
+                style={{ flex: 1 }}
+                onPress={() => apriDocumento(d)}
+                disabled={aprendo === d.doc_id}
+              >
                 <Text style={styles.docTitle}>{d.title}</Text>
                 <Text style={styles.docMeta}>
                   {d.chunks} blocchi · {d.created_by_name || "—"} · {fmtDate(d.created_at)}
                 </Text>
-              </View>
+                <View style={styles.apriRiga}>
+                  {aprendo === d.doc_id ? (
+                    <ActivityIndicator size="small" color={colors.text} />
+                  ) : (
+                    <>
+                      <Ionicons name="reader-outline" size={14} color={colors.text} />
+                      <Text style={styles.apriTesto}>TOCCA PER RILEGGERE E CORREGGERE</Text>
+                    </>
+                  )}
+                </View>
+              </TouchableOpacity>
               <TouchableOpacity testID={`btn-delete-knowledge-${d.doc_id}`} onPress={() => removeDoc(d)} style={styles.deleteBtn}>
                 <Ionicons name="trash-outline" size={20} color={colors.stopped} />
               </TouchableOpacity>
@@ -141,7 +205,7 @@ export default function KnowledgeAdmin() {
         <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : "height"} style={styles.mBackdrop}>
           <View style={styles.mSheet}>
             <View style={styles.mHeader}>
-              <Text style={styles.mTitle}>AGGIUNGI ALL'ARCHIVIO</Text>
+              <Text style={styles.mTitle}>{inCorrezione ? "CORREGGI IL DOCUMENTO" : "AGGIUNGI ALL\u2019ARCHIVIO"}</Text>
               <TouchableOpacity onPress={() => setModalOpen(false)}><Ionicons name="close" size={26} color={colors.text} /></TouchableOpacity>
             </View>
             <ScrollView contentContainerStyle={{ padding: spacing.lg }} keyboardShouldPersistTaps="handled">
@@ -150,7 +214,14 @@ export default function KnowledgeAdmin() {
                 testID="input-knowledge-title" style={styles.input} value={title} onChangeText={setTitle}
                 placeholder="es. Coppie serraggio Punto 1.3 Multijet" placeholderTextColor={colors.textSecondary}
               />
-              <Text style={[styles.label, { marginTop: spacing.md }]}>CONTENUTO</Text>
+              <View style={styles.contenutoRiga}>
+                <Text style={styles.label}>CONTENUTO</Text>
+                {!inCorrezione && !content.trim() ? (
+                  <TouchableOpacity testID="btn-modello-caso" onPress={() => setContent(MODELLO_CASO)}>
+                    <Text style={styles.modelloBtn}>USA IL MODELLO CASO</Text>
+                  </TouchableOpacity>
+                ) : null}
+              </View>
               <TextInput
                 testID="input-knowledge-content"
                 style={[styles.input, { minHeight: 220, textAlignVertical: "top" }]}
@@ -161,7 +232,7 @@ export default function KnowledgeAdmin() {
             </ScrollView>
             <View style={{ padding: spacing.lg, borderTopWidth: 1, borderTopColor: colors.border }}>
               <TouchableOpacity testID="btn-save-knowledge" style={[styles.saveBtn, busy && { opacity: 0.6 }]} disabled={busy} onPress={submitText}>
-                {busy ? <ActivityIndicator color={colors.textInverse} /> : <Text style={styles.saveText}>INDICIZZA</Text>}
+                {busy ? <ActivityIndicator color={colors.textInverse} /> : <Text style={styles.saveText}>{inCorrezione ? "SALVA CORREZIONI" : "INDICIZZA"}</Text>}
               </TouchableOpacity>
             </View>
           </View>
@@ -199,6 +270,12 @@ const styles = StyleSheet.create({
     borderWidth: 1, borderColor: colors.border, padding: spacing.md, marginBottom: spacing.sm,
   },
   docTitle: { fontSize: 15, fontWeight: "800", color: colors.text },
+  apriRiga: { flexDirection: "row", alignItems: "center", gap: 5, marginTop: 6 },
+  apriTesto: { fontSize: 10, fontWeight: "800", letterSpacing: 0.8, color: colors.text },
+  contenutoRiga: {
+    flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginTop: spacing.md,
+  },
+  modelloBtn: { fontSize: 10, fontWeight: "900", letterSpacing: 0.8, color: colors.primary },
   docMeta: { fontSize: 11, color: colors.textSecondary, marginTop: 3 },
   deleteBtn: { padding: 8, borderWidth: 1, borderColor: colors.border },
   mBackdrop: { flex: 1, backgroundColor: "rgba(0,0,0,0.5)", justifyContent: "flex-end" },

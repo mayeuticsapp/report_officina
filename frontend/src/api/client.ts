@@ -515,3 +515,24 @@ export async function giornataStandard(worker_id: string, giorno: string, motivo
     body: { worker_id, giorno, motivo },
   });
 }
+
+// ---------------- Archivio Tecnico: rileggere e correggere ----------------
+
+export type KnowledgeDocFull = {
+  doc_id: string;
+  title: string;
+  content: string;
+  chunks: number;
+  created_by_name?: string | null;
+  created_at: string;
+};
+
+/** Rilegge un documento per intero (i blocchi vengono ricuciti dal server). */
+export async function leggiDocumento(docId: string): Promise<KnowledgeDocFull> {
+  return api<KnowledgeDocFull>(`/knowledge/${docId}`);
+}
+
+/** Salva le correzioni: il testo viene reindicizzato da capo. */
+export async function correggiDocumento(docId: string, title: string, content: string) {
+  return api(`/knowledge/${docId}`, { method: "PUT", body: { title, content } });
+}

@@ -3430,6 +3430,74 @@ async def list_knowledge(admin: dict = Depends(require_admin)):
     return [KnowledgeDocOut(**dict(r)) for r in rows]
 
 
+class KnowledgeDocFull(BaseModel):
+    doc_id: str
+    title: str
+    content: str          # il testo intero, ricucito dai blocchi
+    chunks: int
+    created_by_name: Optional[str] = None
+    created_at: datetime
+
+
+@api.get("/knowledge/{doc_id}", response_model=KnowledgeDocFull)
+async def read_knowledge(doc_id: str, admin: dict = Depends(require_admin)):
+    """Rilegge un documento per intero. In archivio è spezzato in blocchi per la
+    ricerca: qui si ricuce nell'ordine originale, così il titolare lo rilegge e
+    lo corregge com'era."""
+    rows = await fetch(
+        "SELECT title, content, chunk_idx, created_by_name, created_at FROM knowledge_docs "
+        "WHERE doc_id=$1 ORDER BY chunk_idx ASC", doc_id
+    )
+    if not rows:
+        raise HTTPException(status_code=404, detail="Documento non trovato")
+    return KnowledgeDocFull(
+        doc_id=doc_id, title=rows[0]["title"],
+        content="\n\n".join(r["content"] for r in rows),
+        chunks=len(rows), created_by_name=rows[0]["created_by_name"],
+        created_at=rows[0]["created_at"],
+    )
+
+
+@api.put("/knowledge/{doc_id}", response_model=KnowledgeDocOut)
+async def update_knowledge(doc_id: str, body: KnowledgeAddIn, admin: dict = Depends(require_admin)):
+    """Correzione di un documento. Il testo cambia, quindi vanno rifatti anche i
+    vettori: si reindicizza da capo e solo se la nuova versione è a posto si butta
+    la vecchia — se l'indicizzazione fallisce, l'archivio resta com'era."""
+    esiste = await fetchrow("SELECT created_by_name, created_at FROM knowledge_docs WHERE doc_id=$1", doc_id)
+    if not esiste:
+        raise HTTPException(status_code=404, detail="Documento non trovato")
+    titolo = (body.title or "").strip()
+    testo = (body.content or "").strip()
+    if not titolo:
+        raise HTTPException(status_code=400, detail="Titolo obbligatorio")
+    if not testo:
+        raise HTTPException(status_code=400, detail="Testo obbligatorio")
+
+    chunks = _chunk_text(testo)
+    if not chunks:
+        raise HTTPException(status_code=400, detail="Documento vuoto")
+    if len(chunks) > 400:
+        raise HTTPException(status_code=413, detail=f"Documento troppo grande ({len(chunks)} blocchi, max 400)")
+    vecs = await _embed_texts(chunks)
+    if not vecs:
+        raise HTTPException(status_code=502, detail="Indicizzazione fallita (servizio AI non raggiungibile), riprova")
+
+    now = now_utc()
+    autore = esiste["created_by_name"]
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute("DELETE FROM knowledge_docs WHERE doc_id=$1", doc_id)
+            for i, (chunk, vec) in enumerate(zip(chunks, vecs)):
+                await conn.execute(
+                    """INSERT INTO knowledge_docs (id, doc_id, title, chunk_idx, content, embedding, created_by_name, created_at)
+                       VALUES ($1,$2,$3,$4,$5,$6::vector,$7,$8)""",
+                    str(uuid.uuid4()), doc_id, titolo, i, chunk, vec, autore, now
+                )
+    logger.info(f"archivio tecnico: '{titolo}' corretto e reindicizzato in {len(chunks)} blocchi")
+    return KnowledgeDocOut(doc_id=doc_id, title=titolo, chunks=len(chunks),
+                           created_by_name=autore, created_at=now)
+
+
 @api.delete("/knowledge/{doc_id}")
 async def delete_knowledge(doc_id: str, admin: dict = Depends(require_admin)):
     async with pool.acquire() as conn:
