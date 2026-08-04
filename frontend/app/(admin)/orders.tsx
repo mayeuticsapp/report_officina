@@ -6,7 +6,7 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
-import { api, User, WorkOrder, unreadMessages } from "@/src/api/client";
+import { api, User, WorkOrder, unreadMessages, approvaCommessa } from "@/src/api/client";
 import { confirmDialog, showAlert } from "@/src/utils/dialog";
 import { useAutoRefresh } from "@/src/hooks/use-auto-refresh";
 import { colors, spacing } from "@/src/theme";
@@ -128,7 +128,7 @@ export default function OrdersAdmin() {
   };
 
   const approve = async (o: WorkOrder) => {
-    try { await api(`/work-orders/${o.id}`, { method: "PUT", body: { status: "open" } }); await load(searchRef.current, soloDiRef.current); }
+    try { await approvaCommessa(o.id); await load(searchRef.current, soloDiRef.current); }
     catch (e: any) { showAlert("Errore", e.message); }
   };
 
@@ -139,8 +139,10 @@ export default function OrdersAdmin() {
     catch (e: any) { showAlert("Errore", e.message); }
   };
 
-  const pendingOrders = orders.filter((o) => o.status === "pending");
-  const otherOrders = orders.filter((o) => o.status !== "pending");
+  // "da approvare" non blocca piu il lavoro: e una commessa come le altre,
+  // che pero il titolare non ha ancora riconosciuto. Puo essere gia in corso.
+  const pendingOrders = orders.filter((o) => !o.approvata_il);
+  const otherOrders = orders.filter((o) => !!o.approvata_il);
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
@@ -232,7 +234,7 @@ export default function OrdersAdmin() {
                 <View key={o.id} testID={`pending-order-${o.id}`} style={styles.pendingCard}>
                   <View style={styles.cardTop}>
                     <Text style={styles.plate}>{o.plate}</Text>
-                    <View style={[styles.pill, { backgroundColor: colors.paused }]}>
+                    <View style={[styles.pill, { backgroundColor: statusMap[o.status]?.c || colors.paused }]}>
                       <Text style={styles.pillText}>IN ATTESA</Text>
                     </View>
                   </View>

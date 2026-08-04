@@ -325,6 +325,10 @@ class WorkOrder(BaseModel):
     minutes_calculated: Optional[int] = None       # ore dai timbri (registro grezzo)
     minutes_effective: Optional[int] = None        # ore corrette dal meccanico (per la fattura)
     minutes_effective_reason: Optional[str] = None
+    # approvazione: separata dallo stato del lavoro. NULL = ancora da approvare,
+    # ma il meccanico puo gia lavorarci.
+    approvata_il: Optional[datetime] = None
+    approvata_da_nome: Optional[str] = None
     created_at: datetime
     updated_at: datetime
 
@@ -477,6 +481,8 @@ def row_to_workorder(row: dict) -> WorkOrder:
         created_by_name=row.get("created_by_name"),
         minutes_effective=row.get("minutes_effective"),
         minutes_effective_reason=row.get("minutes_effective_reason"),
+        approvata_il=row.get("approvata_il"),
+        approvata_da_nome=row.get("approvata_da_nome"),
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
@@ -563,6 +569,16 @@ async def startup():
         # Commessa nata da un appuntamento del planning: la chiave è giorno|ora|targa,
         # perché gli appuntamenti di STAR non hanno un id stabile (lo snapshot viene
         # riscritto da zero a ogni invio di Omnius). Unica: due click non fanno due commesse.
+        # L'approvazione era incastrata nello stato del lavoro: una commessa "pending"
+        # non poteva nemmeno partire. Ora sono due cose separate — il lavoro va avanti,
+        # l'approvazione arriva quando il titolare la vede.
+        await conn.execute("ALTER TABLE work_orders ADD COLUMN IF NOT EXISTS approvata_il TIMESTAMPTZ")
+        await conn.execute("ALTER TABLE work_orders ADD COLUMN IF NOT EXISTS approvata_da_nome TEXT")
+        await conn.execute(
+            "UPDATE work_orders SET approvata_il = created_at "
+            "WHERE approvata_il IS NULL AND status <> 'pending'")
+        # le vecchie in attesa: restano da approvare, ma adesso si possono lavorare
+        await conn.execute("UPDATE work_orders SET status='open' WHERE status='pending'")
         await conn.execute("ALTER TABLE work_orders ADD COLUMN IF NOT EXISTS planning_key TEXT")
         await conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_work_orders_planning_key "
@@ -887,17 +903,37 @@ async def create_work_order(body: WorkOrderCreate, admin: dict = Depends(require
     now = now_utc()
     scheda = SchedaTecnica().model_dump()
     await execute(
-        """INSERT INTO work_orders (id, plate, vin, customer, vehicle, description, assigned_worker_ids, status, scheda_tecnica, created_at, updated_at)
-           VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9::jsonb,$10,$11)""",
+        """INSERT INTO work_orders (id, plate, vin, customer, vehicle, description, assigned_worker_ids, status, scheda_tecnica, approvata_il, approvata_da_nome, created_at, updated_at)
+           VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9::jsonb,$10,$11,$12,$13)""",
         new_id, body.plate, body.vin, body.customer, body.vehicle, body.description,
-        json.dumps(body.assigned_worker_ids), "open", json.dumps(scheda), now, now
+        json.dumps(body.assigned_worker_ids), "open", json.dumps(scheda),
+        now, admin["full_name"], now, now
     )
     return WorkOrder(
         id=new_id, plate=body.plate, vin=body.vin, customer=body.customer,
         vehicle=body.vehicle, description=body.description,
         assigned_worker_ids=body.assigned_worker_ids, status="open",
-        scheda_tecnica=SchedaTecnica(**scheda), created_at=now, updated_at=now
+        scheda_tecnica=SchedaTecnica(**scheda), created_at=now, updated_at=now,
+        approvata_il=now, approvata_da_nome=admin["full_name"],
     )
+
+
+@api.post("/work-orders/{order_id}/approva", response_model=WorkOrder)
+async def approva_commessa(order_id: str, admin: dict = Depends(require_admin)):
+    """Il titolare approva. Il lavoro nel frattempo puo essere gia partito, anzi
+    di solito lo e: l'approvazione dice 'ok, questo lavoro lo riconosco', non
+    'adesso puoi cominciare'."""
+    row = await fetchrow("SELECT * FROM work_orders WHERE id=$1", order_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Commessa non trovata")
+    if row.get("approvata_il"):
+        return _workorder_for_user(row_to_workorder(row), admin)
+    await execute(
+        "UPDATE work_orders SET approvata_il=$1, approvata_da_nome=$2, updated_at=$1 WHERE id=$3",
+        now_utc(), admin["full_name"], order_id,
+    )
+    aggiornata = await fetchrow("SELECT * FROM work_orders WHERE id=$1", order_id)
+    return _workorder_for_user(row_to_workorder(aggiornata), admin)
 
 
 @api.post("/work-orders/propose", response_model=WorkOrder)
@@ -915,12 +951,12 @@ async def propose_work_order(body: WorkOrderPropose, user: dict = Depends(get_cu
            (id, plate, vin, customer, vehicle, description, assigned_worker_ids, status, scheda_tecnica, created_by, created_by_name, created_at, updated_at)
            VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9::jsonb,$10,$11,$12,$13)""",
         new_id, plate, body.vin, customer, vehicle, body.description,
-        json.dumps(assigned), "pending", json.dumps(scheda), user["id"], user["full_name"], now, now
+        json.dumps(assigned), "open", json.dumps(scheda), user["id"], user["full_name"], now, now
     )
     return WorkOrder(
         id=new_id, plate=plate, vin=body.vin, customer=customer,
         vehicle=vehicle, description=body.description,
-        assigned_worker_ids=assigned, status="pending",
+        assigned_worker_ids=assigned, status="open",
         scheda_tecnica=SchedaTecnica(**scheda), created_by=user["id"], created_by_name=user["full_name"],
         created_at=now, updated_at=now
     )
@@ -1058,7 +1094,7 @@ async def omnius_ingest_scheda(body: OmniusSchedaIn):
            (id, plate, vin, customer, vehicle, description, assigned_worker_ids, status, scheda_tecnica, created_by, created_by_name, star_doc_id, created_at, updated_at)
            VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9::jsonb,$10,$11,$12,$13,$14)""",
         new_id, plate, body.vin, customer, vehicle, description,
-        json.dumps([]), "pending", json.dumps(scheda), "omnius", "Omnius (STAR)", star_doc_id, now, now
+        json.dumps([]), "open", json.dumps(scheda), "omnius", "Omnius (STAR)", star_doc_id, now, now
     )
     row = await fetchrow("SELECT * FROM work_orders WHERE id=$1", new_id)
     return OmniusSchedaOut(action="created", work_order=row_to_workorder(row))
@@ -1501,14 +1537,15 @@ async def planning_crea_commessa(body: PlanningCreaIn, admin: dict = Depends(req
     now = now_utc()
     await execute(
         """INSERT INTO work_orders (id, plate, customer, vehicle, description, assigned_worker_ids,
-               status, scheda_tecnica, created_by, created_by_name, planning_key, created_at, updated_at)
-           VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8::jsonb,$9,$10,$11,$12,$13)""",
+               status, scheda_tecnica, created_by, created_by_name, planning_key,
+               approvata_il, approvata_da_nome, created_at, updated_at)
+           VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8::jsonb,$9,$10,$11,$12,$13,$14,$15)""",
         new_id, targa,
         (body.cliente or "").strip() or "DA INSERIRE",
         (body.veicolo or "").strip() or "Da identificare",
         (body.nota or "").strip() or "Dal planning: lavoro da concordare",
         json.dumps(operai), "open", json.dumps(scheda),
-        admin["id"], admin["full_name"], chiave, now, now,
+        admin["id"], admin["full_name"], chiave, now, admin["full_name"], now, now,
     )
 
     # i dati veicolo li chiediamo a STAR come per le altre commesse
@@ -2396,8 +2433,6 @@ async def add_event(order_id: str, body: WorkEventCreate, user: dict = Depends(g
         worker_ids = json.loads(worker_ids)
     if user["role"] == "worker" and user["id"] not in worker_ids:
         raise HTTPException(status_code=403, detail="Non assegnato a questa commessa")
-    if row["status"] == "pending":
-        raise HTTPException(status_code=409, detail="Commessa in attesa di approvazione dal titolare")
 
     # I km si chiedono su INIZIA. Se il contachilometri non è leggibile (auto già
     # sul ponte, arrivata col carroattrezzi…) il meccanico può rinviarli alla

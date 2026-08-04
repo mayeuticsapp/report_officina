@@ -107,9 +107,11 @@ export default function OrderDetail() {
   // se il lavoro è in corso, in pausa o finito
   const workEvents = events.filter((e) => e.type !== "KM");
   const lastEvent = workEvents[workEvents.length - 1];
-  const isPending = order?.status === "pending";
-  const canStart = !isPending && !lastEvent;
-  const canReopen = !isPending && !!lastEvent && lastEvent.type === "COMPLETE";
+  // L'approvazione del titolare non blocca piu il lavoro: si parte e basta,
+  // e lui la riconosce quando la vede. Prima una commessa aperta dal meccanico
+  // aspettava in media 2h40 prima di poter partire, e quelle ore sparivano.
+  const canStart = !lastEvent;
+  const canReopen = !!lastEvent && lastEvent.type === "COMPLETE";
   const canPause = lastEvent && (lastEvent.type === "START" || lastEvent.type === "RESUME");
   const canResume = lastEvent && lastEvent.type === "PAUSE";
   const canComplete = lastEvent && lastEvent.type !== "COMPLETE";
@@ -341,7 +343,7 @@ export default function OrderDetail() {
         </View>
 
         {/* Chilometraggio: si registra su INIZIA, si corregge da qui */}
-        {!isPending && (
+        {(
           <View style={styles.kmCard}>
             <Text style={styles.sectionLabel}>CHILOMETRAGGIO</Text>
             {kmRegistrati ? (
@@ -471,12 +473,6 @@ export default function OrderDetail() {
       </ScrollView>
 
       {/* Action buttons - sticky bottom */}
-      {isPending ? (
-        <View style={styles.pendingBar}>
-          <Ionicons name="time-outline" size={18} color={colors.text} />
-          <Text style={styles.pendingBarText}>In attesa di approvazione dal titolare</Text>
-        </View>
-      ) : (
       <View style={styles.actionBar}>
         {canStart && (
           <ActionBtn testID="btn-start" label="INIZIA" color={colors.active} onPress={() => openAction("START")} />
@@ -494,7 +490,6 @@ export default function OrderDetail() {
           <ActionBtn testID="btn-complete" label="COMPLETA" color={colors.text} onPress={() => openAction("COMPLETE")} />
         )}
       </View>
-      )}
 
       {/* Modal for reason + photo */}
       <Modal visible={!!modalOpen} transparent animationType="slide" onRequestClose={() => setModalOpen(null)}>

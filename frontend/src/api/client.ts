@@ -73,6 +73,9 @@ export type WorkOrder = {
   minutes_calculated?: number | null;
   minutes_effective?: number | null;
   minutes_effective_reason?: string | null;
+  /** null = ancora da approvare (ma il meccanico puo gia lavorarci) */
+  approvata_il?: string | null;
+  approvata_da_nome?: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -85,7 +88,7 @@ export type WorkOrderProposeIn = {
   description: string;
 };
 
-/** Un operaio apre di sua iniziativa una commessa: resta "pending" finché il titolare non la approva. */
+/** Un operaio apre di sua iniziativa una commessa: puo lavorarci subito, il titolare la approva dopo. */
 export async function proposeWorkOrder(body: WorkOrderProposeIn): Promise<WorkOrder> {
   return api<WorkOrder>("/work-orders/propose", { method: "POST", body });
 }
@@ -535,4 +538,10 @@ export async function leggiDocumento(docId: string): Promise<KnowledgeDocFull> {
 /** Salva le correzioni: il testo viene reindicizzato da capo. */
 export async function correggiDocumento(docId: string, title: string, content: string) {
   return api(`/knowledge/${docId}`, { method: "PUT", body: { title, content } });
+}
+
+/** Il titolare approva una commessa aperta dal meccanico o arrivata da STAR.
+ *  Il lavoro puo essere gia partito: l'approvazione non e piu un permesso a iniziare. */
+export async function approvaCommessa(orderId: string): Promise<WorkOrder> {
+  return api<WorkOrder>(`/work-orders/${orderId}/approva`, { method: "POST" });
 }

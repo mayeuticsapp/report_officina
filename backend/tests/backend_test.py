@@ -595,6 +595,50 @@ class TestCartellino:
         assert r.status_code == 403
 
 
+class TestApprovazione:
+    """Il meccanico apre e lavora subito; il titolare approva quando la vede."""
+
+    def test_commessa_del_meccanico_nasce_lavorabile(self, session, state):
+        r = session.post(f"{API}/work-orders/propose", headers=state["worker_headers"], json={
+            "plate": "TEST-APPR01", "description": "Rumore sospensione"})
+        assert r.status_code == 200, r.text
+        o = r.json()
+        assert o["status"] == "open", "non deve nascere bloccata"
+        assert o["approvata_il"] is None, "ma deve risultare da approvare"
+        state["appr_order_id"] = o["id"]
+
+    def test_puo_iniziare_senza_aspettare_approvazione(self, session, state):
+        r = session.post(f"{API}/work-orders/{state['appr_order_id']}/events",
+                         headers=state["worker_headers"],
+                         json={"type": "START", "km": "90000",
+                               "libretto_base64": TestEvents.LIBRETTO_FINTO})
+        assert r.status_code == 200, r.text
+        r2 = session.get(f"{API}/work-orders/{state['appr_order_id']}", headers=state["worker_headers"])
+        assert r2.json()["status"] == "in_progress"
+        assert r2.json()["approvata_il"] is None, "in corso ma ancora da approvare"
+
+    def test_operaio_non_puo_approvare(self, session, state):
+        r = session.post(f"{API}/work-orders/{state['appr_order_id']}/approva",
+                         headers=state["worker_headers"])
+        assert r.status_code == 403
+
+    def test_titolare_approva_a_lavoro_iniziato(self, session, admin_headers, state):
+        r = session.post(f"{API}/work-orders/{state['appr_order_id']}/approva", headers=admin_headers)
+        assert r.status_code == 200, r.text
+        o = r.json()
+        assert o["approvata_il"] is not None
+        assert o["approvata_da_nome"]
+        assert o["status"] == "in_progress", "approvare non tocca lo stato del lavoro"
+
+    def test_commessa_creata_dal_titolare_nasce_approvata(self, session, admin_headers, state):
+        r = session.post(f"{API}/work-orders", headers=admin_headers, json={
+            "plate": "TEST-APPR02", "customer": "C", "vehicle": "V", "description": "d",
+            "assigned_worker_ids": [state["worker_id"]]})
+        assert r.status_code == 200
+        assert r.json()["approvata_il"] is not None, "quelle del titolare non si auto-approvano"
+
+
+
 class TestZCleanup:
     def test_cleanup_orders_and_worker(self, session, admin_headers, state):
         for k in ("order_id", "order2_id"):
