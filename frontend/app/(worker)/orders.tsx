@@ -7,8 +7,8 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
 import * as ImagePicker from "expo-image-picker";
-import { api, WorkOrder, proposeWorkOrder, lookupPlate, unreadMessages } from "@/src/api/client";
-import { showAlert } from "@/src/utils/dialog";
+import { api, WorkOrder, proposeWorkOrder, lookupPlate, unreadMessages, doppioneDiTarga, prendiCommessa } from "@/src/api/client";
+import { showAlert, confirmDialog } from "@/src/utils/dialog";
 import { useAutoRefresh } from "@/src/hooks/use-auto-refresh";
 import { colors, spacing } from "@/src/theme";
 
@@ -112,6 +112,29 @@ export default function WorkerOrders() {
       await load();
       showAlert("Inviata", "Commessa inviata al titolare. I dati del veicolo arrivano da STAR.");
     } catch (e: any) {
+      // Una targa, una commessa: se ce n'e' gia' una aperta si lavora su quella.
+      const doppio = doppioneDiTarga(e);
+      if (doppio) {
+        const vai = await confirmDialog(
+          `${doppio.plate}: c'e' gia' una commessa aperta`,
+          `${doppio.vehicle}\n${doppio.descrizione || "senza descrizione"}\n` +
+          `Aperta da ${doppio.aperta_da} il ${doppio.aperta_il} - ${statusMap[doppio.stato]?.label || doppio.stato}\n\n` +
+          "Questa nuova commessa non viene creata: si lavora su quella che c'e' gia', " +
+          "altrimenti le ore e le foto finiscono divise su due schede.",
+          "APRI QUELLA COMMESSA",
+        );
+        if (vai) {
+          try {
+            await prendiCommessa(doppio.commessa_id);
+            setModalOpen(false);
+            await load();
+            router.push(`/(worker)/order/${doppio.commessa_id}` as any);
+          } catch (err: any) {
+            showAlert("Errore", err?.message || "Impossibile aprire quella commessa");
+          }
+        }
+        return;
+      }
       showAlert("Errore", e?.message || "Impossibile inviare la commessa");
     } finally { setSubmitting(false); }
   };

@@ -37,8 +37,14 @@ export async function api<T = any>(path: string, opts: ApiOptions = {}): Promise
   let data: any = null;
   try { data = text ? JSON.parse(text) : null; } catch { data = text; }
   if (!res.ok) {
-    const msg = (data && data.detail) || `Errore ${res.status}`;
-    throw new Error(msg);
+    const detail = data && data.detail;
+    // Il backend a volte spiega il rifiuto con un oggetto (es. il doppione di targa):
+    // il messaggio resta leggibile, ma i dettagli viaggiano attaccati all'errore.
+    const msg = typeof detail === "string" ? detail : detail?.messaggio || `Errore ${res.status}`;
+    const err: any = new Error(msg);
+    err.status = res.status;
+    err.detail = detail;
+    throw err;
   }
   return data as T;
 }
@@ -91,6 +97,28 @@ export type WorkOrderProposeIn = {
 /** Un operaio apre di sua iniziativa una commessa: puo lavorarci subito, il titolare la approva dopo. */
 export async function proposeWorkOrder(body: WorkOrderProposeIn): Promise<WorkOrder> {
   return api<WorkOrder>("/work-orders/propose", { method: "POST", body });
+}
+
+/** Il backend rifiuta la seconda commessa sulla stessa targa e dice qual e' quella buona. */
+export type CommessaGiaAperta = {
+  codice: "commessa_gia_aperta";
+  messaggio: string;
+  commessa_id: string;
+  plate: string;
+  vehicle: string;
+  descrizione: string;
+  aperta_da: string;
+  aperta_il: string;
+  stato: OrderStatus;
+};
+
+export function doppioneDiTarga(e: any): CommessaGiaAperta | null {
+  return e?.detail?.codice === "commessa_gia_aperta" ? (e.detail as CommessaGiaAperta) : null;
+}
+
+/** Il meccanico si mette sulla commessa che esiste gia' (quelle da STAR non hanno nessuno). */
+export async function prendiCommessa(orderId: string): Promise<WorkOrder> {
+  return api<WorkOrder>(`/work-orders/${orderId}/prendi`, { method: "POST" });
 }
 
 export type WorkEvent = {

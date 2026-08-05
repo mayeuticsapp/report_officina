@@ -639,9 +639,67 @@ class TestApprovazione:
 
 
 
+class TestDoppioniTarga:
+    """Una targa, una commessa. Due schede sulla stessa auto vogliono dire ore
+    divise a meta', foto sparse e il titolare che non sa quale sia quella buona."""
+
+    def test_seconda_commessa_stessa_targa_bloccata(self, session, state):
+        r = session.post(f"{API}/work-orders/propose", headers=state["worker_headers"], json={
+            "plate": "TEST-DOPPIO1", "description": "Tagliando"})
+        assert r.status_code == 200, r.text
+        state["doppio_order_id"] = r.json()["id"]
+
+        r2 = session.post(f"{API}/work-orders/propose", headers=state["worker_headers"], json={
+            "plate": "TEST-DOPPIO1", "description": "Freni"})
+        assert r2.status_code == 409, "la seconda sulla stessa targa non deve nascere"
+        d = r2.json()["detail"]
+        assert d["codice"] == "commessa_gia_aperta"
+        assert d["commessa_id"] == state["doppio_order_id"], "deve indicare quale aprire"
+        assert "Tagliando" in d["descrizione"]
+
+    def test_targa_scritta_con_spazi_e_minuscole_e_lo_stesso_doppione(self, session, state):
+        r = session.post(f"{API}/work-orders/propose", headers=state["worker_headers"], json={
+            "plate": " test-doppio1 ", "description": "Freni"})
+        assert r.status_code == 409, "la targa si normalizza prima del confronto"
+
+    def test_il_meccanico_puo_prendere_la_commessa_che_esiste_gia(self, session, state):
+        r = session.post(f"{API}/work-orders/{state['doppio_order_id']}/prendi",
+                         headers=state["worker_headers"])
+        assert r.status_code == 200, r.text
+        assert state["worker_id"] in r.json()["assigned_worker_ids"]
+
+    def test_prendi_funziona_anche_sulle_commesse_star_senza_nessuno(self, session, admin_headers, state):
+        """Il caso vero: la scheda arrivata da STAR non ha nessuno assegnato,
+        quindi il meccanico non la vede nemmeno nella sua lista. Deve poterla prendere."""
+        if not TestPlanning.OMNIUS_KEY:
+            pytest.skip("OMNIUS_KEY non configurata")
+        r = session.post(f"{API}/v1/omnius/commesse",
+                         headers={"X-Omnius-Key": TestPlanning.OMNIUS_KEY}, json={
+                             "star_doc_id": f"STAR-DOPPIO-{_run_id}", "plate": "TEST-DOPPIO2",
+                             "customer": "C", "vehicle": "V", "description": "Scheda STAR", "righe": []})
+        assert r.status_code == 200, r.text
+        oid = r.json()["work_order"]["id"]
+        assert r.json()["work_order"]["assigned_worker_ids"] == [], "da STAR non arriva assegnata"
+        r2 = session.post(f"{API}/work-orders/{oid}/prendi", headers=state["worker_headers"])
+        assert r2.status_code == 200, r2.text
+        assert state["worker_id"] in r2.json()["assigned_worker_ids"]
+        state["doppio_star_id"] = oid
+
+    def test_targa_libera_dopo_che_la_commessa_e_completata(self, session, state):
+        oid = state["doppio_order_id"]
+        session.post(f"{API}/work-orders/{oid}/events", headers=state["worker_headers"],
+                     json={"type": "START", "km": "100000", "libretto_base64": TestEvents.LIBRETTO_FINTO})
+        session.post(f"{API}/work-orders/{oid}/events", headers=state["worker_headers"],
+                     json={"type": "COMPLETE", "reason": "fatto", "minutes_effective": 60})
+        r = session.post(f"{API}/work-orders/propose", headers=state["worker_headers"], json={
+            "plate": "TEST-DOPPIO1", "description": "Tornata per i freni"})
+        assert r.status_code == 200, "auto chiusa: la stessa targa puo' tornare"
+        state["doppio_order2_id"] = r.json()["id"]
+
+
 class TestZCleanup:
     def test_cleanup_orders_and_worker(self, session, admin_headers, state):
-        for k in ("order_id", "order2_id"):
+        for k in ("order_id", "order2_id", "doppio_order_id", "doppio_order2_id", "doppio_star_id"):
             oid = state.get(k)
             if oid:
                 session.delete(f"{API}/work-orders/{oid}", headers=admin_headers)

@@ -936,9 +936,61 @@ async def approva_commessa(order_id: str, admin: dict = Depends(require_admin)):
     return _workorder_for_user(row_to_workorder(aggiornata), admin)
 
 
+async def commessa_aperta_stessa_targa(plate: str) -> Optional[dict]:
+    """Una targa alla volta: se su quella targa c'è già una commessa non completata,
+    la si restituisce. Due schede sulla stessa auto significano ore divise a metà,
+    foto sparse e il titolare che non capisce quale sia quella buona."""
+    return await fetchrow(
+        """SELECT * FROM work_orders WHERE plate=$1 AND status <> 'completed'
+           ORDER BY created_at DESC LIMIT 1""",
+        plate,
+    )
+
+
+def _dettaglio_doppione(esistente: dict) -> dict:
+    quando = esistente["created_at"].astimezone(FUSO_ITALIA).strftime("%d/%m alle %H:%M")
+    chi = esistente["created_by_name"] or "Omnius (STAR)"
+    return {
+        "codice": "commessa_gia_aperta",
+        "messaggio": (
+            f"Su {esistente['plate']} c'è già una commessa aperta: "
+            f"{esistente['description'] or 'senza descrizione'} — aperta da {chi} il {quando}. "
+            "Lavora su quella invece di aprirne una seconda."
+        ),
+        "commessa_id": esistente["id"],
+        "plate": esistente["plate"],
+        "vehicle": esistente["vehicle"],
+        "descrizione": esistente["description"],
+        "aperta_da": chi,
+        "aperta_il": quando,
+        "stato": esistente["status"],
+    }
+
+
+@api.post("/work-orders/{order_id}/prendi", response_model=WorkOrder)
+async def prendi_commessa(order_id: str, user: dict = Depends(get_current_user)):
+    """Il meccanico si mette sulla commessa che esiste già (tipico dopo il blocco del
+    doppione: le schede che arrivano da STAR non hanno nessuno assegnato)."""
+    row = await fetchrow("SELECT * FROM work_orders WHERE id=$1", order_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Commessa non trovata")
+    if row["status"] == "completed":
+        raise HTTPException(status_code=409, detail="Commessa già completata")
+    assegnati = list(row["assigned_worker_ids"] or [])
+    if user["id"] not in assegnati:
+        assegnati.append(user["id"])
+        await execute(
+            "UPDATE work_orders SET assigned_worker_ids=$1::jsonb, updated_at=$2 WHERE id=$3",
+            json.dumps(assegnati), now_utc(), order_id,
+        )
+        row = await fetchrow("SELECT * FROM work_orders WHERE id=$1", order_id)
+    return _workorder_for_user(row_to_workorder(row), user)
+
+
 @api.post("/work-orders/propose", response_model=WorkOrder)
 async def propose_work_order(body: WorkOrderPropose, user: dict = Depends(get_current_user)):
-    """Un operaio apre di sua iniziativa una scheda lavoro: resta 'pending' finché il titolare non la approva."""
+    """Un operaio apre di sua iniziativa una scheda lavoro. Parte subito: il titolare
+    la approva quando vuole, anche a lavoro finito."""
     new_id = str(uuid.uuid4())
     now = now_utc()
     scheda = SchedaTecnica().model_dump()
@@ -946,6 +998,9 @@ async def propose_work_order(body: WorkOrderPropose, user: dict = Depends(get_cu
     customer = (body.customer or "").strip() or "DA INSERIRE"
     vehicle = (body.vehicle or "").strip() or "Da identificare"
     plate = body.plate.strip().upper().replace(" ", "")
+    esistente = await commessa_aperta_stessa_targa(plate)
+    if esistente:
+        raise HTTPException(status_code=409, detail=_dettaglio_doppione(esistente))
     await execute(
         """INSERT INTO work_orders
            (id, plate, vin, customer, vehicle, description, assigned_worker_ids, status, scheda_tecnica, created_by, created_by_name, created_at, updated_at)
