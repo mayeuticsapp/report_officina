@@ -594,7 +594,7 @@ const styles = StyleSheet.create({
   statusChipTextOn: { color: colors.textInverse },
   empty: { padding: spacing.lg, borderWidth: 1, borderColor: colors.border },
   emptyText: { color: colors.textSecondary },
-  card: { borderWidth: 1, borderColor: colors.border, padding: spacing.md, marginBottom: spacing.sm, flexDirection: "row", alignItems: "flex-start" },
+  card: { borderWidth: 1, borderColor: colors.border, padding: spacing.md, marginBottom: spacing.sm },
   pendingSectionLabel: { fontSize: 11, letterSpacing: 2.5, color: colors.paused, fontWeight: "900" },
   approvedLabel: { fontSize: 11, letterSpacing: 2.5, color: colors.text, fontWeight: "900" },
   pendingCard: { borderWidth: 2, borderColor: colors.paused, padding: spacing.md, marginBottom: spacing.sm, backgroundColor: "#FFFBEB" },

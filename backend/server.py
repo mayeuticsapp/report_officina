@@ -3914,23 +3914,29 @@ def _genera_html_stampa(orders: List[WorkOrder], workers: List[dict]) -> str:
 @api.post("/work-orders/stampa-html")
 async def stampa_orders_html(body: PrintOrdersIn, admin: dict = Depends(require_admin)):
     """Genera HTML formattato per stampa PDF o diretta di commesse selezionate."""
-    if not body.order_ids:
-        raise HTTPException(status_code=400, detail="Nessuna commessa selezionata")
+    try:
+        if not body.order_ids:
+            raise HTTPException(status_code=400, detail="Nessuna commessa selezionata")
 
-    orders = []
-    for oid in body.order_ids[:100]:
-        row = await fetchrow("SELECT * FROM work_orders WHERE id=$1", oid)
-        if row:
-            orders.append(row_to_workorder(row))
+        orders = []
+        for oid in body.order_ids[:100]:
+            row = await fetchrow("SELECT * FROM work_orders WHERE id=$1", oid)
+            if row:
+                orders.append(row_to_workorder(row))
 
-    if not orders:
-        raise HTTPException(status_code=404, detail="Nessuna commessa trovata")
+        if not orders:
+            raise HTTPException(status_code=404, detail="Nessuna commessa trovata")
 
-    workers = await fetchall("SELECT id, full_name FROM users WHERE role='worker'")
-    workers_list = [dict(w) for w in workers] if workers else []
+        workers = await fetch("SELECT id, full_name FROM users WHERE role='worker'")
+        workers_list = workers if workers else []
 
-    html = _genera_html_stampa(orders, workers_list)
-    return HTMLResponse(content=html)
+        html = _genera_html_stampa(orders, workers_list)
+        return HTMLResponse(content=html)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Errore in stampa_orders_html: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Errore: {str(e)}")
 
 
 app.include_router(api)
