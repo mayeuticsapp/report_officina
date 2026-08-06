@@ -14,6 +14,7 @@ import { VoiceChat } from "@/src/components/VoiceChat";
 import { VehicleHistory } from "@/src/components/VehicleHistory";
 import { PhotoArchive } from "@/src/components/PhotoArchive";
 import { OrderMessages } from "@/src/components/OrderMessages";
+import { TimerDisplay } from "@/src/components/TimerDisplay";
 import { colors, spacing } from "@/src/theme";
 
 export default function OrderDetail() {
@@ -331,6 +332,11 @@ export default function OrderDetail() {
       </View>
 
       <ScrollView contentContainerStyle={{ paddingBottom: 120 }}>
+        {/* Timer: sempre visibile, grande */}
+        <View style={{ paddingHorizontal: spacing.lg, paddingTop: spacing.lg }}>
+          <TimerDisplay events={events} status={order.status} />
+        </View>
+
         {/* Details */}
         <View style={styles.detailsCard}>
           <Row label="VEICOLO" value={order.vehicle} />
