@@ -1,0 +1,653 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Manuale del meccanico — Report Officina</title>
+<meta name="description" content="Come si usa Report Officina: timbrare, aprire una commessa, lavorare e chiudere." />
+<meta name="robots" content="noindex, nofollow" />
+<link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+<link rel="apple-touch-icon" href="/icon-192.png" />
+<meta name="theme-color" content="#09090B" />
+<style>
+  /* ---------- TOKENS: dal design system dell'app (src/theme.ts) ---------- */
+  :root {
+    --bg:            #FFFFFF;
+    --bg-muted:      #F4F4F5;
+    --ink:           #09090B;
+    --ink-2:         #52525B;
+    --ink-3:         #7A7A85;
+    --line:          #E4E4E7;
+    --line-strong:   #09090B;
+    --accent:        #2563EB;
+    --accent-soft:   #EEF3FE;
+    --st-active:     #10B981;
+    --st-paused:     #FACC15;
+    --st-stopped:    #E11D48;
+    --st-idle:       #EA580C;
+    --btn-bg:        #09090B;
+    --btn-ink:       #FFFFFF;
+
+    --f-display: "Helvetica Neue", Helvetica, Arial, "Liberation Sans", sans-serif;
+    --f-body: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    --f-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+
+    --step: clamp(1rem, 0.85rem + 0.7vw, 1.25rem);
+    --maxw: 62rem;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg:          #0B0B0D;
+      --bg-muted:    #16161A;
+      --ink:         #F4F4F5;
+      --ink-2:       #A1A1AA;
+      --ink-3:       #71717A;
+      --line:        #2A2A31;
+      --line-strong: #F4F4F5;
+      --accent:      #6D9BFF;
+      --accent-soft: #16203A;
+      --st-active:   #34D399;
+      --st-paused:   #FDE047;
+      --st-stopped:  #FB7185;
+      --st-idle:     #FB923C;
+      --btn-bg:      #F4F4F5;
+      --btn-ink:     #09090B;
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --bg:          #0B0B0D;
+    --bg-muted:    #16161A;
+    --ink:         #F4F4F5;
+    --ink-2:       #A1A1AA;
+    --ink-3:       #71717A;
+    --line:        #2A2A31;
+    --line-strong: #F4F4F5;
+    --accent:      #6D9BFF;
+    --accent-soft: #16203A;
+    --st-active:   #34D399;
+    --st-paused:   #FDE047;
+    --st-stopped:  #FB7185;
+    --st-idle:     #FB923C;
+    --btn-bg:      #F4F4F5;
+    --btn-ink:     #09090B;
+  }
+
+  :root[data-theme="light"] {
+    --bg:          #FFFFFF;
+    --bg-muted:    #F4F4F5;
+    --ink:         #09090B;
+    --ink-2:       #52525B;
+    --ink-3:       #7A7A85;
+    --line:        #E4E4E7;
+    --line-strong: #09090B;
+    --accent:      #2563EB;
+    --accent-soft: #EEF3FE;
+    --st-active:   #10B981;
+    --st-paused:   #FACC15;
+    --st-stopped:  #E11D48;
+    --st-idle:     #EA580C;
+    --btn-bg:      #09090B;
+    --btn-ink:     #FFFFFF;
+  }
+
+  /* ---------- BASE ---------- */
+  *, *::before, *::after { box-sizing: border-box; }
+
+  html { -webkit-text-size-adjust: 100%; }
+
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--f-body);
+    font-size: var(--step);
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  img { max-width: 100%; }
+
+  .wrap {
+    max-width: var(--maxw);
+    margin: 0 auto;
+    padding: 0 1.25rem 6rem;
+  }
+
+  p { max-width: 62ch; }
+
+  a { color: var(--accent); text-underline-offset: 3px; }
+
+  :where(button, a):focus-visible {
+    outline: 3px solid var(--accent);
+    outline-offset: 3px;
+  }
+
+  /* ---------- TESTATA ---------- */
+  .top {
+    border-bottom: 2px solid var(--line-strong);
+    padding: 3.5rem 0 1.75rem;
+    display: flex;
+    flex-direction: column;
+    gap: 1.25rem;
+    margin-bottom: 1rem;
+  }
+
+  .eyebrow {
+    font-family: var(--f-mono);
+    font-size: 0.72rem;
+    letter-spacing: 0.22em;
+    text-transform: uppercase;
+    color: var(--ink-2);
+  }
+
+  h1 {
+    font-family: var(--f-display);
+    font-weight: 800;
+    letter-spacing: -0.035em;
+    line-height: 0.92;
+    font-size: clamp(2.6rem, 1.4rem + 5.4vw, 5rem);
+    text-wrap: balance;
+    margin: 0;
+  }
+
+  .lede {
+    font-size: clamp(1.05rem, 0.98rem + 0.35vw, 1.25rem);
+    color: var(--ink-2);
+    max-width: 48ch;
+    margin: 0;
+  }
+
+  /* ---------- SEZIONI ---------- */
+  .sec {
+    padding-top: 3.25rem;
+    display: flex;
+    flex-direction: column;
+    gap: 1.5rem;
+  }
+
+  .sec + .sec { border-top: 1px solid var(--line); }
+
+  .sec-head {
+    display: flex;
+    align-items: baseline;
+    gap: 1rem;
+  }
+
+  .sec-num {
+    font-family: var(--f-mono);
+    font-size: 0.78rem;
+    font-weight: 600;
+    letter-spacing: 0.1em;
+    color: var(--accent);
+    padding-top: 0.35rem;
+    flex: none;
+  }
+
+  h2 {
+    font-family: var(--f-display);
+    font-weight: 800;
+    letter-spacing: -0.02em;
+    line-height: 1.05;
+    font-size: clamp(1.6rem, 1.25rem + 1.5vw, 2.35rem);
+    text-wrap: balance;
+    margin: 0;
+  }
+
+  h3 {
+    font-family: var(--f-display);
+    font-weight: 700;
+    letter-spacing: 0.01em;
+    font-size: 1.08rem;
+    margin: 0 0 0.4rem;
+  }
+
+  .sec > p { margin: 0; }
+
+  /* ---------- BARRA DELLE SCHERMATE ---------- */
+  .screenbar {
+    background: var(--bg-muted);
+    border: 1px solid var(--line);
+    padding: 0.9rem 1rem;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.45rem;
+    align-items: center;
+  }
+
+  .screenbar .cap {
+    font-family: var(--f-mono);
+    font-size: 0.68rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+    margin-right: 0.35rem;
+  }
+
+  .tabchip {
+    font-family: var(--f-display);
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    padding: 0.3rem 0.6rem;
+    border: 1px solid var(--line);
+    background: var(--bg);
+    color: var(--ink-2);
+  }
+
+  .tabchip.here {
+    background: var(--btn-bg);
+    color: var(--btn-ink);
+    border-color: var(--btn-bg);
+  }
+
+  /* ---------- PASSI NUMERATI ---------- */
+  ol.steps {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 1.1rem;
+    counter-reset: s;
+  }
+
+  ol.steps > li {
+    counter-increment: s;
+    display: grid;
+    grid-template-columns: 2.4rem 1fr;
+    gap: 0 1rem;
+    align-items: start;
+  }
+
+  ol.steps > li::before {
+    content: counter(s);
+    font-family: var(--f-mono);
+    font-size: 0.9rem;
+    font-weight: 600;
+    color: var(--btn-ink);
+    background: var(--btn-bg);
+    width: 2.4rem;
+    height: 2.4rem;
+    display: grid;
+    place-items: center;
+  }
+
+  ol.steps h3 { margin-top: 0.35rem; }
+  ol.steps p { margin: 0; }
+  ol.steps > li > div { display: flex; flex-direction: column; gap: 0.5rem; }
+
+  /* ---------- SCHEDE ---------- */
+  .cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+    gap: 1px;
+    background: var(--line);
+    border: 1px solid var(--line);
+  }
+
+  .card {
+    background: var(--bg);
+    padding: 1.15rem 1.15rem 1.25rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+  }
+
+  .card p { margin: 0; font-size: 0.94rem; color: var(--ink-2); }
+
+  /* ---------- PULSANTI DELL'APP ---------- */
+  .btn {
+    display: inline-block;
+    font-family: var(--f-display);
+    font-size: 0.76rem;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    padding: 0.28rem 0.62rem;
+    background: var(--btn-bg);
+    color: var(--btn-ink);
+    white-space: nowrap;
+  }
+
+  /* ---------- SEQUENZA DEI PULSANTI ---------- */
+  .flow {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: stretch;
+    gap: 0.65rem;
+  }
+
+  .flow-item {
+    flex: 1 1 9rem;
+    border: 1px solid var(--line);
+    border-top: 5px solid var(--fc, var(--ink));
+    padding: 0.85rem 0.9rem 1rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+    background: var(--bg);
+  }
+
+  .flow-item .k {
+    font-family: var(--f-display);
+    font-weight: 800;
+    font-size: 0.92rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  .flow-item .v {
+    font-size: 0.88rem;
+    color: var(--ink-2);
+    line-height: 1.45;
+  }
+
+  /* ---------- RIQUADRO DI RILIEVO ---------- */
+  .note {
+    border-left: 5px solid var(--accent);
+    background: var(--accent-soft);
+    padding: 1rem 1.15rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+  }
+
+  .note.warn { border-left-color: var(--st-idle); background: var(--bg-muted); }
+
+  .note .t {
+    font-family: var(--f-display);
+    font-weight: 700;
+    font-size: 0.76rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+  }
+
+  .note p { margin: 0; font-size: 0.95rem; }
+
+  /* ---------- TIMER ---------- */
+  .timer {
+    border: 1px solid var(--line);
+    border-left: 6px solid var(--st-active);
+    padding: 1rem 1.2rem;
+    background: var(--bg-muted);
+    max-width: 22rem;
+  }
+
+  .timer .lab {
+    font-family: var(--f-display);
+    font-size: 0.68rem;
+    font-weight: 800;
+    letter-spacing: 0.18em;
+    color: var(--ink-2);
+  }
+
+  .timer .big {
+    font-family: var(--f-display);
+    font-size: 2.6rem;
+    font-weight: 800;
+    letter-spacing: -0.04em;
+    line-height: 1.05;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .timer .sub {
+    font-family: var(--f-display);
+    font-size: 0.66rem;
+    font-weight: 700;
+    letter-spacing: 0.16em;
+    color: var(--ink-2);
+  }
+
+  /* ---------- ELENCHI ---------- */
+  ul.plain {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+  }
+
+  ul.plain > li {
+    padding-left: 1.1rem;
+    position: relative;
+    max-width: 62ch;
+  }
+
+  ul.plain > li::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 0.62em;
+    width: 0.4rem;
+    height: 2px;
+    background: var(--ink-3);
+  }
+
+  /* ---------- CHIUSURA ---------- */
+  .foot {
+    margin-top: 4rem;
+    padding-top: 1.5rem;
+    border-top: 2px solid var(--line-strong);
+    color: var(--ink-2);
+    font-size: 0.9rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+  }
+
+  code {
+    font-family: var(--f-mono);
+    font-size: 0.88em;
+    background: var(--bg-muted);
+    padding: 0.1em 0.35em;
+    border: 1px solid var(--line);
+  }
+
+  .backlink {
+    display: inline-block;
+    font-family: var(--f-display);
+    font-size: 0.74rem;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    text-decoration: none;
+    border: 1px solid var(--line-strong);
+    padding: 0.5rem 0.9rem;
+    color: var(--ink);
+    margin-top: 0.6rem;
+    align-self: flex-start;
+  }
+
+  .backlink:hover { background: var(--btn-bg); color: var(--btn-ink); }
+
+  /* ---------- STAMPA ---------- */
+  @media print {
+    .sec { break-inside: avoid; }
+    .backlink { display: none; }
+    body { color: #000; background: #fff; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { transition: none !important; animation: none !important; }
+  }
+
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="top">
+    <div class="eyebrow">Autoservice Valente &middot; app.autoservicevalente.it</div>
+    <h1>Manuale<br>del meccanico</h1>
+    <p class="lede">Come si usa l'app, schermata per schermata: timbrare, aprire una commessa, lavorare e chiudere.</p>
+  </header>
+
+  <section class="sec">
+    <div class="sec-head">
+      <div class="sec-num">A</div>
+      <h2>Entrare la prima volta</h2>
+    </div>
+    <p>L'app si apre dal telefono all'indirizzo <strong>app.autoservicevalente.it</strong>. Non si scarica da nessun negozio.</p>
+    <ol class="steps">
+      <li><div>
+        <h3>Installala sulla schermata iniziale</h3>
+        <p>Apri l'indirizzo col browser. Comparir&agrave; la proposta di installare l'app: accettala. Da quel momento hai l'icona con l'ingranaggio sul telefono, come una qualsiasi altra app.</p>
+      </div></li>
+      <li><div>
+        <h3>Entra con le tue credenziali</h3>
+        <p>Nome utente e password te li d&agrave; il titolare. Sono personali: tutto quello che fai resta registrato a tuo nome.</p>
+      </div></li>
+      <li><div>
+        <h3>Cambia la password</h3>
+        <p>Vai in <span class="btn">Profilo</span> e imposta una password tua. Quella iniziale la conosce anche chi te l'ha data.</p>
+      </div></li>
+    </ol>
+    <div class="screenbar">
+      <span class="cap">In basso hai</span>
+      <span class="tabchip here">Oggi</span>
+      <span class="tabchip">Commesse</span>
+      <span class="tabchip">Profilo</span>
+    </div>
+  </section>
+
+  <section class="sec">
+    <div class="sec-head">
+      <div class="sec-num">B</div>
+      <h2>OGGI &mdash; la tua giornata</h2>
+    </div>
+    <p>&Egrave; la schermata che si apre per prima. Ti dice tre cose: se hai timbrato, cosa stai facendo adesso, quali commesse hai in mano.</p>
+
+    <h3>Il cartellino</h3>
+    <p>Il pulsante <span class="btn">Cartellino</span> in alto registra entrata e uscita. Si preme una volta quando arrivi e una volta quando vai via.</p>
+    <div class="note">
+      <div class="t">Sulla posizione</div>
+      <p>Quando timbri, l'app legge dove sei. Se risulti lontano dall'officina la timbratura <strong>vale lo stesso</strong>, ma il titolare la vede segnalata con la distanza. Se il telefono non riesce a leggere la posizione, la timbratura vale comunque: non resti mai bloccato.</p>
+    </div>
+
+    <h3>Il tuo stato</h3>
+    <p>Sotto vedi in che stato sei, e lo vede anche il titolare dalla sua dashboard:</p>
+    <div class="flow">
+      <div class="flow-item" style="--fc: var(--st-active)"><div class="k">Al lavoro</div><div class="v">Hai una commessa avviata e il tempo scorre.</div></div>
+      <div class="flow-item" style="--fc: var(--st-paused)"><div class="k">In pausa</div><div class="v">Hai messo in pausa. Il tempo &egrave; fermo.</div></div>
+      <div class="flow-item" style="--fc: var(--st-idle)"><div class="k">Libero</div><div class="v">Nessun lavoro avviato.</div></div>
+    </div>
+  </section>
+
+  <section class="sec">
+    <div class="sec-head">
+      <div class="sec-num">C</div>
+      <h2>Aprire una commessa nuova</h2>
+    </div>
+    <p>Dalla scheda <span class="btn">Commesse</span>, premi <span class="btn">Nuova</span>.</p>
+    <ol class="steps">
+      <li><div>
+        <h3>Scrivi la targa</h3>
+        <p>Nel formato <code>AA123BB</code>. Oppure fotografa la targa: l'app la legge da sola.</p>
+      </div></li>
+      <li><div>
+        <h3>Fotografa il libretto</h3>
+        <p>Con <span class="btn">Libretto</span> l'app ricava marca, modello, motore, alimentazione e intestatario senza che tu debba scrivere niente. Salta questo passaggio se il libretto non c'&egrave;: si pu&ograve; aggiungere dopo.</p>
+      </div></li>
+      <li><div>
+        <h3>Descrivi il lavoro da fare</h3>
+        <p>Con parole tue, come lo diresti a voce. &laquo;Fare la cinghia e cambiare il tubo dell'acqua&raquo; va benissimo.</p>
+      </div></li>
+      <li><div>
+        <h3>Premi INVIA AL TITOLARE</h3>
+        <p>La commessa parte. Resta in attesa della sua approvazione, ma <strong>tu puoi gi&agrave; iniziare a lavorarci</strong>: l'approvazione non ti blocca.</p>
+      </div></li>
+    </ol>
+    <div class="note warn">
+      <div class="t">Se la targa ha gi&agrave; una commessa aperta</div>
+      <p>L'app si ferma e ti mostra la commessa che esiste gi&agrave;, con chi ci sta lavorando. &Egrave; fatto apposta: prima si chiude quella, oppure ci si lavora sopra. Serve a non ritrovarsi due schede per la stessa macchina e le ore divise a met&agrave;.</p>
+    </div>
+  </section>
+
+  <section class="sec">
+    <div class="sec-head">
+      <div class="sec-num">D</div>
+      <h2>Lavorare: i quattro pulsanti</h2>
+    </div>
+    <p>Apri la commessa e trovi i comandi della lavorazione. Sono questi, sempre nello stesso ordine:</p>
+    <div class="flow">
+      <div class="flow-item" style="--fc: var(--st-active)"><div class="k">Inizia</div><div class="v">Premilo quando metti le mani sulla macchina. Da qui parte il tempo.</div></div>
+      <div class="flow-item" style="--fc: var(--st-paused)"><div class="k">Pausa</div><div class="v">Per il caff&egrave;, per un altro lavoro urgente, per il pezzo che non &egrave; arrivato. Il tempo si ferma.</div></div>
+      <div class="flow-item" style="--fc: var(--st-active)"><div class="k">Riprendi</div><div class="v">Il tempo riparte da dove si era fermato.</div></div>
+      <div class="flow-item" style="--fc: var(--st-stopped)"><div class="k">Completa</div><div class="v">Il lavoro &egrave; finito. Ti chiede le ore.</div></div>
+    </div>
+    <p>Se una commessa chiusa va riaperta, c'&egrave; <span class="btn">Riapri</span>.</p>
+
+    <h3>Il tempo che scorre</h3>
+    <p>In cima alla commessa, il riquadro grande conta le ore mentre lavori. Si aggiorna da solo, secondo per secondo.</p>
+    <div class="timer">
+      <div class="lab">IN CORSO</div>
+      <div class="big">1h 47m</div>
+      <div class="sub">PASSATI</div>
+    </div>
+    <p>Serve a farti capire come stai andando <em>mentre</em> lavori, non a cose fatte: se sei a un'ora e mezza su un lavoro da un'ora, lo vedi subito e decidi tu se stringere o se avvisare. <strong>Le pause non vengono contate</strong> &mdash; &egrave; tempo di lavoro vero.</p>
+  </section>
+
+  <section class="sec">
+    <div class="sec-head">
+      <div class="sec-num">E</div>
+      <h2>Foto, chilometri e domande all'AI</h2>
+    </div>
+    <div class="cards">
+      <div class="card">
+        <h3>Foto e video</h3>
+        <p><span class="btn">Scatta</span> per la fotocamera, <span class="btn">Galleria</span> per le foto gi&agrave; fatte. Servono a documentare com'era prima e com'&egrave; dopo: se il cliente contesta, la foto parla per te.</p>
+      </div>
+      <div class="card">
+        <h3>Libretto</h3>
+        <p>Fotografandolo, l'app compila da sola la scheda del veicolo. Puoi rileggere e correggere quello che ha capito.</p>
+      </div>
+      <div class="card">
+        <h3>Chilometraggio</h3>
+        <p>Con <span class="btn">Salva km</span> registri i chilometri del veicolo. Se non riesci a leggerli sul momento c'&egrave; <span class="btn">Non riesco a leggerli ora</span>: non resti bloccato.</p>
+      </div>
+      <div class="card">
+        <h3>Dialogo AI</h3>
+        <p>Puoi chiedere all'AI coppie di serraggio, procedure, dati tecnici. Attinge all'archivio tecnico che carica il titolare. Puoi anche parlare invece di scrivere.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="sec">
+    <div class="sec-head">
+      <div class="sec-num">F</div>
+      <h2>Chiudere il lavoro e dichiarare le ore</h2>
+    </div>
+    <p>&Egrave; il passaggio pi&ugrave; importante di tutti: <strong>quelle ore vanno in fattura</strong>.</p>
+    <ol class="steps">
+      <li><div>
+        <h3>Premi COMPLETA</h3>
+        <p>L'app ti propone le ore gi&agrave; calcolate. Le ricava da quello che hai scritto durante il lavoro; se non trova niente, usa i tempi dei pulsanti Inizia e Pausa.</p>
+      </div></li>
+      <li><div>
+        <h3>Controlla il numero</h3>
+        <p>Se &egrave; giusto premi <span class="btn">Conferma</span>. Se &egrave; sbagliato premi <span class="btn">Rifalla</span> e correggi tu.</p>
+      </div></li>
+      <li><div>
+        <h3>Premi SALVA ORE</h3>
+        <p>Da qui in poi il titolare vede le ore da fatturare su quella commessa.</p>
+      </div></li>
+    </ol>
+    <div class="note">
+      <div class="t">Perch&eacute; la proposta a volte non torna</div>
+      <p>Il numero proposto &egrave; un aiuto, non una sentenza. Se hai lasciato una commessa avviata tutta la notte, o se ti sei scordato di premere Pausa, il calcolo esce gonfiato. Guardalo sempre prima di confermare &mdash; l'ultima parola &egrave; tua.</p>
+    </div>
+  </section>
+
+  <div class="foot">
+    <div><strong>Report Officina</strong> &mdash; Autoservice Valente</div>
+    <div>Se qualcosa non torna, la prima cosa da provare &egrave; chiudere e riaprire l'app: si aggiorna da sola.</div>
+  </div>
+
+</div>
+
+</body>
+</html>
