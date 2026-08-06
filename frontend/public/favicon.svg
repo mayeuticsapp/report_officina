@@ -1,53 +1,33 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200">
-  <defs>
-    <style>
-      .gear { fill: #888; }
-      .gear-accent { fill: #E8913A; }
-      .wrench { fill: #2C3E50; }
-      .wrench-accent { fill: #E8913A; }
-      .tool { fill: #E8913A; }
-    </style>
-  </defs>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <!-- Report Officina — Autoservice Valente -->
+  <rect width="512" height="512" rx="112" fill="#0B0B0D"/>
 
-  <!-- Background -->
-  <circle cx="100" cy="100" r="95" fill="#3A4A5C"/>
-
-  <!-- Main gear -->
-  <g transform="translate(100, 100)">
-    <!-- Gear outer -->
-    <circle cx="0" cy="0" r="70" class="gear"/>
-    <!-- Gear teeth -->
-    <g class="gear">
-      <rect x="-8" y="-85" width="16" height="25" rx="2"/>
-      <rect x="-8" y="60" width="16" height="25" rx="2" transform="rotate(180 0 0)"/>
-      <rect x="-8" y="60" width="16" height="25" rx="2" transform="rotate(90 0 0)"/>
-      <rect x="-8" y="60" width="16" height="25" rx="2" transform="rotate(270 0 0)"/>
-      <rect x="-8" y="60" width="16" height="25" rx="2" transform="rotate(45 0 0)"/>
-      <rect x="-8" y="60" width="16" height="25" rx="2" transform="rotate(135 0 0)"/>
-      <rect x="-8" y="60" width="16" height="25" rx="2" transform="rotate(225 0 0)"/>
-      <rect x="-8" y="60" width="16" height="25" rx="2" transform="rotate(315 0 0)"/>
+  <!-- Ingranaggio -->
+  <g fill="#F5A623">
+    <g>
+      <rect x="226" y="100" width="60" height="60" rx="12"/>
+      <rect x="226" y="100" width="60" height="60" rx="12" transform="rotate(45 256 256)"/>
+      <rect x="226" y="100" width="60" height="60" rx="12" transform="rotate(90 256 256)"/>
+      <rect x="226" y="100" width="60" height="60" rx="12" transform="rotate(135 256 256)"/>
+      <rect x="226" y="100" width="60" height="60" rx="12" transform="rotate(180 256 256)"/>
+      <rect x="226" y="100" width="60" height="60" rx="12" transform="rotate(225 256 256)"/>
+      <rect x="226" y="100" width="60" height="60" rx="12" transform="rotate(270 256 256)"/>
+      <rect x="226" y="100" width="60" height="60" rx="12" transform="rotate(315 256 256)"/>
     </g>
+    <circle cx="256" cy="256" r="134"/>
+  </g>
+  <circle cx="256" cy="256" r="58" fill="#0B0B0D"/>
 
-    <!-- Gear inner circle with accent -->
-    <circle cx="0" cy="0" r="45" class="gear-accent"/>
-    <circle cx="0" cy="0" r="35" class="gear"/>
-
-    <!-- Wrench overlay (left) -->
-    <g transform="translate(-40, 0)">
-      <!-- Handle -->
-      <rect x="-15" y="-8" width="45" height="16" rx="8" class="wrench"/>
-      <!-- Head -->
-      <circle cx="35" cy="0" r="14" class="wrench"/>
-      <path d="M 35 -14 Q 42 -8, 42 0 Q 42 8, 35 14" fill="none" stroke="#E8913A" stroke-width="3"/>
-    </g>
-
-    <!-- Wrench overlay (right) -->
-    <g transform="translate(40, 0) rotate(90)">
-      <!-- Handle -->
-      <rect x="-15" y="-8" width="45" height="16" rx="8" class="wrench"/>
-      <!-- Head -->
-      <circle cx="35" cy="0" r="14" class="wrench"/>
-      <path d="M 35 -14 Q 42 -8, 42 0 Q 42 8, 35 14" fill="none" stroke="#E8913A" stroke-width="3"/>
+  <!-- Chiave inglese -->
+  <g transform="rotate(-42 256 256)">
+    <mask id="jaw" maskUnits="userSpaceOnUse" x="0" y="0" width="512" height="512">
+      <rect width="512" height="512" fill="#fff"/>
+      <circle cx="380" cy="256" r="34" fill="#000"/>
+      <rect x="380" y="222" width="80" height="68" fill="#000"/>
+    </mask>
+    <g fill="#FFFFFF" mask="url(#jaw)">
+      <rect x="150" y="228" width="230" height="56" rx="28"/>
+      <circle cx="380" cy="256" r="66"/>
     </g>
   </g>
 </svg>

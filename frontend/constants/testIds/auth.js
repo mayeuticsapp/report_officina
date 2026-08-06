@@ -14,7 +14,7 @@
 //     'login-submit-button', 'cart-quantity-input', 'product-card-image'.
 //
 // Why kebab-case values: required by qabot's CSS-attribute-style selector
-// matcher and the lint rule `emergent(kebab-case-testid-prop)`.
+// matcher and dalla regola di lint sui testid in kebab-case.
 
 export const LOGIN = {
 	emailInput: 'login-email-input',

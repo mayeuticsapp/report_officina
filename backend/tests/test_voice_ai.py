@@ -15,7 +15,7 @@ import base64
 import pytest
 import requests
 
-BASE_URL = os.environ.get("EXPO_BACKEND_URL") or "https://car-bay-flow.preview.emergentagent.com"
+BASE_URL = os.environ.get("EXPO_BACKEND_URL") or "http://localhost:8000"
 BASE_URL = BASE_URL.rstrip("/")
 
 ADMIN_USER = "admin"

@@ -24,11 +24,12 @@ s = s.replace("</title>", "</title>" + tags, 1)
 open(path, "w").write(s)
 print("PWA tags iniettati in", path)
 
-# Rimuovi favicon.ico vecchio (E di Emergent)
-favicon_ico = "dist/favicon.ico"
-if os.path.exists(favicon_ico):
-    os.remove(favicon_ico)
-    print("Rimosso favicon.ico (E di Emergent)")
+# Expo rigenera favicon.ico da assets/images/favicon.png: sovrascrivilo con il
+# nostro .ico multi-risoluzione (16/32/48/64), piu' nitido nella scheda browser.
+import shutil
+if os.path.exists("public/favicon.ico"):
+    shutil.copyfile("public/favicon.ico", "dist/favicon.ico")
+    print("favicon.ico sostituito con quello multi-risoluzione")
 EOF
 
 echo "Build completata: dist/"
