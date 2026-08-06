@@ -36,6 +36,8 @@ export default function OrdersAdmin() {
   const [search, setSearch] = useState("");
   // filtro secco per meccanico (le scorciatoie): non è una ricerca testuale
   const [soloDi, setSoloDi] = useState<string | null>(null);
+  // filtro per stato: null = tutte, altrimenti "open" | "in_progress" | "paused" | "completed"
+  const [filterStatus, setFilterStatus] = useState<string | null>(null);
 
   // silent: usato dall'aggiornamento automatico — se la rete cade per un attimo
   // non deve comparire un avviso ogni 15 secondi
@@ -63,13 +65,15 @@ export default function OrdersAdmin() {
   searchRef.current = search;
   const soloDiRef = useRef(soloDi);
   soloDiRef.current = soloDi;
+  const filterStatusRef = useRef(filterStatus);
+  filterStatusRef.current = filterStatus;
 
   useAutoRefresh(useCallback(() => load(searchRef.current, soloDiRef.current, true), [load]));
 
   useEffect(() => {
     const t = setTimeout(() => load(search, soloDi), 350);
     return () => clearTimeout(t);
-  }, [search, soloDi]);
+  }, [search, soloDi, filterStatus]);
 
   const openNew = () => {
     setEditing(null);
@@ -141,8 +145,9 @@ export default function OrdersAdmin() {
 
   // "da approvare" non blocca piu il lavoro: e una commessa come le altre,
   // che pero il titolare non ha ancora riconosciuto. Puo essere gia in corso.
-  const pendingOrders = orders.filter((o) => !o.approvata_il);
-  const otherOrders = orders.filter((o) => !!o.approvata_il);
+  const filteredByStatus = filterStatus ? orders.filter((o) => o.status === filterStatus) : orders;
+  const pendingOrders = filteredByStatus.filter((o) => !o.approvata_il);
+  const otherOrders = filteredByStatus.filter((o) => !!o.approvata_il);
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
@@ -219,6 +224,31 @@ export default function OrdersAdmin() {
           })}
         </ScrollView>
       )}
+
+      {/* Filtro per stato della commessa */}
+      <ScrollView
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        style={styles.statusScroller}
+        contentContainerStyle={styles.statusRow}
+      >
+        <Text style={styles.statusLabel}>TIPO:</Text>
+        {Object.entries(statusMap).map(([key, { label }]) => {
+          const attivo = filterStatus === key;
+          return (
+            <TouchableOpacity
+              key={key}
+              testID={`chip-status-${key}`}
+              style={[styles.statusChip, attivo && styles.statusChipOn]}
+              onPress={() => setFilterStatus(attivo ? null : key)}
+            >
+              <Text style={[styles.statusChipText, attivo && styles.statusChipTextOn]}>
+                {label}
+              </Text>
+            </TouchableOpacity>
+          );
+        })}
+      </ScrollView>
 
       {loading ? (
         <View style={styles.center}><ActivityIndicator color={colors.text} /></View>
@@ -402,6 +432,16 @@ const styles = StyleSheet.create({
   chiChipOn: { borderColor: colors.text, backgroundColor: colors.text },
   chiChipText: { fontSize: 12, fontWeight: "800", color: colors.text },
   chiChipTextOn: { color: colors.textInverse },
+  statusScroller: { maxHeight: 52, marginTop: spacing.sm },
+  statusRow: { paddingHorizontal: spacing.lg, gap: 6, alignItems: "center", paddingVertical: 6 },
+  statusLabel: { fontSize: 10, letterSpacing: 1.2, fontWeight: "800", color: colors.textSecondary, marginRight: 2 },
+  statusChip: {
+    flexShrink: 0, height: 34, paddingHorizontal: 12, alignItems: "center", justifyContent: "center",
+    borderWidth: 1, borderColor: colors.border, backgroundColor: colors.bg,
+  },
+  statusChipOn: { borderColor: colors.primary, backgroundColor: colors.primary },
+  statusChipText: { fontSize: 11, fontWeight: "800", color: colors.text },
+  statusChipTextOn: { color: colors.textInverse },
   empty: { padding: spacing.lg, borderWidth: 1, borderColor: colors.border },
   emptyText: { color: colors.textSecondary },
   card: { borderWidth: 1, borderColor: colors.border, padding: spacing.md, marginBottom: spacing.sm },
