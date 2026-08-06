@@ -52,10 +52,13 @@ VAPID_PRIVATE_KEY_FILE = os.environ.get("VAPID_PRIVATE_KEY_FILE", "")
 VAPID_PUBLIC_KEY = os.environ.get("VAPID_PUBLIC_KEY", "")
 VAPID_SUB = os.environ.get("VAPID_SUB", "mailto:info@example.com")
 
-# Telegram: avvisa il titolare a lavoro completato, anche ad app chiusa.
+# Telegram: avvisa i titolari a lavoro completato, anche ad app chiusa.
 # Senza token il sistema resta zitto e non fallisce mai: e' un canale in piu', non un requisito.
+#
+# Ogni titolare si aggancia in CHAT PRIVATA col bot, non in un gruppo: nei gruppi
+# Telegram attiva la "modalita privacy" e il bot non vedrebbe i messaggi, quindi non
+# potremmo mai ricavarne l'identificativo. Nelle chat private invece riceve tutto.
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -604,6 +607,16 @@ async def startup():
         # Serve perche' una notifica si puo' perdere, una lista no.
         await conn.execute("ALTER TABLE work_orders ADD COLUMN IF NOT EXISTS fatturata_il TIMESTAMPTZ")
         await conn.execute("ALTER TABLE work_orders ADD COLUMN IF NOT EXISTS fatturata_da_nome TEXT")
+        # Chi riceve gli avvisi su Telegram. Una riga per titolare, chat privata col bot.
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS telegram_chats (
+                chat_id TEXT PRIMARY KEY,
+                nome TEXT,
+                username TEXT,
+                aggiunto_il TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                attivo BOOLEAN NOT NULL DEFAULT TRUE
+            )
+        """)
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS plate_lookup_requests (
                 id TEXT PRIMARY KEY,
@@ -2307,26 +2320,38 @@ def fmt_durata_minuti(minuti: Optional[int]) -> str:
 
 
 async def _telegram_notify(text: str):
-    """Manda un messaggio al gruppo Telegram del titolare. Soft-fail: se Telegram non
+    """Manda un messaggio a ogni titolare agganciato al bot. Soft-fail: se Telegram non
     risponde o non e' configurato, il lavoro del meccanico non ne risente in alcun modo."""
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+    if not TELEGRAM_BOT_TOKEN:
         return
     try:
+        righe = await fetch("SELECT chat_id FROM telegram_chats WHERE attivo = TRUE")
+        if not righe:
+            return
         import httpx
         async with httpx.AsyncClient(timeout=10) as client:
-            r = await client.post(
-                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                json={
-                    "chat_id": TELEGRAM_CHAT_ID,
-                    "text": text,
-                    "parse_mode": "HTML",
-                    "disable_web_page_preview": True,
-                },
-            )
-            if r.status_code != 200:
-                logger.warning(f"telegram: risposta {r.status_code}: {r.text[:200]}")
+            for r in righe:
+                chat_id = r["chat_id"]
+                try:
+                    resp = await client.post(
+                        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                        json={
+                            "chat_id": chat_id,
+                            "text": text,
+                            "parse_mode": "HTML",
+                            "disable_web_page_preview": True,
+                        },
+                    )
+                    if resp.status_code == 403:
+                        # il titolare ha bloccato il bot: si disattiva invece di riprovare all'infinito
+                        await execute("UPDATE telegram_chats SET attivo=FALSE WHERE chat_id=$1", chat_id)
+                        logger.info(f"telegram: {chat_id} ha bloccato il bot, disattivato")
+                    elif resp.status_code != 200:
+                        logger.warning(f"telegram {chat_id}: risposta {resp.status_code}: {resp.text[:160]}")
+                except Exception as e:
+                    logger.warning(f"telegram {chat_id}: invio fallito: {e}")
     except Exception as e:
-        logger.warning(f"telegram: invio fallito: {e}")
+        logger.warning(f"telegram: errore generale: {e}")
 
 
 async def _avvisa_lavoro_completato(order_id: str, worker_name: str):
@@ -2371,6 +2396,104 @@ async def _avvisa_lavoro_completato(order_id: str, worker_name: str):
         await _telegram_notify("\n".join(r for r in righe if r != ""))
     except Exception as e:
         logger.warning(f"avviso completamento fallito: {e}")
+
+
+class TelegramChatOut(BaseModel):
+    chat_id: str
+    nome: Optional[str] = None
+    username: Optional[str] = None
+    attivo: bool
+
+
+class TelegramStatoOut(BaseModel):
+    configurato: bool          # il bot esiste (token presente sul server)
+    bot_username: Optional[str] = None
+    agganciati: List[TelegramChatOut]
+
+
+@api.get("/telegram/stato", response_model=TelegramStatoOut)
+async def telegram_stato(admin: dict = Depends(require_admin)):
+    """Chi riceve gli avvisi su Telegram in questo momento."""
+    if not TELEGRAM_BOT_TOKEN:
+        return TelegramStatoOut(configurato=False, agganciati=[])
+
+    bot_username = None
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=8) as client:
+            r = await client.get(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getMe")
+            if r.status_code == 200:
+                bot_username = (r.json().get("result") or {}).get("username")
+    except Exception as e:
+        logger.warning(f"telegram getMe: {e}")
+
+    righe = await fetch("SELECT chat_id, nome, username, attivo FROM telegram_chats ORDER BY aggiunto_il")
+    return TelegramStatoOut(
+        configurato=True,
+        bot_username=bot_username,
+        agganciati=[TelegramChatOut(**dict(r)) for r in righe],
+    )
+
+
+@api.post("/telegram/aggancia", response_model=TelegramStatoOut)
+async def telegram_aggancia(admin: dict = Depends(require_admin)):
+    """Registra chiunque abbia scritto al bot in chat privata e non sia gia in elenco.
+
+    Il titolare apre il bot su Telegram, preme AVVIA, poi tocca questo pulsante nell'app:
+    da quel momento riceve gli avvisi. Nessuna configurazione sul server."""
+    if not TELEGRAM_BOT_TOKEN:
+        raise HTTPException(status_code=400, detail="Telegram non configurato: manca il token del bot")
+
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=12) as client:
+            r = await client.get(
+                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates",
+                params={"limit": 100, "allowed_updates": '["message"]'},
+            )
+        if r.status_code != 200:
+            raise HTTPException(status_code=502, detail=f"Telegram ha risposto {r.status_code}")
+        updates = (r.json() or {}).get("result") or []
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.warning(f"telegram getUpdates: {e}")
+        raise HTTPException(status_code=502, detail="Non riesco a contattare Telegram")
+
+    nuovi = 0
+    for u in updates:
+        chat = ((u.get("message") or {}).get("chat")) or {}
+        # solo chat private: nei gruppi la modalita privacy impedisce al bot di vedere i messaggi
+        if chat.get("type") != "private" or not chat.get("id"):
+            continue
+        nome = " ".join(x for x in [chat.get("first_name"), chat.get("last_name")] if x) or None
+        esiste = await fetchrow("SELECT chat_id FROM telegram_chats WHERE chat_id=$1", str(chat["id"]))
+        if esiste:
+            await execute("UPDATE telegram_chats SET attivo=TRUE, nome=$2, username=$3 WHERE chat_id=$1",
+                          str(chat["id"]), nome, chat.get("username"))
+        else:
+            await execute(
+                "INSERT INTO telegram_chats (chat_id, nome, username) VALUES ($1,$2,$3)",
+                str(chat["id"]), nome, chat.get("username"),
+            )
+            nuovi += 1
+
+    if nuovi:
+        await _telegram_notify(
+            "✅ <b>Collegamento riuscito</b>\n\n"
+            "Da adesso ricevi qui un avviso ogni volta che un meccanico completa un lavoro.\n\n"
+            "<i>Suggerimento: dalle impostazioni di questa chat puoi scegliere una suoneria "
+            "personalizzata, anche lunga, così te ne accorgi anche col telefono in tasca.</i>"
+        )
+
+    return await telegram_stato(admin)
+
+
+@api.delete("/telegram/{chat_id}")
+async def telegram_rimuovi(chat_id: str, admin: dict = Depends(require_admin)):
+    """Smette di mandare avvisi a questo destinatario."""
+    await execute("DELETE FROM telegram_chats WHERE chat_id=$1", chat_id)
+    return {"ok": True}
 
 
 @api.get("/push/vapid-public")

@@ -1,8 +1,9 @@
 import { useState } from "react";
-import { View, Text, StyleSheet, TouchableOpacity } from "react-native";
+import { View, Text, StyleSheet, TouchableOpacity, ScrollView } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useAuth } from "@/src/auth/AuthContext";
 import { NotificationToggle } from "@/src/components/NotificationToggle";
+import { TelegramCollega } from "@/src/components/TelegramCollega";
 import { ChangePassword } from "@/src/components/ChangePassword";
 import { colors, spacing } from "@/src/theme";
 
@@ -16,7 +17,7 @@ export default function AdminProfile() {
         <Text style={styles.headerLabel}>PROFILO</Text>
         <Text style={styles.title}>AMMINISTRATORE</Text>
       </View>
-      <View style={styles.body}>
+      <ScrollView contentContainerStyle={styles.body}>
         <View style={styles.card}>
           <Text style={styles.label}>NOME</Text>
           <Text style={styles.value}>{user?.full_name}</Text>
@@ -27,6 +28,8 @@ export default function AdminProfile() {
         </View>
 
         <NotificationToggle />
+
+        <TelegramCollega />
 
         <ChangePassword />
 
@@ -47,7 +50,7 @@ export default function AdminProfile() {
             </View>
           </View>
         )}
-      </View>
+      </ScrollView>
     </SafeAreaView>
   );
 }
@@ -57,7 +60,7 @@ const styles = StyleSheet.create({
   header: { padding: spacing.lg, borderBottomWidth: 1, borderBottomColor: colors.border },
   headerLabel: { fontSize: 11, letterSpacing: 3, color: colors.textSecondary, fontWeight: "700" },
   title: { fontSize: 26, fontWeight: "900", color: colors.text, letterSpacing: -0.5 },
-  body: { padding: spacing.lg },
+  body: { padding: spacing.lg, paddingBottom: spacing.xxl },
   card: { borderWidth: 1, borderColor: colors.border, padding: spacing.lg },
   label: { fontSize: 11, letterSpacing: 3, color: colors.textSecondary, fontWeight: "700" },
   value: { fontSize: 18, color: colors.text, marginTop: 4, fontWeight: "600" },

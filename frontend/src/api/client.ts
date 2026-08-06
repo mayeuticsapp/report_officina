@@ -605,6 +605,34 @@ export async function segnaFatturata(orderId: string): Promise<WorkOrder> {
   return api<WorkOrder>(`/work-orders/${orderId}/fatturata`, { method: "POST" });
 }
 
+/* ---- Avvisi su Telegram ---- */
+
+export type TelegramChat = {
+  chat_id: string;
+  nome?: string | null;
+  username?: string | null;
+  attivo: boolean;
+};
+
+export type TelegramStato = {
+  configurato: boolean;
+  bot_username?: string | null;
+  agganciati: TelegramChat[];
+};
+
+export async function telegramStato(): Promise<TelegramStato> {
+  return api<TelegramStato>("/telegram/stato");
+}
+
+/** Registra chi ha premuto AVVIA sul bot. Da chiamare dopo aver scritto al bot. */
+export async function telegramAggancia(): Promise<TelegramStato> {
+  return api<TelegramStato>("/telegram/aggancia", { method: "POST" });
+}
+
+export async function telegramRimuovi(chatId: string): Promise<void> {
+  await api(`/telegram/${chatId}`, { method: "DELETE" });
+}
+
 /** Rimette la commessa fra quelle da fatturare (spunta sbagliata). */
 export async function annullaFatturata(orderId: string): Promise<WorkOrder> {
   return api<WorkOrder>(`/work-orders/${orderId}/annulla-fatturata`, { method: "POST" });
