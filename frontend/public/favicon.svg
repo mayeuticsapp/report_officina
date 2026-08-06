@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200">
+  <defs>
+    <style>
+      .gear { fill: #888; }
+      .gear-accent { fill: #E8913A; }
+      .wrench { fill: #2C3E50; }
+      .wrench-accent { fill: #E8913A; }
+      .tool { fill: #E8913A; }
+    </style>
+  </defs>
+
+  <!-- Background -->
+  <circle cx="100" cy="100" r="95" fill="#3A4A5C"/>
+
+  <!-- Main gear -->
+  <g transform="translate(100, 100)">
+    <!-- Gear outer -->
+    <circle cx="0" cy="0" r="70" class="gear"/>
+    <!-- Gear teeth -->
+    <g class="gear">
+      <rect x="-8" y="-85" width="16" height="25" rx="2"/>
+      <rect x="-8" y="60" width="16" height="25" rx="2" transform="rotate(180 0 0)"/>
+      <rect x="-8" y="60" width="16" height="25" rx="2" transform="rotate(90 0 0)"/>
+      <rect x="-8" y="60" width="16" height="25" rx="2" transform="rotate(270 0 0)"/>
+      <rect x="-8" y="60" width="16" height="25" rx="2" transform="rotate(45 0 0)"/>
+      <rect x="-8" y="60" width="16" height="25" rx="2" transform="rotate(135 0 0)"/>
+      <rect x="-8" y="60" width="16" height="25" rx="2" transform="rotate(225 0 0)"/>
+      <rect x="-8" y="60" width="16" height="25" rx="2" transform="rotate(315 0 0)"/>
+    </g>
+
+    <!-- Gear inner circle with accent -->
+    <circle cx="0" cy="0" r="45" class="gear-accent"/>
+    <circle cx="0" cy="0" r="35" class="gear"/>
+
+    <!-- Wrench overlay (left) -->
+    <g transform="translate(-40, 0)">
+      <!-- Handle -->
+      <rect x="-15" y="-8" width="45" height="16" rx="8" class="wrench"/>
+      <!-- Head -->
+      <circle cx="35" cy="0" r="14" class="wrench"/>
+      <path d="M 35 -14 Q 42 -8, 42 0 Q 42 8, 35 14" fill="none" stroke="#E8913A" stroke-width="3"/>
+    </g>
+
+    <!-- Wrench overlay (right) -->
+    <g transform="translate(40, 0) rotate(90)">
+      <!-- Handle -->
+      <rect x="-15" y="-8" width="45" height="16" rx="8" class="wrench"/>
+      <!-- Head -->
+      <circle cx="35" cy="0" r="14" class="wrench"/>
+      <path d="M 35 -14 Q 42 -8, 42 0 Q 42 8, 35 14" fill="none" stroke="#E8913A" stroke-width="3"/>
+    </g>
+  </g>
+</svg>

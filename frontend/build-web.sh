@@ -12,6 +12,7 @@ path = "dist/index.html"
 s = open(path).read()
 s = s.replace("<title>frontend</title>", "<title>Report Officina</title>")
 tags = (
+    '<link rel="icon" href="/favicon.svg" type="image/svg+xml" />'
     '<link rel="manifest" href="/manifest.json" />'
     '<meta name="theme-color" content="#09090B" />'
     '<link rel="apple-touch-icon" href="/icon-192.png" />'
