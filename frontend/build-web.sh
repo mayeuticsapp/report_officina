@@ -8,6 +8,7 @@ rm -rf dist
 EXPO_PUBLIC_BACKEND_URL="" ./node_modules/.bin/expo export --platform web
 
 python3 - <<'EOF'
+import os
 path = "dist/index.html"
 s = open(path).read()
 s = s.replace("<title>frontend</title>", "<title>Report Officina</title>")
@@ -22,6 +23,12 @@ assert "manifest.json" not in s
 s = s.replace("</title>", "</title>" + tags, 1)
 open(path, "w").write(s)
 print("PWA tags iniettati in", path)
+
+# Rimuovi favicon.ico vecchio (E di Emergent)
+favicon_ico = "dist/favicon.ico"
+if os.path.exists(favicon_ico):
+    os.remove(favicon_ico)
+    print("Rimosso favicon.ico (E di Emergent)")
 EOF
 
 echo "Build completata: dist/"

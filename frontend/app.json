@@ -10,7 +10,7 @@
     "newArchEnabled": true,
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.emergent.carbayflow.dapsm6",
+      "bundleIdentifier": "it.autoservicevalente.reportofficina",
       "infoPlist": {
         "NSCameraUsageDescription": "Fotografa targa e componenti del veicolo",
         "NSPhotoLibraryUsageDescription": "Allega foto ai lavori",
@@ -23,7 +23,7 @@
         "backgroundColor": "#000000"
       },
       "edgeToEdgeEnabled": true,
-      "package": "com.emergent.carbayflow.dapsm6",
+      "package": "it.autoservicevalente.reportofficina",
       "permissions": ["CAMERA", "RECORD_AUDIO", "READ_MEDIA_IMAGES"]
     },
     "web": {
