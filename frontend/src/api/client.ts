@@ -82,9 +82,19 @@ export type WorkOrder = {
   /** null = ancora da approvare (ma il meccanico puo gia lavorarci) */
   approvata_il?: string | null;
   approvata_da_nome?: string | null;
+  /** null su una commessa completata = fattura ancora da preparare */
+  fatturata_il?: string | null;
+  fatturata_da_nome?: string | null;
   created_at: string;
   updated_at: string;
 };
+
+/** Le commesse finite di cui il titolare non ha ancora preparato la fattura. */
+export function daFatturare(orders: WorkOrder[]): WorkOrder[] {
+  return orders
+    .filter((o) => o.status === "completed" && !o.fatturata_il)
+    .sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime());
+}
 
 export type WorkOrderProposeIn = {
   plate: string;
@@ -588,4 +598,14 @@ export async function correggiDocumento(docId: string, title: string, content: s
  *  Il lavoro puo essere gia partito: l'approvazione non e piu un permesso a iniziare. */
 export async function approvaCommessa(orderId: string): Promise<WorkOrder> {
   return api<WorkOrder>(`/work-orders/${orderId}/approva`, { method: "POST" });
+}
+
+/** Fattura preparata: la commessa esce dalla lista dei sospesi. */
+export async function segnaFatturata(orderId: string): Promise<WorkOrder> {
+  return api<WorkOrder>(`/work-orders/${orderId}/fatturata`, { method: "POST" });
+}
+
+/** Rimette la commessa fra quelle da fatturare (spunta sbagliata). */
+export async function annullaFatturata(orderId: string): Promise<WorkOrder> {
+  return api<WorkOrder>(`/work-orders/${orderId}/annulla-fatturata`, { method: "POST" });
 }

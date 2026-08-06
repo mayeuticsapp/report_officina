@@ -1,31 +1,61 @@
-import { useCallback, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { View, Text, StyleSheet, ScrollView, RefreshControl, ActivityIndicator, TouchableOpacity } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useRouter } from "expo-router";
-import { api, LiveStatus, WorkEvent } from "@/src/api/client";
+import { api, LiveStatus, WorkEvent, WorkOrder, daFatturare, segnaFatturata, fmtDurata } from "@/src/api/client";
 import { useAutoRefresh } from "@/src/hooks/use-auto-refresh";
+import { avviaAllarme, fermaAllarme, preparaAudio } from "@/src/utils/allarme";
 import { colors, spacing } from "@/src/theme";
 
 export default function Dashboard() {
   const router = useRouter();
   const [live, setLive] = useState<LiveStatus[]>([]);
   const [recent, setRecent] = useState<WorkEvent[]>([]);
+  const [sospese, setSospese] = useState<WorkOrder[]>([]);
+  const [allarme, setAllarme] = useState(false);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [tick, setTick] = useState(0);
 
+  // Quali commesse da fatturare avevamo gia visto. null = primo caricamento:
+  // all'apertura della dashboard l'allarme non deve suonare per il pregresso.
+  const vistiRef = useRef<Set<string> | null>(null);
+
   const load = useCallback(async () => {
     try {
-      const [ls, ev] = await Promise.all([
+      const [ls, ev, ords] = await Promise.all([
         api<LiveStatus[]>("/workers/live-status"),
         api<WorkEvent[]>("/events/recent?limit=20"),
+        api<WorkOrder[]>("/work-orders"),
       ]);
       setLive(ls);
       setRecent(ev);
+
+      const daFare = daFatturare(ords);
+      setSospese(daFare);
+
+      const ids = new Set(daFare.map((o) => o.id));
+      if (vistiRef.current === null) {
+        vistiRef.current = ids;            // primo giro: prendiamo nota e basta
+      } else {
+        const nuove = [...ids].filter((id) => !vistiRef.current!.has(id));
+        if (nuove.length > 0) {
+          avviaAllarme();
+          setAllarme(true);
+        }
+        vistiRef.current = ids;
+      }
     } catch (e) { console.warn(e); }
     finally { setLoading(false); setRefreshing(false); }
   }, []);
+
+  const zittisci = useCallback(() => { fermaAllarme(); setAllarme(false); }, []);
+
+  const fattura = useCallback(async (id: string) => {
+    setSospese((s) => s.filter((o) => o.id !== id));   // sparisce subito, senza attese
+    try { await segnaFatturata(id); } catch (e) { console.warn(e); load(); }
+  }, [load]);
 
   useAutoRefresh(useCallback(() => { load(); setTick((x) => x + 1); }, [load]));
 
@@ -63,13 +93,53 @@ export default function Dashboard() {
       <ScrollView
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); load(); }} />}
         contentContainerStyle={{ paddingBottom: spacing.xl }}
+        onTouchStart={preparaAudio}
       >
+        {/* Allarme: un meccanico ha appena finito. Suona finche non lo si zittisce. */}
+        {allarme ? (
+          <TouchableOpacity testID="banner-allarme" style={styles.allarme} onPress={zittisci} activeOpacity={0.85}>
+            <Ionicons name="notifications" size={22} color={colors.textInverse} />
+            <View style={{ flex: 1 }}>
+              <Text style={styles.allarmeTitolo}>LAVORO COMPLETATO</Text>
+              <Text style={styles.allarmeSub}>Tocca per zittire l&apos;allarme</Text>
+            </View>
+          </TouchableOpacity>
+        ) : null}
+
         {/* KPI grid */}
         <View style={styles.kpiRow}>
           <Kpi testID="kpi-working" value={working} label="AL LAVORO" color={colors.active} />
           <Kpi testID="kpi-paused" value={paused} label="IN PAUSA" color={colors.paused} textDark />
           <Kpi testID="kpi-idle" value={idle} label="LIBERI" color={colors.idle} />
         </View>
+
+        {/* Da fatturare: resta li finche il titolare non spunta. Una notifica si perde, una lista no. */}
+        {sospese.length > 0 ? (
+          <>
+            <Text style={styles.sectionLabel}>DA FATTURARE ({sospese.length})</Text>
+            {sospese.map((o) => (
+              <View key={o.id} testID={`da-fatturare-${o.id}`} style={styles.fattRow}>
+                <TouchableOpacity style={{ flex: 1 }} onPress={() => router.push(`/(admin)/order/${o.id}` as any)}>
+                  <Text style={styles.fattTarga}>{o.plate?.toUpperCase()}</Text>
+                  <Text style={styles.fattSub} numberOfLines={1}>
+                    {[o.vehicle, o.customer].filter(Boolean).join(" · ")}
+                  </Text>
+                  <Text style={styles.fattOre}>
+                    {o.minutes_effective ? fmtDurata(o.minutes_effective) : "ore da confermare"}
+                  </Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  testID={`btn-fatturata-${o.id}`}
+                  style={styles.fattBtn}
+                  onPress={() => fattura(o.id)}
+                >
+                  <Ionicons name="checkmark" size={16} color={colors.textInverse} />
+                  <Text style={styles.fattBtnText}>FATTURATA</Text>
+                </TouchableOpacity>
+              </View>
+            ))}
+          </>
+        ) : null}
 
         {/* Workers live */}
         <Text style={styles.sectionLabel}>OPERAI IN TEMPO REALE</Text>
@@ -159,6 +229,29 @@ const styles = StyleSheet.create({
   },
   empty: { marginHorizontal: spacing.lg, padding: spacing.md, borderWidth: 1, borderColor: colors.border },
   emptyText: { color: colors.textSecondary, fontSize: 13 },
+
+  // Allarme lavoro completato
+  allarme: {
+    marginHorizontal: spacing.lg, marginBottom: spacing.md, padding: spacing.md,
+    backgroundColor: colors.stopped, flexDirection: "row", alignItems: "center", gap: 12,
+  },
+  allarmeTitolo: { fontSize: 15, fontWeight: "900", letterSpacing: 1.5, color: colors.textInverse },
+  allarmeSub: { fontSize: 12, color: colors.textInverse, opacity: 0.9, marginTop: 2 },
+
+  // Lista da fatturare
+  fattRow: {
+    marginHorizontal: spacing.lg, marginBottom: spacing.sm, padding: spacing.md,
+    borderWidth: 1, borderColor: colors.border, borderLeftWidth: 5, borderLeftColor: colors.stopped,
+    flexDirection: "row", alignItems: "center", gap: spacing.sm,
+  },
+  fattTarga: { fontSize: 16, fontWeight: "900", letterSpacing: 1, color: colors.text },
+  fattSub: { fontSize: 12, color: colors.textSecondary, marginTop: 2 },
+  fattOre: { fontSize: 12, fontWeight: "700", color: colors.text, marginTop: 4 },
+  fattBtn: {
+    backgroundColor: colors.text, paddingHorizontal: spacing.md, paddingVertical: spacing.sm,
+    flexDirection: "row", alignItems: "center", gap: 6,
+  },
+  fattBtnText: { fontSize: 11, fontWeight: "800", letterSpacing: 1, color: colors.textInverse },
   liveRow: {
     marginHorizontal: spacing.lg, marginBottom: spacing.sm, padding: spacing.md,
     borderWidth: 1, borderColor: colors.border, flexDirection: "row", alignItems: "center",

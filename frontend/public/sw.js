@@ -6,6 +6,7 @@ self.addEventListener("push", (event) => {
   let data = {};
   try { data = event.data ? event.data.json() : {}; } catch (e) { /* payload non JSON */ }
   const title = data.title || "Report Officina";
+  const urgente = data.urgente === true;
   event.waitUntil(
     self.registration.showNotification(title, {
       body: data.body || "",
@@ -14,6 +15,10 @@ self.addEventListener("push", (event) => {
       data: { url: data.url || "/" },
       tag: data.tag || "officina-msg",
       renotify: true,
+      // lavoro completato: resta sullo schermo finche non la si tocca, non sparisce da sola
+      requireInteraction: urgente,
+      // vibrazione lunga: sul telefono in tasca si sente anche col suono basso
+      vibrate: urgente ? [400, 200, 400, 200, 400, 200, 600] : undefined,
     })
   );
 });

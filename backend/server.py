@@ -52,6 +52,11 @@ VAPID_PRIVATE_KEY_FILE = os.environ.get("VAPID_PRIVATE_KEY_FILE", "")
 VAPID_PUBLIC_KEY = os.environ.get("VAPID_PUBLIC_KEY", "")
 VAPID_SUB = os.environ.get("VAPID_SUB", "mailto:info@example.com")
 
+# Telegram: avvisa il titolare a lavoro completato, anche ad app chiusa.
+# Senza token il sistema resta zitto e non fallisce mai: e' un canale in piu', non un requisito.
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
+
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("officina")
@@ -333,6 +338,9 @@ class WorkOrder(BaseModel):
     # ma il meccanico puo gia lavorarci.
     approvata_il: Optional[datetime] = None
     approvata_da_nome: Optional[str] = None
+    # fatturazione: NULL = completata ma ancora da fatturare, resta nella lista dei sospesi
+    fatturata_il: Optional[datetime] = None
+    fatturata_da_nome: Optional[str] = None
     created_at: datetime
     updated_at: datetime
 
@@ -487,6 +495,8 @@ def row_to_workorder(row: dict) -> WorkOrder:
         minutes_effective_reason=row.get("minutes_effective_reason"),
         approvata_il=row.get("approvata_il"),
         approvata_da_nome=row.get("approvata_da_nome"),
+        fatturata_il=row.get("fatturata_il"),
+        fatturata_da_nome=row.get("fatturata_da_nome"),
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
@@ -590,6 +600,10 @@ async def startup():
         )
         await conn.execute("ALTER TABLE work_orders ADD COLUMN IF NOT EXISTS minutes_effective INTEGER")
         await conn.execute("ALTER TABLE work_orders ADD COLUMN IF NOT EXISTS minutes_effective_reason TEXT")
+        # Fatturazione: una commessa completata resta in lista finche' il titolare non la spunta.
+        # Serve perche' una notifica si puo' perdere, una lista no.
+        await conn.execute("ALTER TABLE work_orders ADD COLUMN IF NOT EXISTS fatturata_il TIMESTAMPTZ")
+        await conn.execute("ALTER TABLE work_orders ADD COLUMN IF NOT EXISTS fatturata_da_nome TEXT")
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS plate_lookup_requests (
                 id TEXT PRIMARY KEY,
@@ -935,6 +949,38 @@ async def approva_commessa(order_id: str, admin: dict = Depends(require_admin)):
     await execute(
         "UPDATE work_orders SET approvata_il=$1, approvata_da_nome=$2, updated_at=$1 WHERE id=$3",
         now_utc(), admin["full_name"], order_id,
+    )
+    aggiornata = await fetchrow("SELECT * FROM work_orders WHERE id=$1", order_id)
+    return _workorder_for_user(row_to_workorder(aggiornata), admin)
+
+
+@api.post("/work-orders/{order_id}/fatturata", response_model=WorkOrder)
+async def segna_fatturata(order_id: str, admin: dict = Depends(require_admin)):
+    """Il titolare spunta la commessa: fattura preparata, esce dalla lista dei sospesi.
+    Non tocca lo stato del lavoro, che resta completato: sono due cose diverse."""
+    row = await fetchrow("SELECT * FROM work_orders WHERE id=$1", order_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Commessa non trovata")
+    if row["status"] != "completed":
+        raise HTTPException(status_code=400, detail="Si fattura solo un lavoro completato")
+    if not row.get("fatturata_il"):
+        await execute(
+            "UPDATE work_orders SET fatturata_il=$1, fatturata_da_nome=$2, updated_at=$1 WHERE id=$3",
+            now_utc(), admin["full_name"], order_id,
+        )
+    aggiornata = await fetchrow("SELECT * FROM work_orders WHERE id=$1", order_id)
+    return _workorder_for_user(row_to_workorder(aggiornata), admin)
+
+
+@api.post("/work-orders/{order_id}/annulla-fatturata", response_model=WorkOrder)
+async def annulla_fatturata(order_id: str, admin: dict = Depends(require_admin)):
+    """Rimette la commessa fra quelle da fatturare: capita di spuntare quella sbagliata."""
+    row = await fetchrow("SELECT * FROM work_orders WHERE id=$1", order_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Commessa non trovata")
+    await execute(
+        "UPDATE work_orders SET fatturata_il=NULL, fatturata_da_nome=NULL, updated_at=$1 WHERE id=$2",
+        now_utc(), order_id,
     )
     aggiornata = await fetchrow("SELECT * FROM work_orders WHERE id=$1", order_id)
     return _workorder_for_user(row_to_workorder(aggiornata), admin)
@@ -2224,15 +2270,19 @@ def _send_webpush_sync(sub: dict, payload: str):
     )
 
 
-async def _push_to_users(user_ids: List[str], title: str, body: str, url: str = "/"):
-    """Invia una notifica push a tutti i dispositivi registrati degli utenti dati. Soft-fail."""
+async def _push_to_users(user_ids: List[str], title: str, body: str, url: str = "/",
+                         tag: str = "officina-msg", urgente: bool = False):
+    """Invia una notifica push a tutti i dispositivi registrati degli utenti dati. Soft-fail.
+    Con urgente=True la notifica resta sullo schermo finche non viene toccata: serve per il
+    lavoro completato, che il titolare non deve perdersi."""
     if not VAPID_PRIVATE_KEY_FILE or not user_ids:
         return
     try:
         subs = await fetch("SELECT * FROM push_subscriptions WHERE user_id = ANY($1)", user_ids)
         if not subs:
             return
-        payload = json.dumps({"title": title, "body": body[:160], "url": url})
+        payload = json.dumps({"title": title, "body": body[:160], "url": url,
+                              "tag": tag, "urgente": urgente})
         for sub in subs:
             try:
                 await asyncio.to_thread(_send_webpush_sync, dict(sub), payload)
@@ -2244,6 +2294,83 @@ async def _push_to_users(user_ids: List[str], title: str, body: str, url: str = 
                     logger.warning(f"push fallita: {e}")
     except Exception as e:
         logger.warning(f"push: errore invio: {e}")
+
+
+def fmt_durata_minuti(minuti: Optional[int]) -> str:
+    """1h 30m — come lo direbbe un meccanico, non 90 minuti."""
+    if not minuti or minuti <= 0:
+        return "0m"
+    h, m = divmod(int(minuti), 60)
+    if h and m:
+        return f"{h}h {m}m"
+    return f"{h}h" if h else f"{m}m"
+
+
+async def _telegram_notify(text: str):
+    """Manda un messaggio al gruppo Telegram del titolare. Soft-fail: se Telegram non
+    risponde o non e' configurato, il lavoro del meccanico non ne risente in alcun modo."""
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.post(
+                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                json={
+                    "chat_id": TELEGRAM_CHAT_ID,
+                    "text": text,
+                    "parse_mode": "HTML",
+                    "disable_web_page_preview": True,
+                },
+            )
+            if r.status_code != 200:
+                logger.warning(f"telegram: risposta {r.status_code}: {r.text[:200]}")
+    except Exception as e:
+        logger.warning(f"telegram: invio fallito: {e}")
+
+
+async def _avvisa_lavoro_completato(order_id: str, worker_name: str):
+    """A lavoro completato avvisa i titolari su tutti i canali: notifica push sul telefono
+    e messaggio Telegram. Gira in background e non blocca mai la chiusura della commessa."""
+    try:
+        o = await fetchrow(
+            "SELECT plate, customer, vehicle, description, minutes_effective FROM work_orders WHERE id=$1",
+            order_id,
+        )
+        if not o:
+            return
+
+        targa = (o["plate"] or "").upper()
+        veicolo = o["vehicle"] or ""
+        cliente = o["customer"] or ""
+        lavoro = (o["description"] or "").strip()
+        minuti = o["minutes_effective"]
+        ore = fmt_durata_minuti(minuti) if minuti else "da confermare"
+
+        titolo = f"LAVORO COMPLETATO — {targa}"
+        corpo = f"{worker_name} ha finito. {veicolo} · {ore}"
+
+        admin_rows = await fetch("SELECT id FROM users WHERE role='admin'")
+        admin_ids = [r["id"] for r in admin_rows]
+        await _push_to_users(admin_ids, titolo, corpo, url=f"/order/{order_id}",
+                             tag=f"completato-{order_id}", urgente=True)
+
+        righe = [
+            "🔧 <b>LAVORO COMPLETATO</b>",
+            "",
+            f"<b>Targa:</b> {targa}",
+            f"<b>Veicolo:</b> {veicolo}" if veicolo else "",
+            f"<b>Cliente:</b> {cliente}" if cliente else "",
+            f"<b>Meccanico:</b> {worker_name}",
+            f"<b>Ore da fatturare:</b> {ore}",
+            "",
+            f"<i>{lavoro[:300]}</i>" if lavoro else "",
+            "",
+            f"{PUBLIC_BASE_URL}/order/{order_id}",
+        ]
+        await _telegram_notify("\n".join(r for r in righe if r != ""))
+    except Exception as e:
+        logger.warning(f"avviso completamento fallito: {e}")
 
 
 @api.get("/push/vapid-public")
@@ -2608,6 +2735,8 @@ async def add_event(order_id: str, body: WorkEventCreate, user: dict = Depends(g
     # A lavoro completato, il caso entra nella memoria storica dell'officina (in background)
     if body.type == "COMPLETE":
         asyncio.create_task(_upsert_case_embedding(order_id))
+        # ...e il titolare va avvisato subito: deve poter preparare la fattura
+        asyncio.create_task(_avvisa_lavoro_completato(order_id, user["full_name"] or user["username"]))
 
     return WorkEvent(
         id=event_id, work_order_id=order_id, worker_id=user["id"],
