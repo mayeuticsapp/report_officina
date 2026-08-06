@@ -6,7 +6,7 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
-import { api, User, WorkOrder, unreadMessages, approvaCommessa } from "@/src/api/client";
+import { api, User, WorkOrder, unreadMessages, approvaCommessa, stampaCommesse } from "@/src/api/client";
 import { confirmDialog, showAlert } from "@/src/utils/dialog";
 import { useAutoRefresh } from "@/src/hooks/use-auto-refresh";
 import { colors, spacing } from "@/src/theme";
@@ -38,6 +38,10 @@ export default function OrdersAdmin() {
   const [soloDi, setSoloDi] = useState<string | null>(null);
   // filtro per stato: null = tutte, altrimenti "open" | "in_progress" | "paused" | "completed"
   const [filterStatus, setFilterStatus] = useState<string | null>(null);
+  // selezione per stampa
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [printModalOpen, setPrintModalOpen] = useState(false);
+  const [printing, setPrinting] = useState(false);
 
   // silent: usato dall'aggiornamento automatico — se la rete cade per un attimo
   // non deve comparire un avviso ogni 15 secondi
@@ -143,6 +147,63 @@ export default function OrdersAdmin() {
     catch (e: any) { showAlert("Errore", e.message); }
   };
 
+  const toggleSelect = (id: string) => {
+    const ns = new Set(selected);
+    if (ns.has(id)) ns.delete(id);
+    else ns.add(id);
+    setSelected(ns);
+  };
+
+  const selectAll = () => {
+    if (selected.size === filteredByStatus.length) {
+      setSelected(new Set());
+    } else {
+      setSelected(new Set(filteredByStatus.map((o) => o.id)));
+    }
+  };
+
+  const stampa = async (formato: "html" | "pdf") => {
+    if (selected.size === 0) {
+      showAlert("Nessuna selezione", "Seleziona almeno una commessa");
+      return;
+    }
+    setPrinting(true);
+    try {
+      const html = await stampaCommesse(Array.from(selected));
+      setPrintModalOpen(false);
+      if (formato === "html") {
+        // Stampa diretta: apre in nuova finestra
+        const win = window.open("", "print", "width=800,height=600");
+        if (win) {
+          win.document.write(html);
+          win.document.close();
+          win.print();
+        }
+      } else {
+        // PDF: usa html2pdf.js (library leggera)
+        if (typeof window !== "undefined" && !(window as any).html2pdf) {
+          const script = document.createElement("script");
+          script.src = "https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js";
+          script.onload = () => {
+            const element = document.createElement("div");
+            element.innerHTML = html;
+            (window as any).html2pdf().set({ margin: 10, filename: "commesse.pdf" }).from(element).save();
+          };
+          document.head.appendChild(script);
+        } else if ((window as any).html2pdf) {
+          const element = document.createElement("div");
+          element.innerHTML = html;
+          (window as any).html2pdf().set({ margin: 10, filename: "commesse.pdf" }).from(element).save();
+        }
+      }
+      showAlert("Stampa avviata", `${selected.size} commessa/e`);
+    } catch (e: any) {
+      showAlert("Errore stampa", e.message);
+    } finally {
+      setPrinting(false);
+    }
+  };
+
   // "da approvare" non blocca piu il lavoro: e una commessa come le altre,
   // che pero il titolare non ha ancora riconosciuto. Puo essere gia in corso.
   const filteredByStatus = filterStatus ? orders.filter((o) => o.status === filterStatus) : orders;
@@ -173,6 +234,12 @@ export default function OrdersAdmin() {
             <Ionicons name="calendar-outline" size={20} color={colors.text} />
             <Text style={styles.planningBtnText}>PLANNING</Text>
           </TouchableOpacity>
+          {selected.size > 0 && (
+            <TouchableOpacity testID="btn-print" style={[styles.addBtn, { backgroundColor: colors.text }]} onPress={() => setPrintModalOpen(true)}>
+              <Ionicons name="print" size={20} color={colors.textInverse} />
+              <Text style={styles.addBtnText}>STAMPA ({selected.size})</Text>
+            </TouchableOpacity>
+          )}
           <TouchableOpacity testID="btn-add-order" style={styles.addBtn} onPress={openNew}>
             <Ionicons name="add" size={22} color={colors.textInverse} />
             <Text style={styles.addBtnText}>NUOVA</Text>
@@ -261,10 +328,27 @@ export default function OrdersAdmin() {
         >
           {pendingOrders.length > 0 && (
             <View style={{ marginBottom: spacing.lg }}>
-              <Text style={styles.pendingSectionLabel}>DA APPROVARE ({pendingOrders.length})</Text>
+              <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: spacing.sm }}>
+                <Text style={styles.pendingSectionLabel}>DA APPROVARE ({pendingOrders.length})</Text>
+                {pendingOrders.length > 0 && (
+                  <TouchableOpacity onPress={() => {
+                    const all = new Set(pendingOrders.map((p) => p.id));
+                    if (selected.size === all.size && Array.from(all).every((id) => selected.has(id))) {
+                      setSelected(new Set());
+                    } else {
+                      setSelected(all);
+                    }
+                  }}>
+                    <Ionicons name={Array.from(new Set(pendingOrders.map((p) => p.id))).every((id) => selected.has(id)) && new Set(pendingOrders.map((p) => p.id)).size > 0 ? "checkbox" : "square-outline"} size={18} color={colors.paused} />
+                  </TouchableOpacity>
+                )}
+              </View>
               {pendingOrders.map((o) => (
-                <View key={o.id} testID={`pending-order-${o.id}`} style={styles.pendingCard}>
+                <TouchableOpacity key={o.id} testID={`pending-order-${o.id}`} style={styles.pendingCard} onPress={() => toggleSelect(o.id)}>
                   <View style={styles.cardTop}>
+                    <TouchableOpacity style={{ marginRight: 8 }} onPress={() => toggleSelect(o.id)}>
+                      <Ionicons name={selected.has(o.id) ? "checkbox" : "square-outline"} size={20} color={colors.paused} />
+                    </TouchableOpacity>
                     <Text style={styles.plate}>{o.plate}</Text>
                     <View style={[styles.pill, { backgroundColor: statusMap[o.status]?.c || colors.paused }]}>
                       <Text style={styles.pillText}>IN ATTESA</Text>
@@ -293,7 +377,7 @@ export default function OrdersAdmin() {
                       <Text style={[styles.iconBtnText, { color: colors.stopped }]}>RIFIUTA</Text>
                     </TouchableOpacity>
                   </View>
-                </View>
+                </TouchableOpacity>
               ))}
             </View>
           )}
@@ -302,13 +386,33 @@ export default function OrdersAdmin() {
             pendingOrders.length === 0 && (
               <View style={styles.empty}><Text style={styles.emptyText}>Nessuna commessa. Crea la prima.</Text></View>
             )
-          ) : otherOrders.map((o) => {
-            const s = statusMap[o.status];
-            const assigned = workers.filter((w) => o.assigned_worker_ids.includes(w.id));
-            return (
-              <View key={o.id} testID={`admin-order-${o.id}`} style={styles.card}>
-                <View style={styles.cardTop}>
-                  <Text style={styles.plate}>{o.plate}</Text>
+          ) : (
+            <>
+              {otherOrders.length > 0 && (
+                <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: spacing.md }}>
+                  <Text style={styles.approvedLabel}>ALTRE ({otherOrders.length})</Text>
+                  <TouchableOpacity onPress={() => {
+                    const all = new Set(otherOrders.map((p) => p.id));
+                    if (selected.size === all.size && Array.from(all).every((id) => selected.has(id))) {
+                      setSelected(new Set());
+                    } else {
+                      setSelected(new Set([...selected, ...all]));
+                    }
+                  }}>
+                    <Ionicons name={Array.from(new Set(otherOrders.map((p) => p.id))).every((id) => selected.has(id)) && new Set(otherOrders.map((p) => p.id)).size > 0 ? "checkbox" : "square-outline"} size={18} color={colors.text} />
+                  </TouchableOpacity>
+                </View>
+              )}
+              {otherOrders.map((o) => {
+                const s = statusMap[o.status];
+                const assigned = workers.filter((w) => o.assigned_worker_ids.includes(w.id));
+                return (
+                  <TouchableOpacity key={o.id} testID={`admin-order-${o.id}`} style={styles.card} onPress={() => toggleSelect(o.id)}>
+                    <View style={styles.cardTop}>
+                      <TouchableOpacity style={{ marginRight: 8 }} onPress={() => toggleSelect(o.id)}>
+                        <Ionicons name={selected.has(o.id) ? "checkbox" : "square-outline"} size={20} color={colors.text} />
+                      </TouchableOpacity>
+                      <Text style={styles.plate}>{o.plate}</Text>
                   <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
                     {unread[o.id] ? (
                       <View style={styles.unreadBadge}>
@@ -342,11 +446,54 @@ export default function OrdersAdmin() {
                     <Text style={[styles.iconBtnText, { color: colors.stopped }]}>ELIMINA</Text>
                   </TouchableOpacity>
                 </View>
-              </View>
+              </TouchableOpacity>
             );
           })}
+            </>
+          )}
         </ScrollView>
       )}
+
+      <Modal visible={printModalOpen} transparent animationType="fade" onRequestClose={() => setPrintModalOpen(false)}>
+        <View style={styles.mBackdrop}>
+          <View style={[styles.mSheet, { width: 280, marginHorizontal: "auto" }]}>
+            <View style={styles.mHeader}>
+              <Text style={styles.mTitle}>STAMPA COMMESSE</Text>
+              <TouchableOpacity onPress={() => setPrintModalOpen(false)}><Ionicons name="close" size={26} color={colors.text} /></TouchableOpacity>
+            </View>
+            <View style={{ padding: spacing.lg, gap: spacing.md }}>
+              <TouchableOpacity
+                style={[styles.saveBtn, printing && { opacity: 0.6 }]}
+                disabled={printing}
+                onPress={() => stampa("html")}
+              >
+                {printing ? (
+                  <ActivityIndicator color={colors.textInverse} />
+                ) : (
+                  <>
+                    <Ionicons name="print" size={18} color={colors.textInverse} />
+                    <Text style={[styles.saveText, { marginLeft: 8 }]}>STAMPA DIRETTA</Text>
+                  </>
+                )}
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.saveBtn, printing && { opacity: 0.6 }]}
+                disabled={printing}
+                onPress={() => stampa("pdf")}
+              >
+                {printing ? (
+                  <ActivityIndicator color={colors.textInverse} />
+                ) : (
+                  <>
+                    <Ionicons name="document" size={18} color={colors.textInverse} />
+                    <Text style={[styles.saveText, { marginLeft: 8 }]}>SCARICA PDF</Text>
+                  </>
+                )}
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
 
       <Modal visible={modalOpen} transparent animationType="slide" onRequestClose={() => setModalOpen(false)}>
         <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : "height"} style={styles.mBackdrop}>
@@ -447,8 +594,9 @@ const styles = StyleSheet.create({
   statusChipTextOn: { color: colors.textInverse },
   empty: { padding: spacing.lg, borderWidth: 1, borderColor: colors.border },
   emptyText: { color: colors.textSecondary },
-  card: { borderWidth: 1, borderColor: colors.border, padding: spacing.md, marginBottom: spacing.sm },
-  pendingSectionLabel: { fontSize: 11, letterSpacing: 2.5, color: colors.paused, fontWeight: "900", marginBottom: spacing.sm },
+  card: { borderWidth: 1, borderColor: colors.border, padding: spacing.md, marginBottom: spacing.sm, flexDirection: "row", alignItems: "flex-start" },
+  pendingSectionLabel: { fontSize: 11, letterSpacing: 2.5, color: colors.paused, fontWeight: "900" },
+  approvedLabel: { fontSize: 11, letterSpacing: 2.5, color: colors.text, fontWeight: "900" },
   pendingCard: { borderWidth: 2, borderColor: colors.paused, padding: spacing.md, marginBottom: spacing.sm, backgroundColor: "#FFFBEB" },
   proposedBy: { fontSize: 12, color: colors.textSecondary, marginTop: spacing.sm, fontStyle: "italic" },
   unreadBadge: {
@@ -483,6 +631,6 @@ const styles = StyleSheet.create({
   workerRowActive: { borderColor: colors.primary, backgroundColor: "#EFF6FF" },
   workerName: { fontSize: 14, fontWeight: "700", color: colors.text, flex: 1 },
   workerMeta: { fontSize: 12, color: colors.textSecondary },
-  saveBtn: { backgroundColor: colors.text, paddingVertical: 18, alignItems: "center" },
+  saveBtn: { backgroundColor: colors.text, paddingVertical: 14, paddingHorizontal: 16, alignItems: "center", justifyContent: "center", flexDirection: "row" },
   saveText: { color: colors.textInverse, fontWeight: "900", letterSpacing: 3, fontSize: 14 },
 });

@@ -19,7 +19,7 @@ from typing import List, Optional, Literal
 
 import asyncpg
 from fastapi import FastAPI, APIRouter, HTTPException, Depends, status, UploadFile, File, Header
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.security import OAuth2PasswordBearer
 from starlette.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
@@ -282,6 +282,10 @@ class WorkOrderPropose(BaseModel):
     customer: Optional[str] = None   # il meccanico spesso non lo sa: arriva da STAR
     vehicle: Optional[str] = None    # idem
     description: str
+
+
+class PrintOrdersIn(BaseModel):
+    order_ids: List[str]
 
 
 class SchedaTecnica(BaseModel):
@@ -3821,6 +3825,112 @@ async def get_conversation(order_id: str, user: dict = Depends(get_current_user)
             worker_id=t.get("worker_id"), worker_full_name=t.get("worker_full_name")
         ))
     return ConversationOut(work_order_id=order_id, scheda_tecnica=_scheda_for_user(scheda, user), turns=parsed_turns)
+
+
+def _genera_html_stampa(orders: List[WorkOrder], workers: List[dict]) -> str:
+    """Genera HTML stampabile con CSS print-friendly."""
+    now_str = datetime.now(FUSO_ITALIA).strftime("%d/%m/%Y %H:%M")
+
+    html_rows = ""
+    for o in orders:
+        status_label = {"open": "APERTA", "in_progress": "IN CORSO", "paused": "IN PAUSA", "completed": "COMPLETATA"}.get(o.status, o.status.upper())
+        assigned_names = ", ".join([w["full_name"] for w in workers if w["id"] in (o.assigned_worker_ids or [])])
+
+        html_rows += f"""
+        <div class="order-card">
+            <div class="order-header">
+                <span class="plate">{o.plate}</span>
+                <span class="status">{status_label}</span>
+            </div>
+            <div class="order-info">
+                <p><strong>Veicolo:</strong> {o.vehicle or "-"}</p>
+                <p><strong>Cliente:</strong> {o.customer or "-"}</p>
+                <p><strong>Descrizione:</strong> {o.description or "-"}</p>
+                <p><strong>Assegnati:</strong> {assigned_names or "Nessuno"}</p>
+                <p><strong>Aperta:</strong> {o.created_at.strftime("%d/%m/%Y %H:%M") if o.created_at else "-"}</p>
+            </div>
+        </div>
+        """
+
+    html = f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Stampa Commesse</title>
+    <style>
+        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+        body {{ font-family: Arial, sans-serif; font-size: 12px; color: #333; background: white; line-height: 1.6; }}
+        .header {{ text-align: center; padding: 20px; border-bottom: 2px solid #000; margin-bottom: 20px; }}
+        .header h1 {{ font-size: 24px; margin-bottom: 5px; font-weight: 900; }}
+        .header p {{ font-size: 11px; color: #666; margin: 3px 0; }}
+        .order-card {{
+            border: 1px solid #ddd;
+            padding: 15px;
+            margin-bottom: 15px;
+            page-break-inside: avoid;
+            background: #fafafa;
+        }}
+        .order-header {{
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding-bottom: 10px;
+            border-bottom: 1px solid #eee;
+            margin-bottom: 10px;
+        }}
+        .plate {{ font-weight: bold; font-size: 16px; }}
+        .status {{
+            display: inline-block;
+            background: #ff9800;
+            color: white;
+            padding: 3px 8px;
+            border-radius: 3px;
+            font-size: 10px;
+            font-weight: bold;
+        }}
+        .order-info p {{ margin: 5px 0; line-height: 1.5; font-size: 11px; }}
+        .order-info strong {{ min-width: 100px; display: inline-block; font-weight: bold; }}
+        @media print {{
+            body {{ margin: 0; padding: 0; background: white; }}
+            .order-card {{ page-break-inside: avoid; margin-bottom: 12px; }}
+            .header {{ margin-bottom: 15px; }}
+        }}
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>COMMESSE OFFICINA VALENTE</h1>
+        <p>Stampa del {now_str}</p>
+        <p>Totale: {len(orders)} commessa/e</p>
+    </div>
+    {html_rows}
+</body>
+</html>"""
+
+    return html
+
+
+@api.post("/work-orders/stampa-html")
+async def stampa_orders_html(body: PrintOrdersIn, admin: dict = Depends(require_admin)):
+    """Genera HTML formattato per stampa PDF o diretta di commesse selezionate."""
+    if not body.order_ids:
+        raise HTTPException(status_code=400, detail="Nessuna commessa selezionata")
+
+    orders = []
+    for oid in body.order_ids[:100]:
+        row = await fetchrow("SELECT * FROM work_orders WHERE id=$1", oid)
+        if row:
+            orders.append(row_to_workorder(row))
+
+    if not orders:
+        raise HTTPException(status_code=404, detail="Nessuna commessa trovata")
+
+    workers = await fetchall("SELECT id, full_name FROM users WHERE role='worker'")
+    workers_list = [dict(w) for w in workers] if workers else []
+
+    html = _genera_html_stampa(orders, workers_list)
+    return HTMLResponse(content=html)
 
 
 app.include_router(api)

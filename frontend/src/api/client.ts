@@ -121,6 +121,22 @@ export async function prendiCommessa(orderId: string): Promise<WorkOrder> {
   return api<WorkOrder>(`/work-orders/${orderId}/prendi`, { method: "POST" });
 }
 
+/** Genera HTML stampabile per le commesse selezionate. */
+export async function stampaCommesse(orderIds: string[]): Promise<string> {
+  const token = await getToken();
+  const res = await fetch(`${BASE_URL}/api/work-orders/stampa-html`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(token && { Authorization: `Bearer ${token}` }),
+    },
+    body: JSON.stringify({ order_ids: orderIds }),
+  });
+  const text = await res.text();
+  if (!res.ok) throw new Error(text || `Errore ${res.status}`);
+  return text;
+}
+
 export type WorkEvent = {
   id: string;
   work_order_id: string;
