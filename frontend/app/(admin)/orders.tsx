@@ -226,12 +226,13 @@ export default function OrdersAdmin() {
       )}
 
       {/* Filtro per stato della commessa */}
-      <ScrollView
-        horizontal
-        showsHorizontalScrollIndicator={false}
-        style={styles.statusScroller}
-        contentContainerStyle={styles.statusRow}
-      >
+      <View style={styles.statusContainer}>
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          style={styles.statusScroller}
+          contentContainerStyle={styles.statusRow}
+        >
         <Text style={styles.statusLabel}>TIPO:</Text>
         {Object.entries(statusMap).map(([key, { label }]) => {
           const attivo = filterStatus === key;
@@ -248,7 +249,8 @@ export default function OrdersAdmin() {
             </TouchableOpacity>
           );
         })}
-      </ScrollView>
+        </ScrollView>
+      </View>
 
       {loading ? (
         <View style={styles.center}><ActivityIndicator color={colors.text} /></View>
@@ -432,8 +434,9 @@ const styles = StyleSheet.create({
   chiChipOn: { borderColor: colors.text, backgroundColor: colors.text },
   chiChipText: { fontSize: 12, fontWeight: "800", color: colors.text },
   chiChipTextOn: { color: colors.textInverse },
-  statusScroller: { maxHeight: 52, marginTop: spacing.sm },
-  statusRow: { paddingHorizontal: spacing.lg, gap: 6, alignItems: "center", paddingVertical: 6 },
+  statusContainer: { paddingTop: spacing.sm, paddingBottom: spacing.md, backgroundColor: colors.bg },
+  statusScroller: { flexGrow: 0 },
+  statusRow: { paddingHorizontal: spacing.lg, gap: 6, alignItems: "center", paddingVertical: 8 },
   statusLabel: { fontSize: 10, letterSpacing: 1.2, fontWeight: "800", color: colors.textSecondary, marginRight: 2 },
   statusChip: {
     flexShrink: 0, height: 34, paddingHorizontal: 12, alignItems: "center", justifyContent: "center",
