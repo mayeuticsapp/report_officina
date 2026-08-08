@@ -1699,24 +1699,34 @@ class PlanningGiornoOut(BaseModel):
     giorno: str
     appuntamenti: int
     passato: bool
+    oggi: bool = False
 
 
 @api.get("/planning/giorni", response_model=List[PlanningGiornoOut])
 async def planning_giorni(indietro: int = 15, avanti: int = 14,
                           admin: dict = Depends(require_admin)):
-    """I giorni che il titolare puo aprire nel planning: quelli passati vengono
-    dallo storico, quelli futuri dall'ultimo invio di Omnius."""
+    """I giorni che il titolare puo aprire nel planning.
+
+    Li genera TUTTI nell'intervallo, non solo quelli che hanno appuntamenti: in officina
+    si lavora anche in giorni che STAR non ha mandato — il sabato, o le auto arrivate
+    senza appuntamento — e quei giorni devono restare apribili lo stesso.
+    Fuori solo le domeniche vuote, che sarebbero rumore."""
     oggi = _giorno_italiano(now_utc())
     da = oggi - timedelta(days=max(1, min(indietro, 365)))
     a = oggi + timedelta(days=max(1, min(avanti, 365)))
     righe = await fetch(
-        """SELECT giorno, jsonb_array_length(appuntamenti) AS quanti
-           FROM planning_storico WHERE giorno BETWEEN $1 AND $2 ORDER BY giorno DESC""",
+        """SELECT d::date AS giorno,
+                  COALESCE(jsonb_array_length(ps.appuntamenti), 0) AS quanti
+           FROM generate_series($1::date, $2::date, '1 day') d
+           LEFT JOIN planning_storico ps ON ps.giorno = d::date
+           WHERE EXTRACT(dow FROM d) <> 0
+              OR COALESCE(jsonb_array_length(ps.appuntamenti), 0) > 0
+           ORDER BY d DESC""",
         da, a,
     )
     return [
         PlanningGiornoOut(giorno=r["giorno"].isoformat(), appuntamenti=r["quanti"] or 0,
-                          passato=r["giorno"] < oggi)
+                          passato=r["giorno"] < oggi, oggi=r["giorno"] == oggi)
         for r in righe
     ]
 
@@ -1761,15 +1771,17 @@ async def get_planning(giorno: Optional[str] = None, admin: dict = Depends(requi
         except ValueError:
             raise HTTPException(status_code=400, detail="Data non valida")
         riga = await fetchrow("SELECT * FROM planning_storico WHERE giorno=$1", g)
-        if not riga:
-            raise HTTPException(status_code=404, detail=f"Nessun planning archiviato per il {giorno}")
-        apps = riga["appuntamenti"] or []
-        if isinstance(apps, str):
-            apps = json.loads(apps)
+        # Un giorno senza appuntamenti non e un errore: in officina si lavora anche
+        # su auto arrivate senza appuntamento, e il giorno va comunque apribile.
+        apps = []
+        if riga:
+            apps = riga["appuntamenti"] or []
+            if isinstance(apps, str):
+                apps = json.loads(apps)
         return PlanningOut(
             aggiornato=giorno, giorni_coperti=1,
             appuntamenti=await _arricchisci_appuntamenti(apps),
-            received_at=riga["aggiornato_il"],
+            received_at=riga["aggiornato_il"] if riga else now_utc(),
         )
 
     row = await fetchrow("SELECT * FROM officina_planning WHERE id=1")

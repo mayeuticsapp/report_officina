@@ -35,7 +35,7 @@ type Planning = {
   received_at: string;
 };
 
-type GiornoDisponibile = { giorno: string; appuntamenti: number; passato: boolean };
+type GiornoDisponibile = { giorno: string; appuntamenti: number; passato: boolean; oggi?: boolean };
 
 const GIORNI = ["Domenica", "Lunedì", "Martedì", "Mercoledì", "Giovedì", "Venerdì", "Sabato"];
 const GIORNI_BREVI = ["DOM", "LUN", "MAR", "MER", "GIO", "VEN", "SAB"];
@@ -179,21 +179,35 @@ export default function PlanningAdmin() {
             {giorni.map((g) => {
               const d = new Date(g.giorno + "T00:00:00");
               const attivo = giornoScelto === g.giorno;
+              const vuoto = g.appuntamenti === 0;
               return (
                 <TouchableOpacity
                   key={g.giorno}
                   testID={`giorno-${g.giorno}`}
-                  style={[styles.giornoChip, attivo && styles.giornoChipAttivo, g.passato && styles.giornoChipPassato]}
+                  style={[
+                    styles.giornoChip,
+                    g.oggi && styles.giornoChipOggi,
+                    attivo && styles.giornoChipAttivo,
+                    vuoto && !attivo && styles.giornoChipVuoto,
+                  ]}
                   onPress={() => setGiornoScelto(g.giorno)}
                 >
-                  <Text style={[styles.giornoChipDow, attivo && styles.giornoChipTestoAttivo]}>
-                    {GIORNI_BREVI[d.getDay()]}
+                  <Text style={[
+                    styles.giornoChipDow,
+                    g.oggi && styles.giornoChipDowOggi,
+                    attivo && styles.giornoChipTestoAttivo,
+                  ]}>
+                    {g.oggi ? "OGGI" : GIORNI_BREVI[d.getDay()]}
                   </Text>
                   <Text style={[styles.giornoChipNum, attivo && styles.giornoChipTestoAttivo]}>
                     {d.getDate()}/{String(d.getMonth() + 1).padStart(2, "0")}
                   </Text>
-                  <Text style={[styles.giornoChipCount, attivo && styles.giornoChipTestoAttivo]}>
-                    {g.appuntamenti}
+                  <Text style={[
+                    styles.giornoChipCount,
+                    attivo && styles.giornoChipTestoAttivo,
+                    vuoto && !attivo && { color: colors.border },
+                  ]}>
+                    {vuoto ? "—" : g.appuntamenti}
                   </Text>
                 </TouchableOpacity>
               );
@@ -372,7 +386,9 @@ const styles = StyleSheet.create({
     borderWidth: 1, borderColor: colors.border, alignItems: "center", gap: 1,
   },
   giornoChipAttivo: { backgroundColor: colors.text, borderColor: colors.text },
-  giornoChipPassato: { borderStyle: "dashed" },
+  giornoChipOggi: { borderColor: colors.primary, borderWidth: 2 },
+  giornoChipDowOggi: { color: colors.primary },
+  giornoChipVuoto: { borderStyle: "dashed" },
   giornoChipDow: { fontSize: 9, letterSpacing: 1, fontWeight: "900", color: colors.textSecondary },
   giornoChipNum: { fontSize: 13, fontWeight: "900", color: colors.text },
   giornoChipCount: { fontSize: 9, color: colors.textSecondary, fontWeight: "700" },
