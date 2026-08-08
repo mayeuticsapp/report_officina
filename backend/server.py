@@ -607,6 +607,15 @@ async def startup():
         # Serve perche' una notifica si puo' perdere, una lista no.
         await conn.execute("ALTER TABLE work_orders ADD COLUMN IF NOT EXISTS fatturata_il TIMESTAMPTZ")
         await conn.execute("ALTER TABLE work_orders ADD COLUMN IF NOT EXISTS fatturata_da_nome TEXT")
+        # Storico del planning: officina_planning tiene una riga sola, sovrascritta a ogni
+        # invio di Omnius, quindi i giorni passati sparivano. Qui ogni giorno resta.
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS planning_storico (
+                giorno DATE PRIMARY KEY,
+                appuntamenti JSONB NOT NULL DEFAULT '[]',
+                aggiornato_il TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """)
         # Chi riceve gli avvisi su Telegram. Una riga per titolare, chat privata col bot.
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS telegram_chats (
@@ -1236,13 +1245,33 @@ class PlanningOut(BaseModel):
 async def omnius_planning(body: PlanningIn):
     """Riceve lo snapshot completo del planning STAR (prossimi 7 giorni).
     Ogni invio SOSTITUISCE il precedente (niente merge)."""
+    ora = now_utc()
     await execute(
         """INSERT INTO officina_planning (id, aggiornato, giorni_coperti, appuntamenti, received_at)
            VALUES (1, $1, $2, $3::jsonb, $4)
            ON CONFLICT (id) DO UPDATE SET aggiornato=$1, giorni_coperti=$2, appuntamenti=$3::jsonb, received_at=$4""",
-        body.aggiornato, body.giorni_coperti, json.dumps(body.appuntamenti), now_utc()
+        body.aggiornato, body.giorni_coperti, json.dumps(body.appuntamenti), ora
     )
-    return {"ok": True, "appuntamenti": len(body.appuntamenti)}
+
+    # Ogni giorno finisce anche nello storico, cosi il titolare puo tornare indietro:
+    # sopra viene sovrascritto tutto a ogni invio, qui no.
+    per_giorno: dict = {}
+    for a in body.appuntamenti:
+        g = (a or {}).get("giorno")
+        if g:
+            per_giorno.setdefault(g, []).append(a)
+    for g, apps in per_giorno.items():
+        try:
+            await execute(
+                """INSERT INTO planning_storico (giorno, appuntamenti, aggiornato_il)
+                   VALUES ($1::date, $2::jsonb, $3)
+                   ON CONFLICT (giorno) DO UPDATE SET appuntamenti=$2::jsonb, aggiornato_il=$3""",
+                g, json.dumps(apps), ora,
+            )
+        except Exception as e:
+            logger.warning(f"storico planning {g}: {e}")
+
+    return {"ok": True, "appuntamenti": len(body.appuntamenti), "giorni_archiviati": len(per_giorno)}
 
 
 # ---------------- Cartellino presenze ----------------
@@ -1507,6 +1536,89 @@ async def timbratura_giornata_standard(body: GiornataStandardIn, admin: dict = D
     return creati
 
 
+class GiornataRiscriviIn(BaseModel):
+    worker_id: str
+    giorno: str                            # AAAA-MM-GG
+    entrata: str                           # HH:MM
+    uscita: str                            # HH:MM
+    pausa_inizio: Optional[str] = None     # HH:MM, opzionale
+    pausa_fine: Optional[str] = None
+    motivo: str
+
+
+def _ora_hhmm(valore: str, campo: str) -> tuple:
+    """'08:30' -> (8, 30). Accetta anche 8.30 e 8,30: al titolare non si chiede
+    di ricordarsi quale separatore vuole la macchina."""
+    testo = (valore or "").strip().replace(".", ":").replace(",", ":")
+    m = re.fullmatch(r"(\d{1,2}):(\d{2})", testo)
+    if not m:
+        raise HTTPException(status_code=400, detail=f"{campo}: scrivi l'ora come 08:30")
+    hh, mm = int(m.group(1)), int(m.group(2))
+    if not (0 <= hh <= 23 and 0 <= mm <= 59):
+        raise HTTPException(status_code=400, detail=f"{campo}: ora inesistente")
+    return hh, mm
+
+
+@api.post("/timbrature/giornata", response_model=List[Timbratura])
+async def timbratura_giornata_riscrivi(body: GiornataRiscriviIn, admin: dict = Depends(require_admin)):
+    """Riscrive l'INTERA giornata di un meccanico: entrata, uscita ed eventuale pausa.
+
+    Serve quando la giornata e' da rifare da capo — timbrature doppie, orari sbagliati,
+    tocchi ripetuti — e correggerle una per una sarebbe piu' lento che riscriverle.
+    Cancella quelle esistenti di quel giorno e mette quelle nuove."""
+    if not (body.motivo or "").strip():
+        raise HTTPException(status_code=400, detail="Scrivi il motivo")
+    w = await fetchrow("SELECT id, full_name FROM users WHERE id=$1", body.worker_id)
+    if not w:
+        raise HTTPException(status_code=404, detail="Meccanico non trovato")
+    try:
+        giorno = date.fromisoformat(body.giorno)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Data non valida")
+
+    e_h, e_m = _ora_hhmm(body.entrata, "Entrata")
+    u_h, u_m = _ora_hhmm(body.uscita, "Uscita")
+
+    fasce = [("ENTRATA", e_h, e_m)]
+    if body.pausa_inizio or body.pausa_fine:
+        if not (body.pausa_inizio and body.pausa_fine):
+            raise HTTPException(status_code=400, detail="Della pausa servono sia inizio sia fine")
+        pi_h, pi_m = _ora_hhmm(body.pausa_inizio, "Inizio pausa")
+        pf_h, pf_m = _ora_hhmm(body.pausa_fine, "Fine pausa")
+        fasce += [("USCITA", pi_h, pi_m), ("ENTRATA", pf_h, pf_m)]
+    fasce.append(("USCITA", u_h, u_m))
+
+    # gli orari devono susseguirsi: entrata < pausa < rientro < uscita
+    minuti = [h * 60 + m for _, h, m in fasce]
+    if any(minuti[i] >= minuti[i + 1] for i in range(len(minuti) - 1)):
+        raise HTTPException(
+            status_code=400,
+            detail="Gli orari devono essere in ordine: entrata, inizio pausa, fine pausa, uscita")
+
+    ora = now_utc()
+    motivo = body.motivo.strip()
+    quante_prima = await fetchrow(
+        "SELECT count(*) AS n FROM timbrature WHERE worker_id=$1 AND giorno=$2", body.worker_id, giorno)
+    await execute("DELETE FROM timbrature WHERE worker_id=$1 AND giorno=$2", body.worker_id, giorno)
+
+    creati: List[Timbratura] = []
+    for tipo, hh, mm in fasce:
+        ts = datetime(giorno.year, giorno.month, giorno.day, hh, mm, tzinfo=FUSO_ITALIA).astimezone(timezone.utc)
+        tid = str(uuid.uuid4())
+        await execute(
+            """INSERT INTO timbrature (id, worker_id, worker_name, tipo, timestamp, giorno,
+                   posizione_assente, corretta_da, corretta_da_nome, corretta_il, motivo_correzione, created_at)
+               VALUES ($1,$2,$3,$4,$5,$6,TRUE,$7,$8,$9,$10,$11)""",
+            tid, w["id"], w["full_name"], tipo, ts, giorno,
+            admin["id"], admin["full_name"], ora, motivo, ora,
+        )
+        creati.append(_riga_timbratura(dict(await fetchrow("SELECT * FROM timbrature WHERE id=$1", tid))))
+
+    logger.info(f"giornata riscritta: {w['full_name']} {giorno} da {admin['full_name']} "
+                f"({quante_prima['n']} timbrature sostituite) — {motivo}")
+    return creati
+
+
 @api.delete("/timbrature/{timbratura_id}")
 async def elimina_timbratura(timbratura_id: str, admin: dict = Depends(require_admin)):
     """Toglie una timbratura doppia (due tocchi per sbaglio)."""
@@ -1583,18 +1695,34 @@ class PlanningCreaOut(BaseModel):
     gia_esistente: bool  # True se l'appuntamento era già stato smistato
 
 
-@api.get("/planning", response_model=PlanningOut)
-async def get_planning(admin: dict = Depends(require_admin)):
-    """Il planning STAR per la pagina admin. Ogni appuntamento porta con sé se è già
-    diventato una commessa (commessa_id + a chi è assegnata), così il titolare vede
-    a colpo d'occhio cosa ha già smistato."""
-    row = await fetchrow("SELECT * FROM officina_planning WHERE id=1")
-    if not row:
-        raise HTTPException(status_code=404, detail="Planning non ancora ricevuto da Omnius")
-    apps = row.get("appuntamenti") or []
-    if isinstance(apps, str):
-        apps = json.loads(apps)
+class PlanningGiornoOut(BaseModel):
+    giorno: str
+    appuntamenti: int
+    passato: bool
 
+
+@api.get("/planning/giorni", response_model=List[PlanningGiornoOut])
+async def planning_giorni(indietro: int = 15, avanti: int = 14,
+                          admin: dict = Depends(require_admin)):
+    """I giorni che il titolare puo aprire nel planning: quelli passati vengono
+    dallo storico, quelli futuri dall'ultimo invio di Omnius."""
+    oggi = _giorno_italiano(now_utc())
+    da = oggi - timedelta(days=max(1, min(indietro, 365)))
+    a = oggi + timedelta(days=max(1, min(avanti, 365)))
+    righe = await fetch(
+        """SELECT giorno, jsonb_array_length(appuntamenti) AS quanti
+           FROM planning_storico WHERE giorno BETWEEN $1 AND $2 ORDER BY giorno DESC""",
+        da, a,
+    )
+    return [
+        PlanningGiornoOut(giorno=r["giorno"].isoformat(), appuntamenti=r["quanti"] or 0,
+                          passato=r["giorno"] < oggi)
+        for r in righe
+    ]
+
+
+async def _arricchisci_appuntamenti(apps: list) -> list:
+    """Aggiunge a ogni appuntamento se e gia diventato commessa e a chi e assegnata."""
     smistate = await fetch(
         "SELECT id, planning_key, status, assigned_worker_ids FROM work_orders WHERE planning_key IS NOT NULL"
     )
@@ -1616,10 +1744,44 @@ async def get_planning(admin: dict = Depends(require_admin)):
         trovata = per_chiave.get(_planning_key(a.get("giorno"), a.get("ora"), a.get("targa")))
         a.update(trovata or {"commessa_id": None, "commessa_status": None, "assegnata_a": []})
         arricchiti.append(a)
+    return arricchiti
+
+
+@api.get("/planning", response_model=PlanningOut)
+async def get_planning(giorno: Optional[str] = None, admin: dict = Depends(require_admin)):
+    """Il planning STAR per la pagina admin. Ogni appuntamento porta con sé se è già
+    diventato una commessa (commessa_id + a chi è assegnata), così il titolare vede
+    a colpo d'occhio cosa ha già smistato.
+
+    Senza `giorno` restituisce l'ultimo invio di Omnius (i prossimi giorni).
+    Con `giorno` pesca dallo storico, cosi si possono rivedere anche i giorni passati."""
+    if giorno:
+        try:
+            g = date.fromisoformat(giorno)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Data non valida")
+        riga = await fetchrow("SELECT * FROM planning_storico WHERE giorno=$1", g)
+        if not riga:
+            raise HTTPException(status_code=404, detail=f"Nessun planning archiviato per il {giorno}")
+        apps = riga["appuntamenti"] or []
+        if isinstance(apps, str):
+            apps = json.loads(apps)
+        return PlanningOut(
+            aggiornato=giorno, giorni_coperti=1,
+            appuntamenti=await _arricchisci_appuntamenti(apps),
+            received_at=riga["aggiornato_il"],
+        )
+
+    row = await fetchrow("SELECT * FROM officina_planning WHERE id=1")
+    if not row:
+        raise HTTPException(status_code=404, detail="Planning non ancora ricevuto da Omnius")
+    apps = row.get("appuntamenti") or []
+    if isinstance(apps, str):
+        apps = json.loads(apps)
 
     return PlanningOut(
         aggiornato=row.get("aggiornato"), giorni_coperti=row.get("giorni_coperti"),
-        appuntamenti=arricchiti, received_at=row["received_at"],
+        appuntamenti=await _arricchisci_appuntamenti(apps), received_at=row["received_at"],
     )
 
 

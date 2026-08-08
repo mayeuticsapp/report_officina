@@ -566,6 +566,19 @@ export async function timbraturaManuale(body: {
 }
 
 /** Ricostruisce una giornata intera sulle fasce concordate, per chi non ha timbrato nulla. */
+/** Riscrive l'intera giornata: cancella le timbrature di quel giorno e mette queste. */
+export async function riscriviGiornata(body: {
+  worker_id: string;
+  giorno: string;            // AAAA-MM-GG
+  entrata: string;           // HH:MM
+  uscita: string;            // HH:MM
+  pausa_inizio?: string;
+  pausa_fine?: string;
+  motivo: string;
+}): Promise<Timbratura[]> {
+  return api<Timbratura[]>("/timbrature/giornata", { method: "POST", body });
+}
+
 export async function giornataStandard(worker_id: string, giorno: string, motivo: string): Promise<Timbratura[]> {
   return api<Timbratura[]>("/timbrature/giornata-standard", {
     method: "POST",

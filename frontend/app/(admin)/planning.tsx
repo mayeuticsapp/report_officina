@@ -35,7 +35,10 @@ type Planning = {
   received_at: string;
 };
 
+type GiornoDisponibile = { giorno: string; appuntamenti: number; passato: boolean };
+
 const GIORNI = ["Domenica", "Lunedì", "Martedì", "Mercoledì", "Giovedì", "Venerdì", "Sabato"];
+const GIORNI_BREVI = ["DOM", "LUN", "MAR", "MER", "GIO", "VEN", "SAB"];
 
 export default function PlanningAdmin() {
   const router = useRouter();
@@ -43,6 +46,10 @@ export default function PlanningAdmin() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [notReady, setNotReady] = useState(false);
+
+  // Calendario: null = i prossimi giorni (l'ultimo invio di STAR), altrimenti un giorno preciso
+  const [giorni, setGiorni] = useState<GiornoDisponibile[]>([]);
+  const [giornoScelto, setGiornoScelto] = useState<string | null>(null);
 
   // assegnazione di un'auto del planning a uno o più meccanici
   const [scelto, setScelto] = useState<Appuntamento | null>(null);
@@ -52,12 +59,21 @@ export default function PlanningAdmin() {
 
   const load = useCallback(async () => {
     try {
-      setPlanning(await api<Planning>("/planning"));
+      const url = giornoScelto ? `/planning?giorno=${giornoScelto}` : "/planning";
+      const [p, gg] = await Promise.all([
+        api<Planning>(url),
+        api<GiornoDisponibile[]>("/planning/giorni?indietro=15&avanti=14").catch(() => []),
+      ]);
+      setPlanning(p);
+      setGiorni(gg);
       setNotReady(false);
     } catch (e: any) {
-      if (String(e?.message || "").includes("non ancora")) setNotReady(true);
+      const msg = String(e?.message || "");
+      if (msg.includes("non ancora")) setNotReady(true);
+      // un giorno passato senza appuntamenti non e un errore: si mostra la lista vuota
+      else if (msg.includes("Nessun planning archiviato")) setPlanning(null);
     } finally { setLoading(false); setRefreshing(false); }
-  }, []);
+  }, [giornoScelto]);
 
   const apriAssegnazione = async (a: Appuntamento) => {
     if (a.commessa_id) {
@@ -139,10 +155,58 @@ export default function PlanningAdmin() {
         </View>
       </View>
 
+      {/* Calendario: tocca un giorno per rivederlo, anche passato */}
+      {giorni.length > 0 && (
+        <View style={styles.calendarioBox}>
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={styles.calendario}
+          >
+            <TouchableOpacity
+              testID="giorno-prossimi"
+              style={[styles.giornoChip, giornoScelto === null && styles.giornoChipAttivo]}
+              onPress={() => setGiornoScelto(null)}
+            >
+              <Text style={[styles.giornoChipDow, giornoScelto === null && styles.giornoChipTestoAttivo]}>
+                IN
+              </Text>
+              <Text style={[styles.giornoChipNum, giornoScelto === null && styles.giornoChipTestoAttivo]}>
+                ARRIVO
+              </Text>
+            </TouchableOpacity>
+
+            {giorni.map((g) => {
+              const d = new Date(g.giorno + "T00:00:00");
+              const attivo = giornoScelto === g.giorno;
+              return (
+                <TouchableOpacity
+                  key={g.giorno}
+                  testID={`giorno-${g.giorno}`}
+                  style={[styles.giornoChip, attivo && styles.giornoChipAttivo, g.passato && styles.giornoChipPassato]}
+                  onPress={() => setGiornoScelto(g.giorno)}
+                >
+                  <Text style={[styles.giornoChipDow, attivo && styles.giornoChipTestoAttivo]}>
+                    {GIORNI_BREVI[d.getDay()]}
+                  </Text>
+                  <Text style={[styles.giornoChipNum, attivo && styles.giornoChipTestoAttivo]}>
+                    {d.getDate()}/{String(d.getMonth() + 1).padStart(2, "0")}
+                  </Text>
+                  <Text style={[styles.giornoChipCount, attivo && styles.giornoChipTestoAttivo]}>
+                    {g.appuntamenti}
+                  </Text>
+                </TouchableOpacity>
+              );
+            })}
+          </ScrollView>
+        </View>
+      )}
+
       {planning && (
         <Text style={styles.updated}>
-          Aggiornato da Omnius: {fmtReceived(planning.received_at)}
-          {planning.giorni_coperti ? ` · prossimi ${planning.giorni_coperti} giorni` : ""}
+          {giornoScelto
+            ? `Giorno archiviato · ${planning.appuntamenti.length} appuntamenti`
+            : `Aggiornato da Omnius: ${fmtReceived(planning.received_at)}${planning.giorni_coperti ? ` · prossimi ${planning.giorni_coperti} giorni` : ""}`}
         </Text>
       )}
 
@@ -300,6 +364,20 @@ const styles = StyleSheet.create({
   updated: {
     fontSize: 11, color: colors.textSecondary, paddingHorizontal: spacing.lg, paddingTop: spacing.sm,
   },
+  // calendario dei giorni
+  calendarioBox: { borderBottomWidth: 1, borderBottomColor: colors.border },
+  calendario: { paddingHorizontal: spacing.lg, paddingVertical: spacing.sm, gap: 6 },
+  giornoChip: {
+    minWidth: 58, paddingVertical: 8, paddingHorizontal: 10,
+    borderWidth: 1, borderColor: colors.border, alignItems: "center", gap: 1,
+  },
+  giornoChipAttivo: { backgroundColor: colors.text, borderColor: colors.text },
+  giornoChipPassato: { borderStyle: "dashed" },
+  giornoChipDow: { fontSize: 9, letterSpacing: 1, fontWeight: "900", color: colors.textSecondary },
+  giornoChipNum: { fontSize: 13, fontWeight: "900", color: colors.text },
+  giornoChipCount: { fontSize: 9, color: colors.textSecondary, fontWeight: "700" },
+  giornoChipTestoAttivo: { color: colors.textInverse },
+
   center: { flex: 1, alignItems: "center", justifyContent: "center" },
   emptyBox: { margin: spacing.lg, padding: spacing.xl, borderWidth: 1, borderColor: colors.border, alignItems: "center", gap: 10 },
   emptyText: { color: colors.textSecondary, textAlign: "center", lineHeight: 20 },

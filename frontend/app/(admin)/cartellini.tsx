@@ -9,7 +9,7 @@ import { useRouter } from "expo-router";
 import {
   Cartellino, Giornata, Timbratura, cartellini, correggiTimbratura, eliminaTimbratura,
   fmtDurata, leggiPosizioneOfficina, impostaPosizioneOfficina, PosizioneOfficina,
-  timbraturaManuale, giornataStandard,
+  timbraturaManuale, giornataStandard, riscriviGiornata,
 } from "@/src/api/client";
 import { confirmDialog, showAlert } from "@/src/utils/dialog";
 import { leggiPosizione } from "@/src/utils/posizione";
@@ -48,6 +48,14 @@ export default function CartelliniAdmin() {
   const [aTipo, setATipo] = useState<"ENTRATA" | "USCITA">("ENTRATA");
   const [aOra, setAOra] = useState("");
   const [aMotivo, setAMotivo] = useState("");
+
+  // Rifare la giornata intera
+  const [rifai, setRifai] = useState<{ cartellino: Cartellino; giorno: string } | null>(null);
+  const [rEntrata, setREntrata] = useState("");
+  const [rUscita, setRUscita] = useState("");
+  const [rPausaInizio, setRPausaInizio] = useState("");
+  const [rPausaFine, setRPausaFine] = useState("");
+  const [rMotivo, setRMotivo] = useState("");
 
   const load = useCallback(async () => {
     try {
@@ -107,6 +115,43 @@ export default function CartelliniAdmin() {
       await load();
     } catch (e: any) {
       showAlert("Errore", e?.message || "Correzione non salvata");
+    } finally { setSalvando(false); }
+  };
+
+  // Rifare l'intera giornata: piu veloce che correggere una timbratura alla volta
+  const apriRifai = (c: Cartellino, g: Giornata) => {
+    const entrate = g.timbrature.filter((t) => t.tipo === "ENTRATA");
+    const uscite = g.timbrature.filter((t) => t.tipo === "USCITA");
+    setRifai({ cartellino: c, giorno: g.giorno });
+    setREntrata(entrate[0] ? fmtOra(entrate[0].timestamp) : "08:30");
+    setRUscita(uscite[uscite.length - 1] ? fmtOra(uscite[uscite.length - 1].timestamp) : "18:30");
+    // la pausa la si compila solo se serve: molte giornate non ne hanno bisogno
+    setRPausaInizio(uscite.length > 1 && uscite[0] ? fmtOra(uscite[0].timestamp) : "");
+    setRPausaFine(entrate.length > 1 && entrate[1] ? fmtOra(entrate[1].timestamp) : "");
+    setRMotivo("");
+  };
+
+  const salvaRifai = async () => {
+    if (!rifai) return;
+    if (!rMotivo.trim()) {
+      showAlert("Serve il motivo", "Scrivi perché stai rifacendo la giornata: resta scritto nel cartellino.");
+      return;
+    }
+    setSalvando(true);
+    try {
+      await riscriviGiornata({
+        worker_id: rifai.cartellino.worker_id,
+        giorno: rifai.giorno,
+        entrata: rEntrata,
+        uscita: rUscita,
+        pausa_inizio: rPausaInizio.trim() || undefined,
+        pausa_fine: rPausaFine.trim() || undefined,
+        motivo: rMotivo.trim(),
+      });
+      setRifai(null);
+      await load();
+    } catch (e: any) {
+      showAlert("Non salvata", e?.message || "Giornata non riscritta");
     } finally { setSalvando(false); }
   };
 
@@ -279,7 +324,13 @@ export default function CartelliniAdmin() {
                   {c.giornate.length === 0 ? (
                     <Text style={styles.vuoto}>Nessuna timbratura negli ultimi 30 giorni.</Text>
                   ) : c.giornate.map((g) => (
-                    <GiornataRiga key={g.giorno} g={g} onCorreggi={apriCorrezione} onElimina={elimina} />
+                    <GiornataRiga
+                      key={g.giorno}
+                      g={g}
+                      onCorreggi={apriCorrezione}
+                      onElimina={elimina}
+                      onRifai={(gg) => apriRifai(c, gg)}
+                    />
                   ))}
                 </>
               )}
@@ -289,6 +340,93 @@ export default function CartelliniAdmin() {
       </ScrollView>
 
       {/* Aggiunta di timbrature mai fatte */}
+      {/* Rifare l'intera giornata: si riscrivono entrata e uscita in un colpo solo */}
+      <Modal visible={!!rifai} transparent animationType="slide" onRequestClose={() => setRifai(null)}>
+        <View style={styles.mBackdrop}>
+          <View style={styles.mSheet}>
+            <View style={styles.mHeader}>
+              <Text style={styles.mTitle}>RIFAI LA GIORNATA</Text>
+              <TouchableOpacity onPress={() => setRifai(null)}>
+                <Ionicons name="close" size={26} color={colors.text} />
+              </TouchableOpacity>
+            </View>
+            <ScrollView contentContainerStyle={{ padding: spacing.lg }} keyboardShouldPersistTaps="handled">
+              <Text style={styles.mSub}>
+                {rifai?.cartellino.worker_name} · {rifai ? fmtGiorno(rifai.giorno) : ""}
+              </Text>
+              <Text style={styles.rifaiAvviso}>
+                Le timbrature di questo giorno vengono sostituite da quelle che scrivi qui sotto.
+              </Text>
+
+              <View style={{ flexDirection: "row", gap: spacing.md }}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.label}>ENTRATA</Text>
+                  <TextInput
+                    testID="input-rifai-entrata"
+                    style={styles.motivoInput}
+                    value={rEntrata}
+                    onChangeText={setREntrata}
+                    placeholder="08:30"
+                    placeholderTextColor={colors.textSecondary}
+                  />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.label}>USCITA</Text>
+                  <TextInput
+                    testID="input-rifai-uscita"
+                    style={styles.motivoInput}
+                    value={rUscita}
+                    onChangeText={setRUscita}
+                    placeholder="18:30"
+                    placeholderTextColor={colors.textSecondary}
+                  />
+                </View>
+              </View>
+
+              <Text style={[styles.label, { marginTop: spacing.md }]}>PAUSA PRANZO (lascia vuoto se non l&apos;ha fatta)</Text>
+              <View style={{ flexDirection: "row", gap: spacing.md }}>
+                <TextInput
+                  testID="input-rifai-pausa-inizio"
+                  style={[styles.motivoInput, { flex: 1 }]}
+                  value={rPausaInizio}
+                  onChangeText={setRPausaInizio}
+                  placeholder="dalle 13:00"
+                  placeholderTextColor={colors.textSecondary}
+                />
+                <TextInput
+                  testID="input-rifai-pausa-fine"
+                  style={[styles.motivoInput, { flex: 1 }]}
+                  value={rPausaFine}
+                  onChangeText={setRPausaFine}
+                  placeholder="alle 14:30"
+                  placeholderTextColor={colors.textSecondary}
+                />
+              </View>
+
+              <Text style={[styles.label, { marginTop: spacing.md }]}>MOTIVO (obbligatorio)</Text>
+              <TextInput
+                testID="input-rifai-motivo"
+                style={styles.motivoInput}
+                value={rMotivo}
+                onChangeText={setRMotivo}
+                placeholder="es. aveva timbrato più volte per sbaglio"
+                placeholderTextColor={colors.textSecondary}
+              />
+
+              <TouchableOpacity
+                testID="btn-rifai-salva"
+                style={[styles.giornataBtn, salvando && { opacity: 0.6 }]}
+                disabled={salvando}
+                onPress={salvaRifai}
+              >
+                <Ionicons name="checkmark" size={18} color={colors.textInverse} />
+                <Text style={styles.giornataText}>{salvando ? "SALVO…" : "SALVA LA GIORNATA"}</Text>
+              </TouchableOpacity>
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
+
       <Modal visible={!!aggiungi} transparent animationType="slide" onRequestClose={() => setAggiungi(null)}>
         <View style={styles.mBackdrop}>
           <View style={styles.mSheet}>
@@ -423,16 +561,25 @@ export default function CartelliniAdmin() {
   );
 }
 
-function GiornataRiga({ g, onCorreggi, onElimina }: {
+function GiornataRiga({ g, onCorreggi, onElimina, onRifai }: {
   g: Giornata;
   onCorreggi: (t: Timbratura) => void;
   onElimina: (t: Timbratura) => void;
+  onRifai: (g: Giornata) => void;
 }) {
   return (
     <View style={styles.giornata}>
       <View style={styles.giornataTop}>
         <Text style={styles.giornataData}>{fmtGiorno(g.giorno)}</Text>
         <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+          <TouchableOpacity
+            testID={`btn-rifai-${g.giorno}`}
+            onPress={() => onRifai(g)}
+            style={styles.rifaiBtn}
+          >
+            <Ionicons name="refresh" size={12} color={colors.text} />
+            <Text style={styles.rifaiText}>RIFAI</Text>
+          </TouchableOpacity>
           <Text style={styles.giornataOre}>{fmtDurata(g.minuti_presenza)}</Text>
           {g.incompleta ? (
             <View style={styles.badgeIncompleta}><Text style={styles.badgeText}>MANCA USCITA</Text></View>
@@ -560,6 +707,15 @@ const styles = StyleSheet.create({
   aggiungiBtn: {
     flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 6,
     borderTopWidth: 1, borderTopColor: colors.border, paddingVertical: 12,
+  },
+  rifaiBtn: {
+    flexDirection: "row", alignItems: "center", gap: 4,
+    borderWidth: 1, borderColor: colors.border, paddingHorizontal: 8, paddingVertical: 4,
+  },
+  rifaiText: { fontSize: 9, fontWeight: "900", letterSpacing: 1, color: colors.text },
+  rifaiAvviso: {
+    fontSize: 12, color: colors.textSecondary, lineHeight: 17,
+    marginTop: 4, marginBottom: spacing.md,
   },
   aggiungiText: { fontSize: 11, fontWeight: "900", letterSpacing: 1, color: colors.text },
   giornataBtn: {
