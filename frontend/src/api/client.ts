@@ -620,6 +620,96 @@ export async function segnaFatturata(orderId: string): Promise<WorkOrder> {
   return api<WorkOrder>(`/work-orders/${orderId}/fatturata`, { method: "POST" });
 }
 
+/* ---- Documenti dei fornitori: da qui arrivano i costi ---- */
+
+export type RigaDocumento = {
+  codice?: string | null;
+  descrizione?: string | null;
+  quantita?: number | null;
+  costo_unitario?: number | null;
+  listino?: number | null;
+  importo?: number | null;
+  targa?: string | null;
+};
+
+export type DocumentoFornitore = {
+  id: string;
+  fornitore?: string | null;
+  codice_fornitore?: string | null;
+  numero?: string | null;
+  data_doc?: string | null;
+  targa?: string | null;
+  righe: RigaDocumento[];
+  imponibile?: number | null;
+  totale?: number | null;
+  verifica?: { stato?: string; somma_netta?: number; imponibile?: number; scarto?: number } | null;
+  caricato_da_nome?: string | null;
+  created_at: string;
+};
+
+export async function listaDocumenti(targa?: string): Promise<DocumentoFornitore[]> {
+  const qs = targa ? `?targa=${encodeURIComponent(targa)}` : "";
+  return api<DocumentoFornitore[]>(`/documenti${qs}`);
+}
+
+export async function caricaDocumento(uri: string): Promise<DocumentoFornitore> {
+  const token = await getToken();
+  const form = new FormData();
+  if (uri.startsWith("data:") || uri.startsWith("blob:")) {
+    const blob = await (await fetch(uri)).blob();
+    form.append("file", new File([blob], "documento.jpg", { type: blob.type || "image/jpeg" }));
+  } else {
+    // @ts-expect-error RN form data typing
+    form.append("file", { uri, name: "documento.jpg", type: "image/jpeg" });
+  }
+  const res = await fetch(`${BASE_URL}/api/documenti`, {
+    method: "POST",
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+    body: form,
+  });
+  const text = await res.text();
+  let data: any; try { data = JSON.parse(text); } catch { data = text; }
+  if (!res.ok) throw new Error((data && data.detail) || `Errore ${res.status}`);
+  return data as DocumentoFornitore;
+}
+
+export async function correggiDocumentoFornitore(
+  id: string, body: { fornitore?: string; numero?: string; data_doc?: string; targa?: string; righe?: RigaDocumento[] }
+): Promise<DocumentoFornitore> {
+  return api<DocumentoFornitore>(`/documenti/${id}`, { method: "PATCH", body });
+}
+
+export async function eliminaDocumentoFornitore(id: string): Promise<void> {
+  await api(`/documenti/${id}`, { method: "DELETE" });
+}
+
+export type Fornitore = { codice: string; nome: string; note?: string | null };
+
+export async function listaFornitori(): Promise<Fornitore[]> {
+  return api<Fornitore[]>("/fornitori");
+}
+
+export async function salvaFornitore(body: Fornitore): Promise<void> {
+  await api("/fornitori", { method: "POST", body });
+}
+
+export type Preventivo = {
+  disponibile: boolean;
+  targa?: string;
+  ricambi: {
+    codice?: string; descrizione?: string; quantita: number; costo: number;
+    ricarico: number; prezzo: number; totale: number; listino_fornitore?: number | null;
+  }[];
+  ricambi_costo: number; ricambi_vendita: number; margine_ricambi: number;
+  ore: number; tariffa_oraria: number; manodopera: number;
+  imponibile: number; iva_perc: number; iva: number; totale: number;
+  mancanze: string[];
+};
+
+export async function preventivoCommessa(orderId: string): Promise<Preventivo> {
+  return api<Preventivo>(`/work-orders/${orderId}/preventivo`);
+}
+
 /* ---- Avvisi su Telegram ---- */
 
 export type TelegramChat = {

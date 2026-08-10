@@ -337,6 +337,136 @@ def ricambi_in_riga(dati: dict) -> str:
     return "RICAMBI: " + " · ".join(pezzi) if pezzi else "RICAMBI: nessun codice leggibile"
 
 
+SYSTEM_DOCUMENTO_FORNITORE = (
+    "Ricevi la TRASCRIZIONE GREZZA, ottenuta con l'OCR, di un DOCUMENTO DI UN FORNITORE DI "
+    "RICAMBI AUTO: bolla di consegna, DDT, lista aperta, preventivo di vendita o fattura.\n"
+    "Devi estrarne le righe. Serviranno a calcolare il preventivo per il cliente, quindi un "
+    "numero sbagliato si traduce in una fattura sbagliata.\n"
+    "Rispondi SOLO con questo JSON, senza testo intorno:\n"
+    "{\n"
+    '  "codice_fornitore": "…", "fornitore": "…", "numero": "…", "data": "AAAA-MM-GG", "targa": "…",\n'
+    '  "righe": [\n'
+    '    {"codice": "…", "descrizione": "…", "quantita": 1, "costo_unitario": 0.00,\n'
+    '     "listino": 0.00, "importo": 0.00, "targa": null}\n'
+    "  ],\n"
+    '  "totale_documento": 0.00, "imponibile": 0.00\n'
+    "}\n"
+    "REGOLE FERREE:\n"
+    "0-bis. CODICE_FORNITORE: il titolare SCRIVE A PENNA sul foglio una sigla breve come "
+    "F1, F2, F3 per dire da quale fornitore arriva. Cercala: e' scritta a mano, di solito in "
+    "alto o in un angolo, ed e' l'unica cosa manoscritta su un foglio stampato. Riportala "
+    "cosi' com'e' (F1, F2...). Se non c'e' nessuna sigla scritta a mano, null.\n"
+    "0. FORNITORE e' CHI EMETTE il documento e vende i pezzi (il logo in alto, o la ragione "
+    "sociale in fondo: 'AUTORICAMBI GR GROUP SRL', 'GR GROUP'). NON e' il destinatario: "
+    "'AUTOSERVICE VALENTE' e' l'officina che compra, e non va mai messa come fornitore. "
+    "Se nel documento non c'e' nessuna ragione sociale oltre a quella dell'officina, "
+    "metti null: il fornitore lo aggiungera' a mano il titolare. Non dedurlo, non tirarlo "
+    "a indovinare da altri documenti.\n"
+    "1. COSTO_UNITARIO e' quello che l'officina PAGA DAVVERO: la colonna del prezzo unitario, "
+    "gia' scontato. Nomi possibili: PREZZO, PREZZO UNIT.SCONTATO, PREZZO UNITARIO, NETTO. "
+    "NON e' la colonna LISTINO, che va nel campo listino a parte.\n"
+    "2. LISTINO e' il prezzo di listino del fornitore, quando c'e'. Se vale 0,00 o manca, null.\n"
+    "3. IMPORTO e' il totale della riga (colonna IMPORTO o IMPORTO IVATO). Se manca, null.\n"
+    "4. I NUMERI ITALIANI usano la virgola per i decimali e il punto per le migliaia: "
+    "'1.234,50' vale 1234.50, '22,50' vale 22.50. Convertili sempre in numero con il punto.\n"
+    "5. LE TARGHE NON SONO RICAMBI. Su questi documenti la targa compare spesso: in un campo "
+    "dedicato in alto, oppure come RIGA a importo zero in mezzo alle altre (es. 'BH997TD', "
+    "'GX823EW'). Una targa italiana e' 2 lettere + 3 cifre + 2 lettere.\n"
+    "   - Se la targa e' in un campo in alto, mettila nel campo targa del documento.\n"
+    "   - Se compare come riga, NON metterla fra le righe: serve a dire a quale auto "
+    "appartengono i pezzi ELENCATI PRIMA di essa. In quel caso scrivi quella targa nel campo "
+    "targa delle righe che la precedono, fino alla targa precedente.\n"
+    "6. Salta le righe che non sono ricambi: note, condizioni di vendita, garanzie, indirizzi, "
+    "intestazioni di colonna, numeri di pagina.\n"
+    "7. TOTALE_DOCUMENTO e IMPONIBILE: i totali stampati in fondo. Servono a verificare che "
+    "le righe siano state lette bene, quindi riportali esattamente come stanno.\n"
+    "8. Se un valore non si legge con certezza, null. MAI inventare un numero."
+)
+
+
+async def leggi_documento_fornitore(data_url: str) -> dict:
+    """Foto di una bolla/DDT/preventivo del fornitore -> righe strutturate con i costi.
+
+    E' la fonte piu' affidabile che abbiamo: carta piatta e stampata, si legge molto meglio
+    di una scatola curva, porta il costo reale e spesso la targa. E si autoverifica, perche'
+    le righe devono tornare col totale stampato in fondo."""
+    import json as _json
+    testo = await ocr_image(data_url)
+    if not testo.strip():
+        return {"errore": "Non riesco a leggere il documento: rifai la foto con piu' luce."}
+
+    resp = await _client.chat.complete_async(
+        model=TEXT_MODEL,
+        messages=[{"role": "system", "content": SYSTEM_DOCUMENTO_FORNITORE},
+                  {"role": "user", "content": testo[:16000]}],
+        response_format={"type": "json_object"},
+        max_tokens=2500,
+    )
+    try:
+        dati = _json.loads(resp.choices[0].message.content or "{}")
+    except Exception:
+        return {"errore": "Documento non interpretabile."}
+    if not isinstance(dati, dict):
+        return {"errore": "Documento non interpretabile."}
+    dati.setdefault("righe", [])
+    return dati
+
+
+def verifica_documento(dati: dict) -> dict:
+    """Le righe tornano coi totali stampati? Su un documento questo controllo si puo' fare,
+    e distingue una lettura buona da una da ricontrollare a mano.
+
+    Attenzione ai due mondi: alcuni fornitori stampano gli importi di riga IVA COMPRESA
+    (colonna 'IMPORTO IVATO') e in fondo l'imponibile netto. Confrontare la somma degli
+    importi con l'imponibile darebbe sempre 'non quadra' per un motivo che non e' un errore.
+    Quindi si prova su entrambi i fronti: netto contro imponibile, lordo contro totale."""
+    righe = [r for r in (dati.get("righe") or []) if isinstance(r, dict)]
+
+    def num(v):
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return None
+
+    somma_netta = 0.0        # costo unitario x quantita
+    somma_importi = 0.0      # colonna importo, cosi come stampata
+    incomplete = 0
+    for r in righe:
+        costo, q = num(r.get("costo_unitario")), num(r.get("quantita"))
+        if costo is not None and q is not None:
+            somma_netta += costo * q
+        else:
+            incomplete += 1
+        importo = num(r.get("importo"))
+        if importo is not None:
+            somma_importi += importo
+
+    imponibile = num(dati.get("imponibile"))
+    totale = num(dati.get("totale_documento"))
+
+    def combacia(a, b):
+        return a is not None and b is not None and abs(a - b) <= max(0.05, abs(b) * 0.01)
+
+    esito = {
+        "righe": len(righe), "righe_incomplete": incomplete,
+        "somma_netta": round(somma_netta, 2), "somma_importi": round(somma_importi, 2),
+        "imponibile": imponibile, "totale": totale,
+    }
+
+    if incomplete:
+        esito["stato"] = "incompleto"
+    elif combacia(somma_netta, imponibile) or combacia(somma_importi, totale) \
+            or combacia(somma_netta, totale) or combacia(somma_importi, imponibile):
+        esito["stato"] = "quadra"
+    elif imponibile is None and totale is None:
+        esito["stato"] = "senza_totale"      # niente da confrontare: lo guarda l'occhio
+    else:
+        esito["stato"] = "non_quadra"
+        riferimento = imponibile if imponibile is not None else totale
+        esito["scarto"] = round(somma_netta - riferimento, 2)
+    return esito
+
+
 async def leggi_ricambio(data_url: str, ripiega_su_vision: bool = True) -> tuple[dict, str]:
     """Foto di ricambi -> (codici strutturati, riga leggibile).
     Stessa strada del libretto: prima l'OCR trascrive scatole ed etichette, poi il modello

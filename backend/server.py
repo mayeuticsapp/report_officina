@@ -607,6 +607,68 @@ async def startup():
         # Serve perche' una notifica si puo' perdere, una lista no.
         await conn.execute("ALTER TABLE work_orders ADD COLUMN IF NOT EXISTS fatturata_il TIMESTAMPTZ")
         await conn.execute("ALTER TABLE work_orders ADD COLUMN IF NOT EXISTS fatturata_da_nome TEXT")
+        # Fornitori: il titolare scrive a penna F1, F2... sul documento per dire da chi arriva.
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS fornitori (
+                codice TEXT PRIMARY KEY,
+                nome TEXT NOT NULL,
+                note TEXT,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """)
+        for cod, nome in (("F1", "GR GROUP"), ("F2", "CDR")):
+            await conn.execute(
+                "INSERT INTO fornitori (codice, nome) VALUES ($1,$2) ON CONFLICT (codice) DO NOTHING",
+                cod, nome)
+
+        # I documenti dei fornitori fotografati: e' da qui che arrivano i COSTI, e senza
+        # costi non si calcola nessun preventivo.
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS documenti_fornitore (
+                id TEXT PRIMARY KEY,
+                fornitore TEXT,
+                codice_fornitore TEXT,
+                numero TEXT,
+                data_doc DATE,
+                targa TEXT,
+                righe JSONB NOT NULL DEFAULT '[]',
+                imponibile NUMERIC(10,2),
+                totale NUMERIC(10,2),
+                verifica JSONB,
+                content_type TEXT,
+                caricato_da TEXT,
+                caricato_da_nome TEXT,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """)
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_documenti_targa ON documenti_fornitore (upper(targa))")
+
+        # Le regole commerciali del titolare: ricarico a scaglioni, tariffa oraria, consumabili.
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS impostazioni_prezzi (
+                id INT PRIMARY KEY DEFAULT 1,
+                scaglioni JSONB NOT NULL,
+                tariffa_oraria NUMERIC(10,2) NOT NULL DEFAULT 37,
+                iva NUMERIC(5,2) NOT NULL DEFAULT 22,
+                consumabili JSONB NOT NULL DEFAULT '[]',
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """)
+        await conn.execute("""
+            INSERT INTO impostazioni_prezzi (id, scaglioni, tariffa_oraria, iva, consumabili)
+            VALUES (1, $1::jsonb, 37, 22, $2::jsonb) ON CONFLICT (id) DO NOTHING
+        """,
+            json.dumps([
+                {"fino_a": 20, "ricarico": 200},
+                {"fino_a": 60, "ricarico": 150},
+                {"fino_a": None, "ricarico": 100},
+            ]),
+            json.dumps([
+                {"nome": "Olio motore", "unita": "litri", "costo": 4.14, "ricarico": 200},
+            ]))
+
         # Storico del planning: officina_planning tiene una riga sola, sovrascritta a ogni
         # invio di Omnius, quindi i giorni passati sparivano. Qui ogni giorno resta.
         await conn.execute("""
@@ -2709,10 +2771,365 @@ async def _avvisa_lavoro_completato(order_id: str, worker_name: str):
         else:
             righe += ["", "<i>Nessun ricambio registrato su questo lavoro.</i>"]
 
+        # Il totale indicativo, se i documenti del fornitore ci sono. Se mancano si dice
+        # cosa manca invece di sparare un numero credibile ma sbagliato.
+        try:
+            p = await calcola_preventivo(order_id)
+            if p.get("ricambi"):
+                righe += ["", "<b>PREVENTIVO INDICATIVO</b>"]
+                for v in p["ricambi"][:15]:
+                    nome = _esc(v.get("descrizione") or v.get("codice") or "ricambio")
+                    q = f" ×{int(v['quantita'])}" if v.get("quantita", 1) > 1 else ""
+                    righe.append(
+                        f"• {nome}{q} — <b>{v['totale']:.2f}</b> "
+                        f"<i>(costo {v['costo']:.2f}, +{int(v['ricarico'])}%)</i>")
+                righe += [
+                    "",
+                    f"Ricambi <b>{p['ricambi_vendita']:.2f}</b> · "
+                    f"Manodopera {p['ore']:.1f}h × {p['tariffa_oraria']:.0f} = "
+                    f"<b>{p['manodopera']:.2f}</b>",
+                    f"Imponibile {p['imponibile']:.2f} + IVA {p['iva']:.2f}",
+                    f"<b>TOTALE INDICATIVO {p['totale']:.2f} €</b>",
+                    f"<i>margine sui ricambi {p['margine_ricambi']:.2f} €</i>",
+                ]
+                if p.get("mancanze"):
+                    righe.append(f"<i>Da aggiungere: {_esc(', '.join(p['mancanze']))}</i>")
+            else:
+                righe += ["", "<i>Preventivo non calcolabile: nessun documento fornitore "
+                              "caricato per questa targa.</i>"]
+        except Exception as e:
+            logger.warning(f"preventivo per il messaggio: {e}")
+
         righe += ["", f"{PUBLIC_BASE_URL}/order/{order_id}"]
         await _telegram_notify("\n".join(righe))
     except Exception as e:
         logger.warning(f"avviso completamento fallito: {e}")
+
+
+# ---------------- Documenti fornitore e prezzi ----------------
+
+DOCS_DIR = UPLOADS_DIR / "documenti"
+
+
+async def _impostazioni_prezzi() -> dict:
+    riga = await fetchrow("SELECT * FROM impostazioni_prezzi WHERE id=1")
+    if not riga:
+        return {"scaglioni": [], "tariffa_oraria": 37.0, "iva": 22.0, "consumabili": []}
+    d = dict(riga)
+    for c in ("scaglioni", "consumabili"):
+        if isinstance(d.get(c), str):
+            d[c] = json.loads(d[c])
+    d["tariffa_oraria"] = float(d.get("tariffa_oraria") or 37)
+    d["iva"] = float(d.get("iva") or 22)
+    return d
+
+
+def _ricarico_per(costo: float, scaglioni: list) -> float:
+    """La percentuale che spetta a quel costo. Si applica al prezzo UNITARIO, non alla riga:
+    altrimenti comprare piu' pezzi farebbe scendere il ricarico da solo."""
+    for s in sorted(scaglioni, key=lambda x: (x.get("fino_a") is None, x.get("fino_a") or 0)):
+        limite = s.get("fino_a")
+        if limite is None or costo < float(limite):
+            return float(s.get("ricarico") or 0)
+    return 0.0
+
+
+async def _righe_documenti_per_targa(targa: str) -> list:
+    """Le righe di ricambio comprate per quella targa, da tutti i documenti caricati."""
+    if not targa:
+        return []
+    docs = await fetch(
+        """SELECT righe, targa, fornitore, numero FROM documenti_fornitore
+           WHERE upper(targa)=upper($1)
+              OR righe @> $2::jsonb""",
+        targa, json.dumps([{"targa": targa.upper()}]),
+    )
+    fuori: list = []
+    for d in docs:
+        righe = d["righe"]
+        if isinstance(righe, str):
+            righe = json.loads(righe)
+        for r in righe or []:
+            if not isinstance(r, dict):
+                continue
+            # una riga vale per questa targa se la porta scritta, o se il documento intero e' suo
+            sua = (r.get("targa") or "").upper() == targa.upper() or (
+                not r.get("targa") and (d["targa"] or "").upper() == targa.upper())
+            if sua:
+                fuori.append({**r, "fornitore": d["fornitore"], "documento": d["numero"]})
+    return fuori
+
+
+async def calcola_preventivo(order_id: str) -> dict:
+    """Il totale indicativo di una commessa: ricambi dai documenti col ricarico, piu'
+    manodopera. Dice sempre cosa gli manca, perche' un totale credibile ma incompleto
+    e' peggio di nessun totale."""
+    o = await fetchrow(
+        "SELECT plate, minutes_effective, scheda_tecnica FROM work_orders WHERE id=$1", order_id)
+    if not o:
+        return {"disponibile": False, "motivo": "Commessa non trovata"}
+
+    imp = await _impostazioni_prezzi()
+    righe_doc = await _righe_documenti_per_targa(o["plate"] or "")
+
+    voci: list = []
+    tot_costo = tot_vendita = 0.0
+    for r in righe_doc:
+        try:
+            costo = float(r.get("costo_unitario") or 0)
+            q = float(r.get("quantita") or 1)
+        except (TypeError, ValueError):
+            continue
+        if costo <= 0:
+            continue
+        perc = _ricarico_per(costo, imp["scaglioni"])
+        prezzo = costo * (1 + perc / 100.0)
+        tot_costo += costo * q
+        tot_vendita += prezzo * q
+        voci.append({
+            "codice": r.get("codice"), "descrizione": r.get("descrizione"),
+            "quantita": q, "costo": round(costo, 2), "ricarico": perc,
+            "prezzo": round(prezzo, 2), "totale": round(prezzo * q, 2),
+            "listino_fornitore": r.get("listino"),
+        })
+
+    minuti = o["minutes_effective"] or 0
+    ore = minuti / 60.0
+    manodopera = ore * imp["tariffa_oraria"]
+
+    imponibile = tot_vendita + manodopera
+    iva = imponibile * imp["iva"] / 100.0
+
+    mancanze = []
+    if not voci:
+        mancanze.append("nessun documento fornitore caricato per questa targa")
+    if not minuti:
+        mancanze.append("ore non confermate")
+    mancanze.append("consumabili (olio, liquidi) da aggiungere a mano")
+
+    return {
+        "disponibile": bool(voci) or bool(minuti),
+        "targa": o["plate"],
+        "ricambi": voci,
+        "ricambi_costo": round(tot_costo, 2),
+        "ricambi_vendita": round(tot_vendita, 2),
+        "margine_ricambi": round(tot_vendita - tot_costo, 2),
+        "ore": round(ore, 2),
+        "tariffa_oraria": imp["tariffa_oraria"],
+        "manodopera": round(manodopera, 2),
+        "imponibile": round(imponibile, 2),
+        "iva_perc": imp["iva"],
+        "iva": round(iva, 2),
+        "totale": round(imponibile + iva, 2),
+        "mancanze": mancanze,
+    }
+
+
+class RigaDocumento(BaseModel):
+    codice: Optional[str] = None
+    descrizione: Optional[str] = None
+    quantita: Optional[float] = 1
+    costo_unitario: Optional[float] = None
+    listino: Optional[float] = None
+    importo: Optional[float] = None
+    targa: Optional[str] = None
+
+
+class DocumentoOut(BaseModel):
+    id: str
+    fornitore: Optional[str] = None
+    codice_fornitore: Optional[str] = None
+    numero: Optional[str] = None
+    data_doc: Optional[date] = None
+    targa: Optional[str] = None
+    righe: List[dict] = Field(default_factory=list)
+    imponibile: Optional[float] = None
+    totale: Optional[float] = None
+    verifica: Optional[dict] = None
+    caricato_da_nome: Optional[str] = None
+    created_at: datetime
+
+
+class DocumentoUpdate(BaseModel):
+    fornitore: Optional[str] = None
+    numero: Optional[str] = None
+    data_doc: Optional[str] = None
+    targa: Optional[str] = None
+    righe: Optional[List[RigaDocumento]] = None
+
+
+def _riga_documento(row: dict) -> DocumentoOut:
+    d = dict(row)
+    for c in ("righe", "verifica"):
+        if isinstance(d.get(c), str):
+            d[c] = json.loads(d[c])
+    for c in ("imponibile", "totale"):
+        if d.get(c) is not None:
+            d[c] = float(d[c])
+    return DocumentoOut(**{k: d.get(k) for k in DocumentoOut.model_fields})
+
+
+@api.post("/documenti", response_model=DocumentoOut)
+async def carica_documento(file: UploadFile = File(...), admin: dict = Depends(require_admin)):
+    """Il titolare fotografa la bolla del fornitore: l'AI ne estrae le righe coi costi.
+
+    E' la sorgente dei costi, quindi di tutto il calcolo del preventivo. La foto originale
+    resta salvata: se un numero non torna, si riguarda la carta."""
+    content_type = (file.content_type or "").lower()
+    if content_type not in _PHOTO_EXT:
+        raise HTTPException(status_code=415, detail=f"Formato non supportato: {content_type}")
+    data = await file.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="File vuoto")
+    if len(data) > MAX_PHOTO_BYTES:
+        raise HTTPException(status_code=413, detail=f"Foto troppo grande (max {MAX_PHOTO_BYTES//(1024*1024)}MB)")
+
+    doc_id = str(uuid.uuid4())
+    DOCS_DIR.mkdir(parents=True, exist_ok=True)
+    path = DOCS_DIR / f"{doc_id}.{_PHOTO_EXT[content_type]}"
+    path.write_bytes(data)
+
+    data_url = f"data:{content_type};base64,{base64.b64encode(data).decode()}"
+    try:
+        letto = await ai.leggi_documento_fornitore(data_url)
+    except Exception as e:
+        logger.exception("lettura documento fallita")
+        raise HTTPException(status_code=502, detail=f"Non riesco a leggere il documento: {e}")
+    if letto.get("errore"):
+        raise HTTPException(status_code=422, detail=letto["errore"])
+
+    # la sigla a penna (F1, F2...) e' la parola del titolare: vince sul nome stampato
+    fornitore = letto.get("fornitore")
+    codice = (letto.get("codice_fornitore") or "").strip().upper() or None
+    if codice:
+        f = await fetchrow("SELECT nome FROM fornitori WHERE codice=$1", codice)
+        if f:
+            fornitore = f["nome"]
+
+    righe = [r for r in (letto.get("righe") or []) if isinstance(r, dict)]
+    verifica = ai.verifica_documento(letto)
+
+    data_doc = None
+    if letto.get("data"):
+        try:
+            data_doc = date.fromisoformat(str(letto["data"])[:10])
+        except ValueError:
+            pass
+
+    await execute(
+        """INSERT INTO documenti_fornitore
+           (id, fornitore, codice_fornitore, numero, data_doc, targa, righe, imponibile,
+            totale, verifica, content_type, caricato_da, caricato_da_nome, created_at, updated_at)
+           VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10::jsonb,$11,$12,$13,$14,$14)""",
+        doc_id, fornitore, codice, letto.get("numero"), data_doc,
+        (letto.get("targa") or "").upper() or None, json.dumps(righe),
+        letto.get("imponibile"), letto.get("totale_documento"), json.dumps(verifica),
+        content_type, admin["id"], admin["full_name"], now_utc(),
+    )
+    logger.info(f"documento {doc_id}: {len(righe)} righe, verifica {verifica.get('stato')}")
+    return _riga_documento(dict(await fetchrow("SELECT * FROM documenti_fornitore WHERE id=$1", doc_id)))
+
+
+@api.get("/documenti", response_model=List[DocumentoOut])
+async def lista_documenti(targa: Optional[str] = None, limite: int = 50,
+                          admin: dict = Depends(require_admin)):
+    if targa:
+        righe = await fetch(
+            "SELECT * FROM documenti_fornitore WHERE upper(targa)=upper($1) ORDER BY created_at DESC",
+            targa)
+    else:
+        righe = await fetch(
+            "SELECT * FROM documenti_fornitore ORDER BY created_at DESC LIMIT $1",
+            max(1, min(limite, 200)))
+    return [_riga_documento(dict(r)) for r in righe]
+
+
+@api.get("/documenti/{doc_id}/file")
+async def file_documento(doc_id: str, admin: dict = Depends(require_admin)):
+    row = await fetchrow("SELECT content_type FROM documenti_fornitore WHERE id=$1", doc_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Documento non trovato")
+    path = DOCS_DIR / f"{doc_id}.{_PHOTO_EXT.get(row['content_type'], 'jpg')}"
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Immagine non trovata")
+    return FileResponse(path, media_type=row["content_type"])
+
+
+@api.patch("/documenti/{doc_id}", response_model=DocumentoOut)
+async def correggi_documento(doc_id: str, body: DocumentoUpdate, admin: dict = Depends(require_admin)):
+    """Il titolare corregge quello che l'AI ha letto male, o assegna la targa mancante."""
+    row = await fetchrow("SELECT id FROM documenti_fornitore WHERE id=$1", doc_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Documento non trovato")
+    parti, vals, i = [], [], 1
+    if body.fornitore is not None:
+        parti.append(f"fornitore=${i}"); vals.append(body.fornitore.strip() or None); i += 1
+    if body.numero is not None:
+        parti.append(f"numero=${i}"); vals.append(body.numero.strip() or None); i += 1
+    if body.targa is not None:
+        parti.append(f"targa=${i}"); vals.append(body.targa.strip().upper() or None); i += 1
+    if body.data_doc is not None:
+        try:
+            parti.append(f"data_doc=${i}"); vals.append(date.fromisoformat(body.data_doc)); i += 1
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Data non valida")
+    if body.righe is not None:
+        righe = [r.model_dump() for r in body.righe]
+        parti.append(f"righe=${i}::jsonb"); vals.append(json.dumps(righe)); i += 1
+        parti.append(f"verifica=${i}::jsonb")
+        vals.append(json.dumps(ai.verifica_documento({"righe": righe}))); i += 1
+    if not parti:
+        return _riga_documento(dict(await fetchrow("SELECT * FROM documenti_fornitore WHERE id=$1", doc_id)))
+    parti.append(f"updated_at=${i}"); vals.append(now_utc()); i += 1
+    vals.append(doc_id)
+    await execute(f"UPDATE documenti_fornitore SET {', '.join(parti)} WHERE id=${i}", *vals)
+    return _riga_documento(dict(await fetchrow("SELECT * FROM documenti_fornitore WHERE id=$1", doc_id)))
+
+
+@api.delete("/documenti/{doc_id}")
+async def elimina_documento(doc_id: str, admin: dict = Depends(require_admin)):
+    row = await fetchrow("SELECT content_type FROM documenti_fornitore WHERE id=$1", doc_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Documento non trovato")
+    await execute("DELETE FROM documenti_fornitore WHERE id=$1", doc_id)
+    path = DOCS_DIR / f"{doc_id}.{_PHOTO_EXT.get(row['content_type'], 'jpg')}"
+    path.unlink(missing_ok=True)
+    return {"ok": True}
+
+
+class FornitoreIn(BaseModel):
+    codice: str
+    nome: str
+    note: Optional[str] = None
+
+
+@api.get("/fornitori")
+async def lista_fornitori(admin: dict = Depends(require_admin)):
+    return [dict(r) for r in await fetch("SELECT * FROM fornitori ORDER BY codice")]
+
+
+@api.post("/fornitori")
+async def salva_fornitore(body: FornitoreIn, admin: dict = Depends(require_admin)):
+    codice = body.codice.strip().upper()
+    if not codice or not body.nome.strip():
+        raise HTTPException(status_code=400, detail="Servono sigla e nome")
+    await execute(
+        """INSERT INTO fornitori (codice, nome, note) VALUES ($1,$2,$3)
+           ON CONFLICT (codice) DO UPDATE SET nome=$2, note=$3""",
+        codice, body.nome.strip(), (body.note or "").strip() or None)
+    return {"ok": True}
+
+
+@api.delete("/fornitori/{codice}")
+async def elimina_fornitore(codice: str, admin: dict = Depends(require_admin)):
+    await execute("DELETE FROM fornitori WHERE codice=$1", codice.upper())
+    return {"ok": True}
+
+
+@api.get("/work-orders/{order_id}/preventivo")
+async def preventivo_commessa(order_id: str, admin: dict = Depends(require_admin)):
+    """Il totale indicativo, da girare su STAR."""
+    return await calcola_preventivo(order_id)
 
 
 class TelegramChatOut(BaseModel):

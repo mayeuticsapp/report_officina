@@ -76,6 +76,14 @@ export default function Dashboard() {
         </View>
         <View style={{ flexDirection: "row", gap: 8, alignItems: "center" }}>
           <TouchableOpacity
+            testID="btn-documenti"
+            style={dashAskStyles.btnAlt}
+            onPress={() => router.push("/(admin)/documenti" as any)}
+          >
+            <Ionicons name="document-text-outline" size={18} color={colors.text} />
+            <Text style={dashAskStyles.btnAltText}>BOLLE</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
             testID="btn-cartellini"
             style={dashAskStyles.btnAlt}
             onPress={() => router.push("/(admin)/cartellini" as any)}
