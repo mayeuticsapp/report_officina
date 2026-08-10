@@ -337,10 +337,14 @@ def ricambi_in_riga(dati: dict) -> str:
     return "RICAMBI: " + " · ".join(pezzi) if pezzi else "RICAMBI: nessun codice leggibile"
 
 
-async def leggi_ricambio(data_url: str) -> tuple[dict, str]:
+async def leggi_ricambio(data_url: str, ripiega_su_vision: bool = True) -> tuple[dict, str]:
     """Foto di ricambi -> (codici strutturati, riga leggibile).
     Stessa strada del libretto: prima l'OCR trascrive scatole ed etichette, poi il modello
-    di testo pesca i codici. Se l'OCR non risponde si guarda la foto."""
+    di testo pesca i codici.
+
+    ripiega_su_vision=False quando la foto non e' stata scattata apposta per un ricambio:
+    si passa comunque l'OCR (le scatole nelle foto di lavorazione hanno il codice bene in
+    vista), ma senza spendere una seconda chiamata a guardare l'immagine se non c'e' testo."""
     import json as _json
     testo = ""
     try:
@@ -361,6 +365,8 @@ async def leggi_ricambio(data_url: str) -> tuple[dict, str]:
                 return dati, ricambi_in_riga(dati)
         except Exception:
             pass
+    if not ripiega_su_vision:
+        return {}, ""
     # niente OCR: si torna a guardare la foto
     return {}, await describe_image(data_url, kind="ricambio")
 

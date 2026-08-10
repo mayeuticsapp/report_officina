@@ -2305,6 +2305,17 @@ async def _caption_photo(photo_id: str, data: bytes, content_type: str, kind: Op
                               json.dumps(campi), photo_id)
         else:
             caption = await ai.describe_image(data_url, kind=kind)
+            # In officina si fotografa tutto: scatole, pezzi smontati, lavorazione. I codici
+            # stanno spesso in una foto qualsiasi, non solo in quella scattata apposta.
+            # Si passa l'OCR su ogni immagine: se trova un codice lo salva, altrimenti niente.
+            try:
+                campi, _ = await ai.leggi_ricambio(data_url, ripiega_su_vision=False)
+                if campi and campi.get("ricambi"):
+                    await execute("UPDATE order_photos SET dati=$1::jsonb WHERE id=$2",
+                                  json.dumps(campi), photo_id)
+                    logger.info(f"foto {photo_id}: trovati {len(campi['ricambi'])} codici ricambio")
+            except Exception as e:
+                logger.warning(f"lettura codici da foto {photo_id}: {e}")
         if caption:
             await execute("UPDATE order_photos SET caption=$1 WHERE id=$2", caption[:800], photo_id)
             logger.info(f"didascalia foto {photo_id}: {caption[:60]}")
@@ -2546,16 +2557,54 @@ def _esc(testo: str) -> str:
     return (testo or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
+MAX_FOTO_DA_LEGGERE = 15
+
+
+async def _leggi_codici_arretrati(order_id: str):
+    """Legge i codici dalle foto della commessa che nessuno ha ancora analizzato.
+
+    Serve perche' in officina si fotografa tutto da sempre — scatole comprese — ma le foto
+    caricate prima di questa funzione non sono mai passate dall'OCR. Alla chiusura del lavoro
+    si recuperano, cosi il riepilogo non dice 'nessun ricambio' quando i codici sono li'."""
+    try:
+        foto = await fetch(
+            """SELECT id, content_type FROM order_photos
+               WHERE work_order_id=$1 AND dati IS NULL AND content_type LIKE 'image/%'
+               ORDER BY created_at ASC LIMIT $2""",
+            order_id, MAX_FOTO_DA_LEGGERE,
+        )
+        for f in foto:
+            try:
+                path = _photo_path(order_id, f["id"], f["content_type"])
+                if not path.exists():
+                    continue
+                data_url = (f"data:{f['content_type']};base64,"
+                            f"{base64.b64encode(path.read_bytes()).decode()}")
+                campi, _ = await ai.leggi_ricambio(data_url, ripiega_su_vision=False)
+                if campi and campi.get("ricambi"):
+                    await execute("UPDATE order_photos SET dati=$1::jsonb WHERE id=$2",
+                                  json.dumps(campi), f["id"])
+            except Exception as e:
+                logger.warning(f"codici arretrati, foto {f['id']}: {e}")
+    except Exception as e:
+        logger.warning(f"codici arretrati per {order_id}: {e}")
+
+
 async def _ricambi_della_commessa(order_id: str, scheda: dict) -> tuple[list, list]:
     """Cosa e stato montato davvero, da due fonti che si completano a vicenda:
-    le spunte del meccanico sulla scheda e i codici letti dalle foto dei ricambi.
+    le spunte del meccanico sulla scheda e i codici letti dalle foto.
     Ritorna (voci spuntate a mano, voci lette dalle foto)."""
     a_mano = [str(x).strip() for x in (scheda.get("ricambi_sostituiti") or []) if str(x).strip()]
 
+    # prima si recuperano le foto mai analizzate, poi si legge tutto
+    await _leggi_codici_arretrati(order_id)
+
     dalle_foto: list = []
     try:
+        # TUTTE le foto, non solo quelle scattate col pulsante RICAMBIO: il codice
+        # sta spesso in una foto qualsiasi della lavorazione
         foto = await fetch(
-            "SELECT dati FROM order_photos WHERE work_order_id=$1 AND kind='ricambio' AND dati IS NOT NULL",
+            "SELECT dati FROM order_photos WHERE work_order_id=$1 AND dati IS NOT NULL",
             order_id,
         )
         visti = set()
