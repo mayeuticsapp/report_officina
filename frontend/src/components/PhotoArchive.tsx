@@ -41,17 +41,17 @@ export function PhotoArchive({ orderId, canUpload, canDelete, currentUserId }: P
 
   useEffect(() => { load(); }, [load]);
 
-  const doUpload = async (uri: string) => {
+  const doUpload = async (uri: string, kind?: string) => {
     setUploading(true);
     try {
-      await uploadOrderPhoto(orderId, uri);
+      await uploadOrderPhoto(orderId, uri, undefined, kind);
       await load();
     } catch (e: any) {
       showAlert("Errore caricamento", e?.message || "Impossibile caricare la foto");
     } finally { setUploading(false); }
   };
 
-  const takePhoto = async () => {
+  const takePhoto = async (kind?: string) => {
     const perm = await ImagePicker.requestCameraPermissionsAsync();
     if (perm.status !== "granted") {
       showAlert("Permesso negato", "Serve il permesso fotocamera per scattare.");
@@ -59,8 +59,13 @@ export function PhotoArchive({ orderId, canUpload, canDelete, currentUserId }: P
     }
     const res = await ImagePicker.launchCameraAsync({ quality: 0.7, base64: true });
     if (!res.canceled && res.assets[0]?.base64) {
-      await doUpload(`data:image/jpeg;base64,${res.assets[0].base64}`);
+      await doUpload(`data:image/jpeg;base64,${res.assets[0].base64}`, kind);
     }
+  };
+
+  /** La scatola del ricambio: l'AI ne legge il codice, che serve al titolare per il preventivo. */
+  const fotoRicambio = async () => {
+    await takePhoto("ricambio");
   };
 
   const recordVideo = async () => {
@@ -134,9 +139,13 @@ export function PhotoArchive({ orderId, canUpload, canDelete, currentUserId }: P
 
       {canUpload && (
         <View style={styles.actionsRow}>
-          <TouchableOpacity testID="btn-photo-camera" style={styles.actionBtn} onPress={takePhoto} disabled={uploading}>
+          <TouchableOpacity testID="btn-photo-camera" style={styles.actionBtn} onPress={() => takePhoto()} disabled={uploading}>
             <Ionicons name="camera" size={18} color={colors.textInverse} />
             <Text style={styles.actionBtnText}>SCATTA</Text>
+          </TouchableOpacity>
+          <TouchableOpacity testID="btn-photo-ricambio" style={styles.actionBtnRicambio} onPress={fotoRicambio} disabled={uploading}>
+            <Ionicons name="barcode-outline" size={18} color={colors.textInverse} />
+            <Text style={styles.actionBtnText}>RICAMBIO</Text>
           </TouchableOpacity>
           <TouchableOpacity testID="btn-photo-library" style={styles.actionBtnAlt} onPress={pickFromLibrary} disabled={uploading}>
             <Ionicons name="images-outline" size={18} color={colors.text} />
@@ -181,6 +190,10 @@ export function PhotoArchive({ orderId, canUpload, canDelete, currentUserId }: P
                 {p.kind === "libretto" ? (
                   <View style={styles.kindBadge}>
                     <Text style={styles.kindBadgeText}>LIBRETTO</Text>
+                  </View>
+                ) : p.kind === "ricambio" ? (
+                  <View style={[styles.kindBadge, { backgroundColor: colors.primary }]}>
+                    <Text style={styles.kindBadgeText}>RICAMBIO</Text>
                   </View>
                 ) : null}
                 <Text style={styles.thumbMeta} numberOfLines={1}>
@@ -243,6 +256,10 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14, paddingVertical: 10,
   },
   actionBtnText: { color: colors.textInverse, fontSize: 11, letterSpacing: 2, fontWeight: "800" },
+  actionBtnRicambio: {
+    flexDirection: "row", alignItems: "center", gap: 6, backgroundColor: colors.primary,
+    paddingHorizontal: 14, paddingVertical: 10,
+  },
   actionBtnAlt: {
     flexDirection: "row", alignItems: "center", gap: 6, borderWidth: 1, borderColor: colors.borderStrong,
     paddingHorizontal: 14, paddingVertical: 10,

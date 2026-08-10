@@ -2297,6 +2297,12 @@ async def _caption_photo(photo_id: str, data: bytes, content_type: str, kind: Op
             if campi:
                 await execute("UPDATE order_photos SET dati=$1::jsonb WHERE id=$2",
                               json.dumps(campi), photo_id)
+        elif kind == "ricambio":
+            # I codici dei pezzi montati: servono al titolare per comporre il preventivo
+            campi, caption = await ai.leggi_ricambio(data_url)
+            if campi:
+                await execute("UPDATE order_photos SET dati=$1::jsonb WHERE id=$2",
+                              json.dumps(campi), photo_id)
         else:
             caption = await ai.describe_image(data_url, kind=kind)
         if caption:
@@ -2345,7 +2351,11 @@ async def _salva_foto_base64(order_id: str, user: dict, raw: str, kind: Optional
 
 
 @api.post("/work-orders/{order_id}/photos", response_model=OrderPhoto)
-async def upload_order_photo(order_id: str, file: UploadFile = File(...), user: dict = Depends(get_current_user)):
+async def upload_order_photo(order_id: str, file: UploadFile = File(...),
+                             kind: Optional[str] = None,
+                             user: dict = Depends(get_current_user)):
+    """kind='ricambio' fa leggere all'AI i codici articolo dalla scatola: finiscono
+    nel riepilogo che il titolare riceve a lavoro finito, per il preventivo."""
     await _order_or_403(order_id, user)
     content_type = (file.content_type or "").lower()
     if content_type not in _PHOTO_EXT:
@@ -2361,17 +2371,20 @@ async def upload_order_photo(order_id: str, file: UploadFile = File(...), user: 
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(data)
     now = now_utc()
+    kind_pulito = (kind or "").strip().lower() or None
+    if kind_pulito not in (None, "libretto", "ricambio"):
+        kind_pulito = None
     await execute(
-        """INSERT INTO order_photos (id, work_order_id, uploaded_by, uploaded_by_name, content_type, size_bytes, created_at)
-           VALUES ($1,$2,$3,$4,$5,$6,$7)""",
-        photo_id, order_id, user["id"], user["full_name"], content_type, len(data), now,
+        """INSERT INTO order_photos (id, work_order_id, uploaded_by, uploaded_by_name, content_type, size_bytes, kind, created_at)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8)""",
+        photo_id, order_id, user["id"], user["full_name"], content_type, len(data), kind_pulito, now,
     )
     # solo le immagini si "vedono": i video no
     if content_type not in _VIDEO_TYPES:
-        asyncio.create_task(_caption_photo(photo_id, data, content_type))
+        asyncio.create_task(_caption_photo(photo_id, data, content_type, kind=kind_pulito))
     return OrderPhoto(
         id=photo_id, work_order_id=order_id, uploaded_by=user["id"], uploaded_by_name=user["full_name"],
-        content_type=content_type, size_bytes=len(data), created_at=now,
+        content_type=content_type, size_bytes=len(data), kind=kind_pulito, created_at=now,
     )
 
 
@@ -2528,12 +2541,57 @@ async def _telegram_notify(text: str):
         logger.warning(f"telegram: errore generale: {e}")
 
 
+def _esc(testo: str) -> str:
+    """Telegram in modalita HTML: & < > vanno protetti o il messaggio non parte."""
+    return (testo or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+async def _ricambi_della_commessa(order_id: str, scheda: dict) -> tuple[list, list]:
+    """Cosa e stato montato davvero, da due fonti che si completano a vicenda:
+    le spunte del meccanico sulla scheda e i codici letti dalle foto dei ricambi.
+    Ritorna (voci spuntate a mano, voci lette dalle foto)."""
+    a_mano = [str(x).strip() for x in (scheda.get("ricambi_sostituiti") or []) if str(x).strip()]
+
+    dalle_foto: list = []
+    try:
+        foto = await fetch(
+            "SELECT dati FROM order_photos WHERE work_order_id=$1 AND kind='ricambio' AND dati IS NOT NULL",
+            order_id,
+        )
+        visti = set()
+        for f in foto:
+            dati = f["dati"]
+            if isinstance(dati, str):
+                dati = json.loads(dati)
+            for v in (dati or {}).get("ricambi") or []:
+                if not isinstance(v, dict):
+                    continue
+                codice = (v.get("codice") or "").strip()
+                if not codice or codice.upper() in visti:
+                    continue
+                visti.add(codice.upper())
+                dalle_foto.append({
+                    "codice": codice,
+                    "marca": (v.get("marca") or "").strip(),
+                    "descrizione": (v.get("descrizione") or "").strip(),
+                    "quantita": v.get("quantita") or 1,
+                })
+    except Exception as e:
+        logger.warning(f"lettura ricambi da foto: {e}")
+    return a_mano, dalle_foto
+
+
 async def _avvisa_lavoro_completato(order_id: str, worker_name: str):
     """A lavoro completato avvisa i titolari su tutti i canali: notifica push sul telefono
-    e messaggio Telegram. Gira in background e non blocca mai la chiusura della commessa."""
+    e messaggio Telegram. Gira in background e non blocca mai la chiusura della commessa.
+
+    Il messaggio Telegram porta tutto quello che serve a comporre il preventivo su STAR:
+    lavori fatti, ricambi montati con i codici, e ore. Cosi il titolare non deve aprire
+    l'app per sapere cosa mettere in fattura."""
     try:
         o = await fetchrow(
-            "SELECT plate, customer, vehicle, description, minutes_effective FROM work_orders WHERE id=$1",
+            """SELECT plate, customer, vehicle, description, minutes_effective, scheda_tecnica
+               FROM work_orders WHERE id=$1""",
             order_id,
         )
         if not o:
@@ -2546,6 +2604,10 @@ async def _avvisa_lavoro_completato(order_id: str, worker_name: str):
         minuti = o["minutes_effective"]
         ore = fmt_durata_minuti(minuti) if minuti else "da confermare"
 
+        scheda = o["scheda_tecnica"] or {}
+        if isinstance(scheda, str):
+            scheda = json.loads(scheda)
+
         titolo = f"LAVORO COMPLETATO — {targa}"
         corpo = f"{worker_name} ha finito. {veicolo} · {ore}"
 
@@ -2557,17 +2619,49 @@ async def _avvisa_lavoro_completato(order_id: str, worker_name: str):
         righe = [
             "🔧 <b>LAVORO COMPLETATO</b>",
             "",
-            f"<b>Targa:</b> {targa}",
-            f"<b>Veicolo:</b> {veicolo}" if veicolo else "",
-            f"<b>Cliente:</b> {cliente}" if cliente else "",
-            f"<b>Meccanico:</b> {worker_name}",
-            f"<b>Ore da fatturare:</b> {ore}",
-            "",
-            f"<i>{lavoro[:300]}</i>" if lavoro else "",
-            "",
-            f"{PUBLIC_BASE_URL}/order/{order_id}",
+            f"<b>Targa:</b> {_esc(targa)}",
         ]
-        await _telegram_notify("\n".join(r for r in righe if r != ""))
+        if veicolo:
+            righe.append(f"<b>Veicolo:</b> {_esc(veicolo)}")
+        if cliente:
+            righe.append(f"<b>Cliente:</b> {_esc(cliente)}")
+        righe += [
+            f"<b>Meccanico:</b> {_esc(worker_name)}",
+            f"<b>Ore lavorate:</b> {ore}",
+        ]
+
+        fatti = [str(x).strip() for x in (scheda.get("lavori_fatti") or []) if str(x).strip()]
+        if fatti:
+            righe += ["", "<b>LAVORO SVOLTO</b>"]
+            righe += [f"• {_esc(v)}" for v in fatti[:12]]
+        elif lavoro:
+            righe += ["", "<b>LAVORO SVOLTO</b>", f"• {_esc(lavoro[:300])}"]
+
+        a_mano, dalle_foto = await _ricambi_della_commessa(order_id, scheda)
+        if a_mano or dalle_foto:
+            righe += ["", "<b>RICAMBI MONTATI</b>"]
+            for v in a_mano[:15]:
+                righe.append(f"• {_esc(v)}")
+            for v in dalle_foto[:15]:
+                testo = f"<code>{_esc(v['codice'])}</code>"
+                if v["marca"]:
+                    testo = f"{_esc(v['marca'])} {testo}"
+                if v["descrizione"]:
+                    testo += f" — {_esc(v['descrizione'])}"
+                try:
+                    q = int(v["quantita"])
+                except (TypeError, ValueError):
+                    q = 1
+                if q > 1:
+                    testo += f" ×{q}"
+                righe.append(f"• {testo}")
+            if dalle_foto:
+                righe.append("<i>I codici sono letti dalle foto: verificali prima di ordinare.</i>")
+        else:
+            righe += ["", "<i>Nessun ricambio registrato su questo lavoro.</i>"]
+
+        righe += ["", f"{PUBLIC_BASE_URL}/order/{order_id}"]
+        await _telegram_notify("\n".join(righe))
     except Exception as e:
         logger.warning(f"avviso completamento fallito: {e}")
 

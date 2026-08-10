@@ -266,10 +266,113 @@ SYSTEM_LIBRETTO = (
 )
 
 
+SYSTEM_RICAMBIO_CAMPI = (
+    "Ricevi la TRASCRIZIONE GREZZA, ottenuta con l'OCR, della foto di uno o più RICAMBI AUTO "
+    "fotografati in officina: scatole, etichette, sacchetti o il pezzo stesso con la sigla stampata.\n"
+    "Devi estrarre i codici dei ricambi. Serviranno a comporre il preventivo, quindi un codice "
+    "sbagliato fa ordinare il pezzo sbagliato.\n"
+    "Rispondi SOLO con questo JSON, senza testo intorno:\n"
+    "{\n"
+    '  "ricambi": [\n'
+    '    {"codice": "…", "marca": "…", "descrizione": "…", "quantita": 1}\n'
+    "  ]\n"
+    "}\n"
+    "REGOLE FERREE:\n"
+    "1. MAI inventare un codice. Se una sigla non si legge con certezza, quel ricambio NON va "
+    "messo nell'elenco. Meglio una lista corta e giusta che lunga e sbagliata.\n"
+    "2. Il CODICE è la sigla dell'articolo: lettere e numeri, spesso con trattini o punti "
+    "(es. 1K0615301AA, 0986478853, W71272). Riportalo ESATTAMENTE come sta scritto, senza "
+    "togliere spazi o trattini e senza correggerlo.\n"
+    "3. NON confondere il codice articolo con altri numeri stampati sulla scatola: codici a barre "
+    "(le cifre sotto le righe, di solito 13 cifre che iniziano per 8 o 4), numeri di lotto, date, "
+    "codici EAN, numeri di telefono, indirizzi. Nel dubbio, salta.\n"
+    "4. MARCA è il produttore del ricambio (Bosch, Valeo, Brembo, SKF, Febi, Magneti Marelli…), "
+    "non la marca dell'auto. Se non si legge, null.\n"
+    "5. DESCRIZIONE: che pezzo è, in italiano e in poche parole (pastiglie freno anteriori, "
+    "filtro olio, cinghia distribuzione). Se non si capisce, null.\n"
+    "6. QUANTITA: quante confezioni identiche si vedono. Se non è chiaro, 1.\n"
+    "7. Se nella foto non c'è nessun ricambio leggibile, rispondi {\"ricambi\": []}."
+)
+
+SYSTEM_RICAMBIO = (
+    "Stai guardando la foto di uno o più RICAMBI AUTO in officina: scatole, etichette o il pezzo "
+    "stesso. Il tuo compito è TRASCRIVERE i codici articolo, non descrivere la foto.\n"
+    "Riporta per ogni ricambio che riesci a leggere: codice articolo · marca · che pezzo è.\n"
+    "REGOLE:\n"
+    "- Scrivi SOLO i codici che leggi davvero. Una sigla incerta si salta: un codice sbagliato "
+    "fa ordinare il pezzo sbagliato.\n"
+    "- Non confondere il codice articolo con il codice a barre, il numero di lotto o la data.\n"
+    "- La marca è quella del ricambio (Bosch, Valeo, Brembo…), non dell'automobile.\n"
+    "Inizia la risposta con 'RICAMBI: '. Se non leggi nessun codice, scrivi "
+    "'RICAMBI: nessun codice leggibile'."
+)
+
+
+def ricambi_in_riga(dati: dict) -> str:
+    """L'elenco dei ricambi in una riga sola, come lo leggerebbe il titolare."""
+    voci = dati.get("ricambi") or []
+    if not voci:
+        return "RICAMBI: nessun codice leggibile"
+    pezzi = []
+    for v in voci:
+        if not isinstance(v, dict):
+            continue
+        codice = (v.get("codice") or "").strip()
+        if not codice:
+            continue
+        testo = codice
+        marca = (v.get("marca") or "").strip()
+        descr = (v.get("descrizione") or "").strip()
+        if marca:
+            testo = f"{marca} {testo}"
+        if descr:
+            testo = f"{testo} ({descr})"
+        try:
+            q = int(v.get("quantita") or 1)
+        except (TypeError, ValueError):
+            q = 1
+        if q > 1:
+            testo = f"{testo} ×{q}"
+        pezzi.append(testo)
+    return "RICAMBI: " + " · ".join(pezzi) if pezzi else "RICAMBI: nessun codice leggibile"
+
+
+async def leggi_ricambio(data_url: str) -> tuple[dict, str]:
+    """Foto di ricambi -> (codici strutturati, riga leggibile).
+    Stessa strada del libretto: prima l'OCR trascrive scatole ed etichette, poi il modello
+    di testo pesca i codici. Se l'OCR non risponde si guarda la foto."""
+    import json as _json
+    testo = ""
+    try:
+        testo = await ocr_image(data_url)
+    except Exception:
+        testo = ""
+    if testo.strip():
+        try:
+            resp = await _client.chat.complete_async(
+                model=TEXT_MODEL,
+                messages=[{"role": "system", "content": SYSTEM_RICAMBIO_CAMPI},
+                          {"role": "user", "content": testo[:12000]}],
+                response_format={"type": "json_object"},
+                max_tokens=800,
+            )
+            dati = _json.loads(resp.choices[0].message.content or "{}")
+            if isinstance(dati, dict) and isinstance(dati.get("ricambi"), list):
+                return dati, ricambi_in_riga(dati)
+        except Exception:
+            pass
+    # niente OCR: si torna a guardare la foto
+    return {}, await describe_image(data_url, kind="ricambio")
+
+
 async def describe_image(data_url: str, kind: Optional[str] = None) -> str:
     """Vision: legge una foto della commessa. Per il libretto usa un prompt dedicato
     che TRASCRIVE i dati del veicolo invece di descrivere l'immagine."""
-    istruzione = SYSTEM_LIBRETTO if kind == "libretto" else SYSTEM_PHOTO_CAPTION
+    istruzione = (
+        SYSTEM_LIBRETTO if kind == "libretto"
+        else SYSTEM_RICAMBIO if kind == "ricambio"
+        else SYSTEM_PHOTO_CAPTION
+    )
     resp = await _client.chat.complete_async(
         model=VISION_MODEL,
         messages=[{"role": "user", "content": [

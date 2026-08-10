@@ -421,7 +421,8 @@ export async function orderPhotoUrl(photoId: string): Promise<string> {
 }
 
 /** Carica una foto o un video (data:/blob: URI da ImagePicker, o file: URI su nativo). */
-export async function uploadOrderPhoto(orderId: string, uri: string, mimeHint?: string): Promise<OrderPhoto> {
+/** kind="ricambio": l'AI legge i codici articolo dalla scatola e finiscono nel riepilogo del titolare. */
+export async function uploadOrderPhoto(orderId: string, uri: string, mimeHint?: string, kind?: string): Promise<OrderPhoto> {
   const token = await getToken();
   const form = new FormData();
   const extFor = (t: string) =>
@@ -436,7 +437,8 @@ export async function uploadOrderPhoto(orderId: string, uri: string, mimeHint?: 
     // @ts-expect-error RN form data typing
     form.append("file", { uri, name: `media.${extFor(type)}`, type });
   }
-  const res = await fetch(`${BASE_URL}/api/work-orders/${orderId}/photos`, {
+  const qs = kind ? `?kind=${encodeURIComponent(kind)}` : "";
+  const res = await fetch(`${BASE_URL}/api/work-orders/${orderId}/photos${qs}`, {
     method: "POST",
     headers: token ? { Authorization: `Bearer ${token}` } : {},
     body: form,
