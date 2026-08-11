@@ -160,6 +160,12 @@ export default function DocumentiFornitori() {
         ) : docs.map((d) => {
           const espanso = aperto === d.id;
           const stato = d.verifica?.stato;
+          // La targa puo' stare in alto sul documento oppure su ogni riga: molti fornitori
+          // la scrivono riga per riga quando la bolla copre piu' auto.
+          const targheRighe = Array.from(new Set(
+            (d.righe || []).map((r) => (r.targa || "").toUpperCase()).filter(Boolean)
+          ));
+          const targhe = d.targa ? [d.targa] : targheRighe;
           return (
             <View key={d.id} testID={`documento-${d.id}`} style={styles.card}>
               <TouchableOpacity onPress={() => setAperto(espanso ? null : d.id)} activeOpacity={0.7}>
@@ -174,8 +180,8 @@ export default function DocumentiFornitori() {
                     </Text>
                   </View>
                   <View style={{ alignItems: "flex-end", gap: 4 }}>
-                    {d.targa
-                      ? <Text style={styles.targa}>{d.targa}</Text>
+                    {targhe.length > 0
+                      ? targhe.map((t) => <Text key={t} style={styles.targa}>{t}</Text>)
                       : <View style={styles.senzaTarga}><Text style={styles.senzaTargaText}>SENZA TARGA</Text></View>}
                     <Text style={styles.totale}>{euro(d.totale)}</Text>
                   </View>

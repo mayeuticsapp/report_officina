@@ -310,6 +310,9 @@ class SchedaTecnica(BaseModel):
     # Righe strutturate da STAR (ricambi/manodopera con codice, qta, tipo, prezzo).
     # I prezzi sono dati sensibili: vengono rimossi per i non-admin (vedi _strip_prices_for).
     righe: List[dict] = Field(default_factory=list)
+    # Consumabili dichiarati alla chiusura (olio e simili): vengono dal fusto
+    # dell'officina, non da una bolla, quindi li scrive il meccanico.
+    consumabili: List[dict] = Field(default_factory=list)
 
 
 class WorkOrderUpdate(BaseModel):
@@ -360,6 +363,9 @@ class WorkEventCreate(BaseModel):
     minutes_effective: Optional[int] = None
     # foto del libretto, obbligatoria su INIZIA (data URL o base64 puro)
     libretto_base64: Optional[str] = None
+    # litri di olio messi nel motore: non arrivano da nessuna bolla, stanno nel fusto,
+    # e senza questo dato il preventivo esce sotto di circa il 15% su un tagliando
+    olio_litri: Optional[float] = None
 
 
 class WorkEvent(BaseModel):
@@ -3624,6 +3630,19 @@ async def add_event(order_id: str, body: WorkEventCreate, user: dict = Depends(g
     # I km finiscono anche nella scheda tecnica (l'AI e i report li usano da lì)
     if km_clean:
         scheda_raw["km"] = km_clean
+        await execute(
+            "UPDATE work_orders SET scheda_tecnica=$1::jsonb WHERE id=$2",
+            json.dumps(SchedaTecnica(**scheda_raw).model_dump()), order_id
+        )
+
+    # L'olio messo nel motore: unico consumabile che il meccanico dichiara a mano,
+    # perche' viene dal fusto dell'officina e non da nessuna bolla per commessa.
+    if body.type == "COMPLETE" and body.olio_litri and body.olio_litri > 0:
+        litri = round(float(body.olio_litri), 2)
+        cons = [c for c in (scheda_raw.get("consumabili") or [])
+                if isinstance(c, dict) and str(c.get("nome", "")).lower() != "olio motore"]
+        cons.append({"nome": "Olio motore", "quantita": litri})
+        scheda_raw["consumabili"] = cons
         await execute(
             "UPDATE work_orders SET scheda_tecnica=$1::jsonb WHERE id=$2",
             json.dumps(SchedaTecnica(**scheda_raw).model_dump()), order_id

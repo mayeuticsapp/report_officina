@@ -43,6 +43,7 @@ export default function OrderDetail() {
   const [oreCaricando, setOreCaricando] = useState(false);
   const [cOre, setCOre] = useState("");
   const [cMin, setCMin] = useState("");
+  const [cOlio, setCOlio] = useState("");   // litri di olio messi nel motore
   const [photos, setPhotos] = useState<string[]>([]);
   const [hoursEditing, setHoursEditing] = useState(false);
   const [hOre, setHOre] = useState("");
@@ -269,6 +270,7 @@ export default function OrderDetail() {
           km_deferred_reason: modalOpen === "START" && kmDefer ? kmDeferReason.trim() : null,
           minutes_effective: minutiConfermati,
           libretto_base64: modalOpen === "START" ? libretto : null,
+          olio_litri: modalOpen === "COMPLETE" && cOlio ? parseFloat(cOlio.replace(",", ".")) : null,
         },
       });
       setModalOpen(null);
@@ -683,6 +685,38 @@ export default function OrderDetail() {
                   )}
                 </View>
               )}
+              {modalOpen === "COMPLETE" && (
+                <View style={styles.olioBox}>
+                  <Text style={styles.olioLabel}>🛢 OLIO MESSO — LITRI</Text>
+                  <Text style={styles.olioHint}>
+                    Va in fattura. Se non hai cambiato l&apos;olio, lascia vuoto.
+                  </Text>
+                  <View style={styles.olioRow}>
+                    {["3", "3.5", "4", "4.5", "5"].map((l) => (
+                      <TouchableOpacity
+                        key={l}
+                        testID={`olio-${l}`}
+                        style={[styles.olioChip, cOlio === l && styles.olioChipOn]}
+                        onPress={() => setCOlio(cOlio === l ? "" : l)}
+                      >
+                        <Text style={[styles.olioChipText, cOlio === l && styles.olioChipTextOn]}>
+                          {l.replace(".", ",")}
+                        </Text>
+                      </TouchableOpacity>
+                    ))}
+                    <TextInput
+                      testID="olio-altro"
+                      style={styles.olioInput}
+                      value={["3", "3.5", "4", "4.5", "5"].includes(cOlio) ? "" : cOlio}
+                      onChangeText={(v) => setCOlio(v.replace(/[^0-9.,]/g, ""))}
+                      keyboardType="decimal-pad"
+                      maxLength={4}
+                      placeholder="altro"
+                      placeholderTextColor={colors.textSecondary}
+                    />
+                  </View>
+                </View>
+              )}
               {modalOpen === "COMPLETE" && !kmDaChiedereAllaFine && (
                 <View style={styles.kmDoneBox}>
                   <Ionicons name="checkmark-circle" size={18} color={colors.active} />
@@ -926,6 +960,26 @@ const styles = StyleSheet.create({
   oreDettaglio: { fontSize: 12, color: colors.textSecondary, marginTop: 6 },
   oreTimbri: { fontSize: 12, color: colors.textSecondary, marginTop: 6 },
   oreHint: { fontSize: 11, color: colors.text, marginTop: 10, fontWeight: "700" },
+
+  // Olio dichiarato alla chiusura
+  olioBox: {
+    borderWidth: 2, borderColor: colors.borderStrong, padding: spacing.md,
+    marginTop: spacing.md, gap: 6,
+  },
+  olioLabel: { fontSize: 12, fontWeight: "900", letterSpacing: 1, color: colors.text },
+  olioHint: { fontSize: 11, color: colors.textSecondary },
+  olioRow: { flexDirection: "row", flexWrap: "wrap", gap: 6, marginTop: 4, alignItems: "center" },
+  olioChip: {
+    borderWidth: 1, borderColor: colors.borderStrong,
+    paddingHorizontal: 14, paddingVertical: 10, minWidth: 48, alignItems: "center",
+  },
+  olioChipOn: { backgroundColor: colors.text, borderColor: colors.text },
+  olioChipText: { fontSize: 15, fontWeight: "800", color: colors.text },
+  olioChipTextOn: { color: colors.textInverse },
+  olioInput: {
+    borderWidth: 1, borderColor: colors.border, paddingHorizontal: 10, paddingVertical: 10,
+    fontSize: 14, color: colors.text, minWidth: 68, textAlign: "center",
+  },
   kmDeferBtn: {
     flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 6,
     marginTop: spacing.md, paddingVertical: 12,
