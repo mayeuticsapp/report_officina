@@ -267,8 +267,10 @@ SYSTEM_LIBRETTO = (
 
 
 SYSTEM_RICAMBIO_CAMPI = (
-    "Ricevi la TRASCRIZIONE GREZZA, ottenuta con l'OCR, della foto di uno o più RICAMBI AUTO "
-    "fotografati in officina: scatole, etichette, sacchetti o il pezzo stesso con la sigla stampata.\n"
+    "Ricevi del TESTO che riguarda uno o più RICAMBI AUTO fotografati in officina: scatole, "
+    "etichette, sacchetti o il pezzo stesso con la sigla stampata. Può essere la trascrizione "
+    "grezza dell'OCR, oppure la descrizione a parole di chi ha guardato la foto. In entrambi "
+    "i casi il compito è lo stesso.\n"
     "Devi estrarre i codici dei ricambi. Serviranno a comporre il preventivo, quindi un codice "
     "sbagliato fa ordinare il pezzo sbagliato.\n"
     "Rispondi SOLO con questo JSON, senza testo intorno:\n"
@@ -465,6 +467,33 @@ def verifica_documento(dati: dict) -> dict:
         riferimento = imponibile if imponibile is not None else totale
         esito["scarto"] = round(somma_netta - riferimento, 2)
     return esito
+
+
+async def codici_da_testo(testo: str) -> dict:
+    """Estrae i codici ricambio da un testo qualsiasi: la trascrizione dell'OCR oppure
+    la didascalia che il modello ha scritto guardando la foto.
+
+    Serve perche' l'OCR e la vista sbagliano in modi diversi: su una scatola di traverso
+    l'OCR ha letto la scritta del carrello portautensili dietro e ha perso l'etichetta,
+    mentre chi guardava la foto aveva letto il codice senza problemi. La didascalia e'
+    gia' stata scritta e salvata, quindi rileggerla non costa una chiamata in piu' di vista."""
+    import json as _json
+    if not (testo or "").strip():
+        return {}
+    try:
+        resp = await _client.chat.complete_async(
+            model=TEXT_MODEL,
+            messages=[{"role": "system", "content": SYSTEM_RICAMBIO_CAMPI},
+                      {"role": "user", "content": testo[:12000]}],
+            response_format={"type": "json_object"},
+            max_tokens=800,
+        )
+        dati = _json.loads(resp.choices[0].message.content or "{}")
+        if isinstance(dati, dict) and isinstance(dati.get("ricambi"), list):
+            return dati
+    except Exception:
+        pass
+    return {}
 
 
 async def leggi_ricambio(data_url: str, ripiega_su_vision: bool = True) -> tuple[dict, str]:

@@ -700,6 +700,8 @@ export type Preventivo = {
     codice?: string; descrizione?: string; quantita: number; costo: number;
     ricarico: number; prezzo: number; totale: number; listino_fornitore?: number | null;
   }[];
+  /** pezzi visti nelle foto ma senza costo: manca la bolla del fornitore */
+  ricambi_senza_costo: { codice: string; descrizione?: string; marca?: string; quantita: number }[];
   ricambi_costo: number; ricambi_vendita: number; margine_ricambi: number;
   consumabili: { nome: string; quantita: number; unita?: string | null; prezzo: number; totale: number }[];
   consumabili_totale: number;

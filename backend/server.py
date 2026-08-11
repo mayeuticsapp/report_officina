@@ -2497,9 +2497,13 @@ async def _caption_photo(photo_id: str, data: bytes, content_type: str, kind: Op
             caption = await ai.describe_image(data_url, kind=kind)
             # In officina si fotografa tutto: scatole, pezzi smontati, lavorazione. I codici
             # stanno spesso in una foto qualsiasi, non solo in quella scattata apposta.
-            # Si passa l'OCR su ogni immagine: se trova un codice lo salva, altrimenti niente.
+            # Due strade, perche' sbagliano in modo diverso: prima l'OCR sull'immagine, poi
+            # la didascalia appena scritta. Su una scatola di traverso l'OCR legge la scritta
+            # del carrello dietro e perde l'etichetta, mentre la vista il codice l'ha letto.
             try:
                 campi, _ = await ai.leggi_ricambio(data_url, ripiega_su_vision=False)
+                if not (campi and campi.get("ricambi")) and caption:
+                    campi = await ai.codici_da_testo(caption)
                 if campi and campi.get("ricambi"):
                     await execute("UPDATE order_photos SET dati=$1::jsonb WHERE id=$2",
                                   json.dumps(campi), photo_id)
@@ -2758,19 +2762,24 @@ async def _leggi_codici_arretrati(order_id: str):
     si recuperano, cosi il riepilogo non dice 'nessun ricambio' quando i codici sono li'."""
     try:
         foto = await fetch(
-            """SELECT id, content_type FROM order_photos
+            """SELECT id, content_type, caption FROM order_photos
                WHERE work_order_id=$1 AND dati IS NULL AND content_type LIKE 'image/%'
                ORDER BY created_at ASC LIMIT $2""",
             order_id, MAX_FOTO_DA_LEGGERE,
         )
         for f in foto:
             try:
-                path = _photo_path(order_id, f["id"], f["content_type"])
-                if not path.exists():
-                    continue
-                data_url = (f"data:{f['content_type']};base64,"
-                            f"{base64.b64encode(path.read_bytes()).decode()}")
-                campi, _ = await ai.leggi_ricambio(data_url, ripiega_su_vision=False)
+                campi = {}
+                # la didascalia c'e' gia': si guarda prima quella, non costa una lettura nuova
+                if f["caption"]:
+                    campi = await ai.codici_da_testo(f["caption"])
+                if not (campi and campi.get("ricambi")):
+                    path = _photo_path(order_id, f["id"], f["content_type"])
+                    if not path.exists():
+                        continue
+                    data_url = (f"data:{f['content_type']};base64,"
+                                f"{base64.b64encode(path.read_bytes()).decode()}")
+                    campi, _ = await ai.leggi_ricambio(data_url, ripiega_su_vision=False)
                 if campi and campi.get("ricambi"):
                     await execute("UPDATE order_photos SET dati=$1::jsonb WHERE id=$2",
                                   json.dumps(campi), f["id"])
@@ -2903,7 +2912,7 @@ async def _avvisa_lavoro_completato(order_id: str, worker_name: str):
         # cosa manca invece di sparare un numero credibile ma sbagliato.
         try:
             p = await calcola_preventivo(order_id)
-            if p.get("ricambi"):
+            if p.get("ricambi") or p.get("ricambi_senza_costo") or p.get("ore"):
                 righe += ["", "<b>PREVENTIVO INDICATIVO</b>"]
                 for v in p["ricambi"][:15]:
                     nome = _esc(v.get("descrizione") or v.get("codice") or "ricambio")
@@ -2911,6 +2920,11 @@ async def _avvisa_lavoro_completato(order_id: str, worker_name: str):
                     righe.append(
                         f"• {nome}{q} — <b>{v['totale']:.2f}</b> "
                         f"<i>(costo {v['costo']:.2f}, +{int(v['ricarico'])}%)</i>")
+                for v in p.get("ricambi_senza_costo") or []:
+                    marca = f"{v['marca']} " if v.get("marca") else ""
+                    righe.append(
+                        f"• {_esc(marca)}<code>{_esc(v['codice'])}</code> — "
+                        f"<b>?</b> <i>(manca la bolla)</i>")
                 for c in p.get("consumabili") or []:
                     unita = f" {c['unita']}" if c.get("unita") else ""
                     righe.append(
@@ -3038,6 +3052,21 @@ async def calcola_preventivo(order_id: str) -> dict:
             "costo_era_ivato": bool(r.get("iva_inclusa")),
         })
 
+    # I pezzi che sappiamo montati dalle foto ma di cui non abbiamo il costo, perche' la
+    # bolla non e' stata caricata. Vanno mostrati lo stesso: sapere che manca il prezzo di
+    # un cilindretto frizione e' utile, credere che non ci fosse nessun ricambio no.
+    scheda_r = o["scheda_tecnica"] or {}
+    if isinstance(scheda_r, str):
+        scheda_r = json.loads(scheda_r)
+    _, dalle_foto = await _ricambi_della_commessa(order_id, scheda_r)
+    codici_noti = {str(v.get("codice") or "").upper().replace(" ", "") for v in voci}
+    senza_costo = [
+        {"codice": f["codice"], "descrizione": f.get("descrizione") or "",
+         "marca": f.get("marca") or "", "quantita": f.get("quantita") or 1}
+        for f in dalle_foto
+        if f.get("codice") and f["codice"].upper().replace(" ", "") not in codici_noti
+    ]
+
     minuti = o["minutes_effective"] or 0
     ore = minuti / 60.0
     manodopera = ore * imp["tariffa_oraria"]
@@ -3072,7 +3101,10 @@ async def calcola_preventivo(order_id: str) -> dict:
     iva = imponibile * imp["iva"] / 100.0
 
     mancanze = []
-    if not voci:
+    if senza_costo:
+        elenco = ", ".join(f"{v['codice']}" for v in senza_costo[:4])
+        mancanze.append(f"manca la bolla per {len(senza_costo)} ricambio/i già montati ({elenco})")
+    elif not voci:
         mancanze.append("nessun documento fornitore caricato per questa targa")
     if not minuti:
         mancanze.append("ore non confermate")
@@ -3083,6 +3115,7 @@ async def calcola_preventivo(order_id: str) -> dict:
         "disponibile": bool(voci) or bool(minuti),
         "targa": o["plate"],
         "ricambi": voci,
+        "ricambi_senza_costo": senza_costo,
         "ricambi_costo": round(tot_costo, 2),
         "ricambi_vendita": round(tot_vendita, 2),
         "margine_ricambi": round(tot_vendita - tot_costo, 2),

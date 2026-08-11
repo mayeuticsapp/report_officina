@@ -110,7 +110,7 @@ export default function AdminOrderDetail() {
         })()}
 
         {/* Il conto finale: ricambi coi ricarichi, consumabili e manodopera */}
-        {prev && (prev.ricambi.length > 0 || prev.consumabili?.length > 0 || prev.ore > 0) ? (
+        {prev && (prev.ricambi.length > 0 || prev.ricambi_senza_costo?.length > 0 || prev.consumabili?.length > 0 || prev.ore > 0) ? (
           <View style={styles.prevCard}>
             <View style={styles.prevHead}>
               <Text style={styles.prevTitolo}>PREVENTIVO INDICATIVO</Text>
@@ -129,6 +129,22 @@ export default function AdminOrderDetail() {
                   </Text>
                 </View>
                 <Text style={styles.prevImporto}>{r.totale.toFixed(2)}</Text>
+              </View>
+            ))}
+
+            {/* Pezzi montati di cui non conosciamo il prezzo: la bolla non e' stata caricata */}
+            {(prev.ricambi_senza_costo || []).map((r, i) => (
+              <View key={`sc${i}`} style={[styles.prevRiga, styles.prevRigaSenzaCosto]}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.prevNome} numberOfLines={1}>
+                    {r.marca ? `${r.marca} ` : ""}{r.codice}
+                    {r.quantita > 1 ? ` ×${r.quantita}` : ""}
+                  </Text>
+                  <Text style={styles.prevSottoManca}>
+                    {r.descrizione ? `${r.descrizione} · ` : ""}visto nelle foto, manca la bolla
+                  </Text>
+                </View>
+                <Text style={styles.prevImportoManca}>?</Text>
               </View>
             ))}
 
@@ -321,6 +337,9 @@ const styles = StyleSheet.create({
   prevNome: { fontSize: 14, fontWeight: "700", color: colors.text },
   prevSotto: { fontSize: 11, color: colors.textSecondary, marginTop: 1 },
   prevImporto: { fontSize: 14, fontWeight: "800", color: colors.text },
+  prevRigaSenzaCosto: { backgroundColor: colors.bgMuted, borderLeftWidth: 4, borderLeftColor: colors.idle },
+  prevSottoManca: { fontSize: 11, color: colors.idle, marginTop: 1, fontWeight: "600" },
+  prevImportoManca: { fontSize: 16, fontWeight: "900", color: colors.idle },
   prevTotali: { padding: spacing.md, gap: 4 },
   prevTotRiga: { flexDirection: "row", justifyContent: "space-between" },
   prevTotLabel: { fontSize: 13, color: colors.textSecondary },
