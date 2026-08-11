@@ -674,6 +674,10 @@ async def startup():
                 aggiornato_il TIMESTAMPTZ NOT NULL DEFAULT NOW()
             )
         """)
+        # Il prezzo di vendita deciso dal titolare, quando c'e': vale piu' di qualsiasi
+        # ricarico calcolato, perche' e' la sua scelta commerciale su quell'articolo.
+        await conn.execute(
+            "ALTER TABLE catalogo_ricambi ADD COLUMN IF NOT EXISTS prezzo_vendita NUMERIC(10,2)")
 
         # Le regole commerciali del titolare: ricarico a scaglioni, tariffa oraria, consumabili.
         await conn.execute("""
@@ -3140,13 +3144,22 @@ async def calcola_preventivo(order_id: str) -> dict:
     for f in orfani:
         rif = catalogo.get(_codice_norm(f["codice"]))
         q = float(f.get("quantita") or 1)
-        if rif and rif.get("costo"):
-            costo = float(rif["costo"])
-            perc = _ricarico_per(costo, imp["scaglioni"])
-            prezzo = costo * (1 + perc / 100.0)
+        if rif and (rif.get("prezzo_vendita") or rif.get("costo")):
+            giorni = (now_utc() - rif["aggiornato_il"]).days
+            # Il prezzo di vendita del listino, quando c'e', batte il ricarico calcolato:
+            # e' la scelta commerciale del titolare su quell'articolo, non una stima.
+            if rif.get("prezzo_vendita"):
+                prezzo = float(rif["prezzo_vendita"])
+                costo = float(rif["costo"]) if rif.get("costo") else 0.0
+                perc = round((prezzo / costo - 1) * 100) if costo else 0
+                fonte = "listino"
+            else:
+                costo = float(rif["costo"])
+                perc = _ricarico_per(costo, imp["scaglioni"])
+                prezzo = costo * (1 + perc / 100.0)
+                fonte = "catalogo"
             tot_costo += costo * q
             tot_vendita += prezzo * q
-            giorni = (now_utc() - rif["aggiornato_il"]).days
             voci.append({
                 "codice": f["codice"],
                 "descrizione": f.get("descrizione") or rif.get("descrizione"),
@@ -3154,7 +3167,8 @@ async def calcola_preventivo(order_id: str) -> dict:
                 "prezzo": round(prezzo, 2), "totale": round(prezzo * q, 2),
                 "listino_fornitore": None, "fornitore": rif.get("fornitore"),
                 "costo_era_ivato": False,
-                "da_catalogo": True, "prezzo_vecchio_di_giorni": giorni,
+                "da_catalogo": True, "fonte_prezzo": fonte,
+                "prezzo_vecchio_di_giorni": giorni,
             })
         else:
             senza_costo.append({
@@ -3412,7 +3426,8 @@ class VoceCatalogoIn(BaseModel):
     codice: str
     descrizione: Optional[str] = None
     marca: Optional[str] = None
-    costo: float
+    costo: Optional[float] = None            # quanto la paga l'officina
+    prezzo_vendita: Optional[float] = None   # quanto la vende, se gia' deciso a listino
     fornitore: Optional[str] = None
     iva_inclusa: bool = False
 
@@ -3443,22 +3458,26 @@ async def salva_catalogo(voci: List[VoceCatalogoIn], admin: dict = Depends(requi
     inseriti = 0
     for v in voci:
         norm = _codice_norm(v.codice)
-        if not norm or v.costo <= 0:
+        if not norm or not (v.costo or v.prezzo_vendita):
             continue
-        costo = v.costo / (1 + imp["iva"] / 100.0) if v.iva_inclusa else v.costo
+        div = (1 + imp["iva"] / 100.0) if v.iva_inclusa else 1.0
+        costo = round(v.costo / div, 2) if v.costo else None
+        vendita = round(v.prezzo_vendita / div, 2) if v.prezzo_vendita else None
         await execute(
             """INSERT INTO catalogo_ricambi
-                 (codice_norm, codice, descrizione, marca, costo, fornitore, origine, aggiornato_il)
-               VALUES ($1,$2,$3,$4,$5,$6,'magazzino',$7)
+                 (codice_norm, codice, descrizione, marca, costo, prezzo_vendita,
+                  fornitore, origine, aggiornato_il)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,'magazzino',$8)
                ON CONFLICT (codice_norm) DO UPDATE SET
                  codice=$2,
                  descrizione=COALESCE(NULLIF($3,''), catalogo_ricambi.descrizione),
                  marca=COALESCE($4, catalogo_ricambi.marca),
-                 costo=$5, fornitore=$6, origine='magazzino', aggiornato_il=$7
-               WHERE catalogo_ricambi.origine <> 'bolla'
-                  OR catalogo_ricambi.aggiornato_il < $7""",
+                 costo=COALESCE($5, catalogo_ricambi.costo),
+                 prezzo_vendita=COALESCE($6, catalogo_ricambi.prezzo_vendita),
+                 fornitore=COALESCE($7, catalogo_ricambi.fornitore),
+                 origine='magazzino', aggiornato_il=$8""",
             norm, v.codice.strip(), (v.descrizione or "").strip(),
-            (v.marca or "").strip() or None, round(costo, 2),
+            (v.marca or "").strip() or None, costo, vendita,
             (v.fornitore or "").strip() or None, now_utc(),
         )
         inseriti += 1
