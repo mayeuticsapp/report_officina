@@ -616,10 +616,14 @@ async def startup():
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             )
         """)
-        for cod, nome in (("F1", "GR GROUP"), ("F2", "CDR")):
+        # Chi stampa i prezzi IVA inclusa e chi no: sbagliarlo gonfia il preventivo del 22%
+        await conn.execute(
+            "ALTER TABLE fornitori ADD COLUMN IF NOT EXISTS iva_inclusa BOOLEAN NOT NULL DEFAULT FALSE")
+        for cod, nome, iva_inc in (("F1", "GR GROUP", False), ("F2", "CDR", True)):
             await conn.execute(
-                "INSERT INTO fornitori (codice, nome) VALUES ($1,$2) ON CONFLICT (codice) DO NOTHING",
-                cod, nome)
+                """INSERT INTO fornitori (codice, nome, iva_inclusa) VALUES ($1,$2,$3)
+                   ON CONFLICT (codice) DO UPDATE SET iva_inclusa=$3""",
+                cod, nome, iva_inc)
 
         # I documenti dei fornitori fotografati: e' da qui che arrivano i COSTI, e senza
         # costi non si calcola nessun preventivo.
@@ -666,8 +670,15 @@ async def startup():
                 {"fino_a": None, "ricarico": 100},
             ]),
             json.dumps([
-                {"nome": "Olio motore", "unita": "litri", "costo": 4.14, "ricarico": 200},
+                # prezzo gia' finito al cliente: sull'olio non si applica ricarico
+                {"nome": "Olio motore", "unita": "litri", "prezzo": 16.00},
             ]))
+        # se le impostazioni esistevano gia' col vecchio schema, si aggiorna l'olio
+        await conn.execute("""
+            UPDATE impostazioni_prezzi
+               SET consumabili = $1::jsonb
+             WHERE id = 1 AND NOT (consumabili @> '[{"nome":"Olio motore","prezzo":16.00}]'::jsonb)
+        """, json.dumps([{"nome": "Olio motore", "unita": "litri", "prezzo": 16.00}]))
 
         # Storico del planning: officina_planning tiene una riga sola, sovrascritta a ogni
         # invio di Omnius, quindi i giorni passati sparivano. Qui ogni giorno resta.
@@ -2783,9 +2794,16 @@ async def _avvisa_lavoro_completato(order_id: str, worker_name: str):
                     righe.append(
                         f"• {nome}{q} — <b>{v['totale']:.2f}</b> "
                         f"<i>(costo {v['costo']:.2f}, +{int(v['ricarico'])}%)</i>")
+                for c in p.get("consumabili") or []:
+                    unita = f" {c['unita']}" if c.get("unita") else ""
+                    righe.append(
+                        f"• {_esc(c['nome'])} {c['quantita']:g}{unita} — "
+                        f"<b>{c['totale']:.2f}</b>")
                 righe += [
                     "",
-                    f"Ricambi <b>{p['ricambi_vendita']:.2f}</b> · "
+                    f"Ricambi <b>{p['ricambi_vendita']:.2f}</b>"
+                    + (f" · Consumabili <b>{p['consumabili_totale']:.2f}</b>"
+                       if p.get("consumabili_totale") else ""),
                     f"Manodopera {p['ore']:.1f}h × {p['tariffa_oraria']:.0f} = "
                     f"<b>{p['manodopera']:.2f}</b>",
                     f"Imponibile {p['imponibile']:.2f} + IVA {p['iva']:.2f}",
@@ -2839,9 +2857,12 @@ async def _righe_documenti_per_targa(targa: str) -> list:
     if not targa:
         return []
     docs = await fetch(
-        """SELECT righe, targa, fornitore, numero FROM documenti_fornitore
-           WHERE upper(targa)=upper($1)
-              OR righe @> $2::jsonb""",
+        """SELECT d.righe, d.targa, d.fornitore, d.numero, d.codice_fornitore,
+                  COALESCE(f.iva_inclusa, FALSE) AS iva_inclusa
+             FROM documenti_fornitore d
+             LEFT JOIN fornitori f ON f.codice = d.codice_fornitore
+            WHERE upper(d.targa)=upper($1)
+               OR d.righe @> $2::jsonb""",
         targa, json.dumps([{"targa": targa.upper()}]),
     )
     fuori: list = []
@@ -2856,7 +2877,8 @@ async def _righe_documenti_per_targa(targa: str) -> list:
             sua = (r.get("targa") or "").upper() == targa.upper() or (
                 not r.get("targa") and (d["targa"] or "").upper() == targa.upper())
             if sua:
-                fuori.append({**r, "fornitore": d["fornitore"], "documento": d["numero"]})
+                fuori.append({**r, "fornitore": d["fornitore"], "documento": d["numero"],
+                              "iva_inclusa": d["iva_inclusa"]})
     return fuori
 
 
@@ -2882,6 +2904,10 @@ async def calcola_preventivo(order_id: str) -> dict:
             continue
         if costo <= 0:
             continue
+        # Alcuni fornitori (CDR) stampano i prezzi IVA COMPRESA, altri (GR Group) no.
+        # Il ricarico va sempre sul netto: applicarlo a un prezzo ivato gonfia tutto del 22%.
+        if r.get("iva_inclusa"):
+            costo = costo / (1 + imp["iva"] / 100.0)
         perc = _ricarico_per(costo, imp["scaglioni"])
         prezzo = costo * (1 + perc / 100.0)
         tot_costo += costo * q
@@ -2891,13 +2917,41 @@ async def calcola_preventivo(order_id: str) -> dict:
             "quantita": q, "costo": round(costo, 2), "ricarico": perc,
             "prezzo": round(prezzo, 2), "totale": round(prezzo * q, 2),
             "listino_fornitore": r.get("listino"),
+            "fornitore": r.get("fornitore"),
+            "costo_era_ivato": bool(r.get("iva_inclusa")),
         })
 
     minuti = o["minutes_effective"] or 0
     ore = minuti / 60.0
     manodopera = ore * imp["tariffa_oraria"]
 
-    imponibile = tot_vendita + manodopera
+    # Consumabili: l'olio non arriva da nessuna bolla per commessa, sta nel fusto.
+    # La quantita' la dichiara il meccanico alla chiusura, il prezzo e' gia' finito.
+    scheda = o["scheda_tecnica"] or {}
+    if isinstance(scheda, str):
+        scheda = json.loads(scheda)
+    listino_cons = {c.get("nome", "").lower(): c for c in (imp.get("consumabili") or [])}
+    consumabili: list = []
+    tot_consumabili = 0.0
+    for c in (scheda.get("consumabili") or []):
+        if not isinstance(c, dict):
+            continue
+        nome = str(c.get("nome") or "").strip()
+        try:
+            q = float(c.get("quantita") or 0)
+        except (TypeError, ValueError):
+            continue
+        if not nome or q <= 0:
+            continue
+        rif = listino_cons.get(nome.lower(), {})
+        prezzo = float(c.get("prezzo") or rif.get("prezzo") or 0)
+        if prezzo <= 0:
+            continue
+        tot_consumabili += prezzo * q
+        consumabili.append({"nome": nome, "quantita": q, "unita": rif.get("unita") or c.get("unita"),
+                            "prezzo": round(prezzo, 2), "totale": round(prezzo * q, 2)})
+
+    imponibile = tot_vendita + manodopera + tot_consumabili
     iva = imponibile * imp["iva"] / 100.0
 
     mancanze = []
@@ -2905,7 +2959,8 @@ async def calcola_preventivo(order_id: str) -> dict:
         mancanze.append("nessun documento fornitore caricato per questa targa")
     if not minuti:
         mancanze.append("ore non confermate")
-    mancanze.append("consumabili (olio, liquidi) da aggiungere a mano")
+    if not consumabili:
+        mancanze.append("olio e consumabili non dichiarati")
 
     return {
         "disponibile": bool(voci) or bool(minuti),
@@ -2914,6 +2969,8 @@ async def calcola_preventivo(order_id: str) -> dict:
         "ricambi_costo": round(tot_costo, 2),
         "ricambi_vendita": round(tot_vendita, 2),
         "margine_ricambi": round(tot_vendita - tot_costo, 2),
+        "consumabili": consumabili,
+        "consumabili_totale": round(tot_consumabili, 2),
         "ore": round(ore, 2),
         "tariffa_oraria": imp["tariffa_oraria"],
         "manodopera": round(manodopera, 2),
