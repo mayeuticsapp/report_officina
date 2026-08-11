@@ -1365,11 +1365,14 @@ async def omnius_planning(body: PlanningIn):
             per_giorno.setdefault(g, []).append(a)
     for g, apps in per_giorno.items():
         try:
+            # asyncpg vuole un oggetto date vero: il cast ::date nella query non basta,
+            # perche' il parametro viene legato per tipo prima che il cast entri in gioco.
+            giorno = date.fromisoformat(str(g)[:10])
             await execute(
                 """INSERT INTO planning_storico (giorno, appuntamenti, aggiornato_il)
-                   VALUES ($1::date, $2::jsonb, $3)
+                   VALUES ($1, $2::jsonb, $3)
                    ON CONFLICT (giorno) DO UPDATE SET appuntamenti=$2::jsonb, aggiornato_il=$3""",
-                g, json.dumps(apps), ora,
+                giorno, json.dumps(apps), ora,
             )
         except Exception as e:
             logger.warning(f"storico planning {g}: {e}")
@@ -4614,10 +4617,24 @@ class OmniusLookupResultIn(BaseModel):
 async def omnius_lookup_result(body: OmniusLookupResultIn):
     req = await fetchrow("SELECT * FROM plate_lookup_requests WHERE id=$1", body.request_id)
     if not req:
-        raise HTTPException(status_code=404, detail="Richiesta non trovata")
+        # Una richiesta sconosciuta NON e' un errore da riprovare: e' gia' stata evasa e
+        # ripulita, oppure Omnius ha in coda un id vecchio. Rispondendo 404 il postino la
+        # considerava fallita e la ripresentava all'infinito — 1.761 chiamate in tre ore.
+        logger.info(f"lookup-results: richiesta {body.request_id} sconosciuta, la archivio")
+        return {"ok": True, "note": "richiesta sconosciuta o già archiviata: non ripresentarla"}
     if req["status"] != "pending":
         return {"ok": True, "note": "richiesta già evasa"}
     order_id, plate = req["work_order_id"], req["plate"]
+
+    # La commessa puo' essere stata cancellata dopo la richiesta: la risposta non ha piu'
+    # dove andare. Va chiusa qui, altrimenti il postino la ripresenta all'infinito — due
+    # richieste del 30 luglio hanno prodotto 1.761 chiamate in tre ore.
+    if not await fetchrow("SELECT id FROM work_orders WHERE id=$1", order_id):
+        await execute(
+            "UPDATE plate_lookup_requests SET status='failed', answered_at=$1 WHERE id=$2",
+            now_utc(), body.request_id)
+        logger.info(f"lookup-results: commessa di {plate} cancellata, richiesta archiviata")
+        return {"ok": True, "note": "commessa non esiste più: richiesta archiviata, non ripresentarla"}
 
     if not body.found:
         await execute("UPDATE plate_lookup_requests SET status='failed', answered_at=$1 WHERE id=$2", now_utc(), body.request_id)
