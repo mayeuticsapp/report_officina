@@ -611,6 +611,10 @@ async def startup():
         await conn.execute("ALTER TABLE work_orders ADD COLUMN IF NOT EXISTS minutes_effective_reason TEXT")
         # Fatturazione: una commessa completata resta in lista finche' il titolare non la spunta.
         # Serve perche' una notifica si puo' perdere, una lista no.
+        # Quando Omnius ha ritirato il preventivo e l'ha caricato su STAR: serve a non
+        # riconsegnarglielo a ogni giro, e a sapere cosa e' gia' arrivato dall'altra parte.
+        await conn.execute("ALTER TABLE work_orders ADD COLUMN IF NOT EXISTS preventivo_inviato_il TIMESTAMPTZ")
+        await conn.execute("ALTER TABLE work_orders ADD COLUMN IF NOT EXISTS preventivo_star_id TEXT")
         await conn.execute("ALTER TABLE work_orders ADD COLUMN IF NOT EXISTS fatturata_il TIMESTAMPTZ")
         await conn.execute("ALTER TABLE work_orders ADD COLUMN IF NOT EXISTS fatturata_da_nome TEXT")
         # Fornitori: il titolare scrive a penna F1, F2... sul documento per dire da chi arriva.
@@ -1980,6 +1984,113 @@ class OmniusReportsOut(BaseModel):
     count: int
     has_more: bool
     next_updated_since: Optional[datetime] = None
+
+
+class OmniusPreventivoRiga(BaseModel):
+    tipo: str                                  # "ricambio" | "manodopera" | "consumabile"
+    codice: Optional[str] = None
+    descrizione: Optional[str] = None
+    quantita: float = 1
+    prezzo_unitario: float = 0                 # quello da mettere sul preventivo cliente
+    importo: float = 0
+    costo_unitario: Optional[float] = None     # quanto e' costato all'officina
+    fornitore: Optional[str] = None
+
+
+class OmniusPreventivoOut(BaseModel):
+    work_order_id: str
+    star_doc_id: Optional[str] = None          # a quale documento STAR agganciarlo
+    plate: str
+    customer: Optional[str] = None
+    vehicle: Optional[str] = None
+    lavoro: Optional[str] = None
+    completata_il: Optional[datetime] = None
+    righe: List[OmniusPreventivoRiga]
+    imponibile: float
+    iva_perc: float
+    iva: float
+    totale: float
+    dati_mancanti: List[str] = Field(default_factory=list)
+
+
+@api.get("/v1/omnius/preventivi", response_model=List[OmniusPreventivoOut],
+         dependencies=[Depends(require_omnius_key)])
+async def omnius_preventivi(solo_nuovi: bool = True, limit: int = 20):
+    """Sportello di ritiro dei preventivi per Omnius.
+
+    Restituisce i lavori COMPLETATI con le righe gia' pronte da caricare sul preventivo
+    STAR: ricambi coi prezzi di vendita, manodopera e consumabili. Il postino li ritira,
+    li carica su STAR e poi conferma su /preventivi/{id}/caricato, cosi' non li riprende
+    al giro dopo — stesso schema delle richieste targa.
+
+    solo_nuovi=false li restituisce tutti, anche quelli gia' consegnati (per rifare)."""
+    conds = ["status = 'completed'"]
+    if solo_nuovi:
+        conds.append("preventivo_inviato_il IS NULL")
+    rows = await fetch(
+        f"""SELECT id, plate, customer, vehicle, description, star_doc_id, updated_at
+              FROM work_orders WHERE {' AND '.join(conds)}
+             ORDER BY updated_at DESC LIMIT $1""",
+        max(1, min(limit, 100)),
+    )
+
+    fuori: List[OmniusPreventivoOut] = []
+    for w in rows:
+        p = await calcola_preventivo(w["id"])
+        # senza ricambi e senza ore non c'e' niente da caricare: si salta invece di
+        # consegnare un preventivo vuoto che poi qualcuno dovrebbe ricompilare a mano
+        if not p.get("ricambi") and not p.get("ore"):
+            continue
+
+        righe: List[OmniusPreventivoRiga] = []
+        for r in p.get("ricambi") or []:
+            righe.append(OmniusPreventivoRiga(
+                tipo="ricambio", codice=r.get("codice"), descrizione=r.get("descrizione"),
+                quantita=r.get("quantita") or 1, prezzo_unitario=r.get("prezzo") or 0,
+                importo=r.get("totale") or 0, costo_unitario=r.get("costo"),
+                fornitore=r.get("fornitore"),
+            ))
+        for c in p.get("consumabili") or []:
+            unita = f" ({c['unita']})" if c.get("unita") else ""
+            righe.append(OmniusPreventivoRiga(
+                tipo="consumabile", descrizione=f"{c['nome']}{unita}",
+                quantita=c.get("quantita") or 1, prezzo_unitario=c.get("prezzo") or 0,
+                importo=c.get("totale") or 0,
+            ))
+        if p.get("ore"):
+            righe.append(OmniusPreventivoRiga(
+                tipo="manodopera", descrizione="Manodopera",
+                quantita=p["ore"], prezzo_unitario=p["tariffa_oraria"],
+                importo=p["manodopera"],
+            ))
+
+        fuori.append(OmniusPreventivoOut(
+            work_order_id=w["id"], star_doc_id=w["star_doc_id"], plate=w["plate"],
+            customer=w["customer"], vehicle=w["vehicle"], lavoro=w["description"],
+            completata_il=w["updated_at"], righe=righe,
+            imponibile=p["imponibile"], iva_perc=p["iva_perc"], iva=p["iva"],
+            totale=p["totale"], dati_mancanti=p.get("mancanze") or [],
+        ))
+    return fuori
+
+
+class OmniusCaricatoIn(BaseModel):
+    preventivo_star_id: Optional[str] = None   # il numero che STAR ha dato al preventivo
+
+
+@api.post("/v1/omnius/preventivi/{order_id}/caricato", dependencies=[Depends(require_omnius_key)])
+async def omnius_preventivo_caricato(order_id: str, body: OmniusCaricatoIn = OmniusCaricatoIn()):
+    """Il postino conferma di aver caricato il preventivo su STAR: da qui in poi non
+    glielo ridiamo piu'. Se STAR restituisce un numero, lo teniamo per il riscontro."""
+    row = await fetchrow("SELECT id FROM work_orders WHERE id=$1", order_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Commessa non trovata")
+    await execute(
+        "UPDATE work_orders SET preventivo_inviato_il=$1, preventivo_star_id=$2 WHERE id=$3",
+        now_utc(), body.preventivo_star_id, order_id,
+    )
+    logger.info(f"preventivo {order_id} caricato su STAR ({body.preventivo_star_id or 'senza numero'})")
+    return {"ok": True}
 
 
 @api.get("/v1/omnius/commesse", response_model=OmniusReportsOut, dependencies=[Depends(require_omnius_key)])

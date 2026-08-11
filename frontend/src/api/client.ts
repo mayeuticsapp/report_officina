@@ -701,6 +701,8 @@ export type Preventivo = {
     ricarico: number; prezzo: number; totale: number; listino_fornitore?: number | null;
   }[];
   ricambi_costo: number; ricambi_vendita: number; margine_ricambi: number;
+  consumabili: { nome: string; quantita: number; unita?: string | null; prezzo: number; totale: number }[];
+  consumabili_totale: number;
   ore: number; tariffa_oraria: number; manodopera: number;
   imponibile: number; iva_perc: number; iva: number; totale: number;
   mancanze: string[];

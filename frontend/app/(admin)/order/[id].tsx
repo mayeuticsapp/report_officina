@@ -3,7 +3,7 @@ import { View, Text, StyleSheet, ScrollView, TouchableOpacity, ActivityIndicator
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useLocalSearchParams, useRouter, useFocusEffect } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
-import { api, WorkOrder, WorkEvent } from "@/src/api/client";
+import { api, WorkOrder, WorkEvent, Preventivo, preventivoCommessa } from "@/src/api/client";
 import { VoiceChat } from "@/src/components/VoiceChat";
 import { VehicleHistory } from "@/src/components/VehicleHistory";
 import { PhotoArchive } from "@/src/components/PhotoArchive";
@@ -23,6 +23,7 @@ export default function AdminOrderDetail() {
   const router = useRouter();
   const [order, setOrder] = useState<WorkOrder | null>(null);
   const [events, setEvents] = useState<WorkEvent[]>([]);
+  const [prev, setPrev] = useState<Preventivo | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
 
@@ -35,6 +36,8 @@ export default function AdminOrderDetail() {
       ]);
       setOrder(o);
       setEvents(ev);
+      // il preventivo non deve bloccare la scheda se il calcolo non riesce
+      preventivoCommessa(id).then(setPrev).catch(() => setPrev(null));
     } catch { /* ignore */ }
     finally { setLoading(false); setRefreshing(false); }
   }, [id]);
@@ -105,6 +108,82 @@ export default function AdminOrderDetail() {
             </View>
           );
         })()}
+
+        {/* Il conto finale: ricambi coi ricarichi, consumabili e manodopera */}
+        {prev && (prev.ricambi.length > 0 || prev.consumabili?.length > 0 || prev.ore > 0) ? (
+          <View style={styles.prevCard}>
+            <View style={styles.prevHead}>
+              <Text style={styles.prevTitolo}>PREVENTIVO INDICATIVO</Text>
+              <Text style={styles.prevTotale}>{prev.totale.toFixed(2)} €</Text>
+            </View>
+
+            {prev.ricambi.map((r, i) => (
+              <View key={`r${i}`} style={styles.prevRiga}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.prevNome} numberOfLines={1}>
+                    {r.descrizione || r.codice || "Ricambio"}
+                    {r.quantita > 1 ? ` ×${r.quantita}` : ""}
+                  </Text>
+                  <Text style={styles.prevSotto}>
+                    {r.codice ? `${r.codice} · ` : ""}costo {r.costo.toFixed(2)} · +{r.ricarico}%
+                  </Text>
+                </View>
+                <Text style={styles.prevImporto}>{r.totale.toFixed(2)}</Text>
+              </View>
+            ))}
+
+            {(prev.consumabili || []).map((c, i) => (
+              <View key={`c${i}`} style={styles.prevRiga}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.prevNome}>
+                    {c.nome} {c.quantita}{c.unita ? ` ${c.unita}` : ""}
+                  </Text>
+                  <Text style={styles.prevSotto}>{c.prezzo.toFixed(2)} cad.</Text>
+                </View>
+                <Text style={styles.prevImporto}>{c.totale.toFixed(2)}</Text>
+              </View>
+            ))}
+
+            {prev.ore > 0 ? (
+              <View style={styles.prevRiga}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.prevNome}>Manodopera {prev.ore}h</Text>
+                  <Text style={styles.prevSotto}>{prev.tariffa_oraria.toFixed(0)} €/ora</Text>
+                </View>
+                <Text style={styles.prevImporto}>{prev.manodopera.toFixed(2)}</Text>
+              </View>
+            ) : null}
+
+            <View style={styles.prevTotali}>
+              <View style={styles.prevTotRiga}>
+                <Text style={styles.prevTotLabel}>Imponibile</Text>
+                <Text style={styles.prevTotVal}>{prev.imponibile.toFixed(2)}</Text>
+              </View>
+              <View style={styles.prevTotRiga}>
+                <Text style={styles.prevTotLabel}>IVA {prev.iva_perc}%</Text>
+                <Text style={styles.prevTotVal}>{prev.iva.toFixed(2)}</Text>
+              </View>
+              <View style={[styles.prevTotRiga, styles.prevTotFinale]}>
+                <Text style={styles.prevTotLabelBig}>TOTALE</Text>
+                <Text style={styles.prevTotValBig}>{prev.totale.toFixed(2)} €</Text>
+              </View>
+              {prev.margine_ricambi > 0 ? (
+                <Text style={styles.prevMargine}>
+                  Margine sui ricambi {prev.margine_ricambi.toFixed(2)} € (costo {prev.ricambi_costo.toFixed(2)})
+                </Text>
+              ) : null}
+            </View>
+
+            {prev.mancanze.length > 0 ? (
+              <View style={styles.prevMancanze}>
+                <Ionicons name="alert-circle" size={14} color={colors.idle} />
+                <Text style={styles.prevMancanzeText}>
+                  Da completare: {prev.mancanze.join(" · ")}
+                </Text>
+              </View>
+            ) : null}
+          </View>
+        ) : null}
 
         <View style={styles.detailsCard}>
           <Row label="VEICOLO" value={order.vehicle} />
@@ -223,6 +302,39 @@ const styles = StyleSheet.create({
   oreRowValDiff: { color: colors.stopped, textDecorationLine: "line-through" },
   oreMotivo: { fontSize: 12, color: colors.textSecondary, fontStyle: "italic", marginTop: 6 },
   oreAvviso: { fontSize: 12, color: colors.stopped, fontWeight: "700", marginTop: 6 },
+  // Preventivo indicativo
+  prevCard: {
+    marginHorizontal: spacing.lg, marginTop: spacing.lg,
+    borderWidth: 2, borderColor: colors.borderStrong,
+  },
+  prevHead: {
+    flexDirection: "row", alignItems: "center", justifyContent: "space-between",
+    backgroundColor: colors.text, paddingHorizontal: spacing.md, paddingVertical: 10,
+  },
+  prevTitolo: { fontSize: 11, letterSpacing: 2, fontWeight: "900", color: colors.textInverse },
+  prevTotale: { fontSize: 16, fontWeight: "900", color: colors.textInverse },
+  prevRiga: {
+    flexDirection: "row", alignItems: "center", gap: spacing.sm,
+    paddingHorizontal: spacing.md, paddingVertical: 8,
+    borderBottomWidth: 1, borderBottomColor: colors.border,
+  },
+  prevNome: { fontSize: 14, fontWeight: "700", color: colors.text },
+  prevSotto: { fontSize: 11, color: colors.textSecondary, marginTop: 1 },
+  prevImporto: { fontSize: 14, fontWeight: "800", color: colors.text },
+  prevTotali: { padding: spacing.md, gap: 4 },
+  prevTotRiga: { flexDirection: "row", justifyContent: "space-between" },
+  prevTotLabel: { fontSize: 13, color: colors.textSecondary },
+  prevTotVal: { fontSize: 13, color: colors.text, fontWeight: "600" },
+  prevTotFinale: { marginTop: 6, paddingTop: 8, borderTopWidth: 2, borderTopColor: colors.borderStrong },
+  prevTotLabelBig: { fontSize: 14, fontWeight: "900", letterSpacing: 1, color: colors.text },
+  prevTotValBig: { fontSize: 18, fontWeight: "900", color: colors.text },
+  prevMargine: { fontSize: 11, color: colors.textSecondary, marginTop: 8, fontStyle: "italic" },
+  prevMancanze: {
+    flexDirection: "row", alignItems: "center", gap: 6,
+    paddingHorizontal: spacing.md, paddingBottom: spacing.md,
+  },
+  prevMancanzeText: { flex: 1, fontSize: 11, color: colors.idle, fontWeight: "600" },
+
   detailsCard: { margin: spacing.lg, padding: spacing.lg, borderWidth: 1, borderColor: colors.border },
   rowLabel: { fontSize: 10, letterSpacing: 2.5, color: colors.textSecondary, fontWeight: "700" },
   rowValue: { fontSize: 16, color: colors.text, marginTop: 2, fontWeight: "600" },
