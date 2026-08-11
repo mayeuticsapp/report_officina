@@ -659,6 +659,22 @@ async def startup():
         await conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_documenti_targa ON documenti_fornitore (upper(targa))")
 
+        # Catalogo ricambi: il prezzo di riferimento quando la bolla non c'e' — pezzo preso
+        # dal magazzino, o bolla non ancora caricata. Si riempie da solo a ogni documento
+        # letto, cosi' invece di invecchiare da fermo si aggiorna lavorando.
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS catalogo_ricambi (
+                codice_norm TEXT PRIMARY KEY,
+                codice TEXT NOT NULL,
+                descrizione TEXT,
+                marca TEXT,
+                costo NUMERIC(10,2),
+                fornitore TEXT,
+                origine TEXT NOT NULL DEFAULT 'bolla',
+                aggiornato_il TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """)
+
         # Le regole commerciali del titolare: ricarico a scaglioni, tariffa oraria, consumabili.
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS impostazioni_prezzi (
@@ -2917,9 +2933,11 @@ async def _avvisa_lavoro_completato(order_id: str, worker_name: str):
                 for v in p["ricambi"][:15]:
                     nome = _esc(v.get("descrizione") or v.get("codice") or "ricambio")
                     q = f" ×{int(v['quantita'])}" if v.get("quantita", 1) > 1 else ""
+                    fonte = (f", da catalogo di {v.get('prezzo_vecchio_di_giorni', 0)} giorni fa"
+                             if v.get("da_catalogo") else "")
                     righe.append(
                         f"• {nome}{q} — <b>{v['totale']:.2f}</b> "
-                        f"<i>(costo {v['costo']:.2f}, +{int(v['ricarico'])}%)</i>")
+                        f"<i>(costo {v['costo']:.2f}, +{int(v['ricarico'])}%{fonte})</i>")
                 for v in p.get("ricambi_senza_costo") or []:
                     marca = f"{v['marca']} " if v.get("marca") else ""
                     righe.append(
@@ -2981,6 +2999,57 @@ def _ricarico_per(costo: float, scaglioni: list) -> float:
         if limite is None or costo < float(limite):
             return float(s.get("ricarico") or 0)
     return 0.0
+
+
+def _codice_norm(codice: str) -> str:
+    """'512 0050 10', '512-005-010' e '512005010' sono lo stesso pezzo: i fornitori
+    spaziano e trattano i codici come vogliono. Per confrontarli si guarda solo
+    lettere e cifre."""
+    return re.sub(r"[^A-Z0-9]", "", (codice or "").upper())
+
+
+async def _aggiorna_catalogo(righe: list, fornitore: Optional[str], iva_inclusa: bool, iva: float):
+    """Ogni riga letta da un documento entra nel catalogo. Il prezzo memorizzato e' sempre
+    al NETTO: cosi' confrontare CDR (che stampa ivato) e GR Group ha senso."""
+    for r in righe or []:
+        if not isinstance(r, dict):
+            continue
+        codice = (r.get("codice") or "").strip()
+        norm = _codice_norm(codice)
+        if not norm:
+            continue
+        try:
+            costo = float(r.get("costo_unitario") or 0)
+        except (TypeError, ValueError):
+            continue
+        if costo <= 0:
+            continue
+        if iva_inclusa:
+            costo = costo / (1 + iva / 100.0)
+        try:
+            await execute(
+                """INSERT INTO catalogo_ricambi
+                     (codice_norm, codice, descrizione, marca, costo, fornitore, origine, aggiornato_il)
+                   VALUES ($1,$2,$3,$4,$5,$6,'bolla',$7)
+                   ON CONFLICT (codice_norm) DO UPDATE SET
+                     codice=$2,
+                     descrizione=COALESCE(NULLIF($3,''), catalogo_ricambi.descrizione),
+                     costo=$5, fornitore=$6, origine='bolla', aggiornato_il=$7""",
+                norm, codice, (r.get("descrizione") or "").strip(), (r.get("marca") or "").strip() or None,
+                round(costo, 2), fornitore, now_utc(),
+            )
+        except Exception as e:
+            logger.warning(f"catalogo, codice {codice}: {e}")
+
+
+async def _cerca_a_catalogo(codici: list) -> dict:
+    """Il prezzo di riferimento per i codici dati. Ritorna {codice_norm: riga}."""
+    norms = [_codice_norm(c) for c in codici if _codice_norm(c)]
+    if not norms:
+        return {}
+    righe = await fetch(
+        "SELECT * FROM catalogo_ricambi WHERE codice_norm = ANY($1)", norms)
+    return {r["codice_norm"]: dict(r) for r in righe}
 
 
 async def _righe_documenti_per_targa(targa: str) -> list:
@@ -3059,13 +3128,39 @@ async def calcola_preventivo(order_id: str) -> dict:
     if isinstance(scheda_r, str):
         scheda_r = json.loads(scheda_r)
     _, dalle_foto = await _ricambi_della_commessa(order_id, scheda_r)
-    codici_noti = {str(v.get("codice") or "").upper().replace(" ", "") for v in voci}
-    senza_costo = [
-        {"codice": f["codice"], "descrizione": f.get("descrizione") or "",
-         "marca": f.get("marca") or "", "quantita": f.get("quantita") or 1}
-        for f in dalle_foto
-        if f.get("codice") and f["codice"].upper().replace(" ", "") not in codici_noti
-    ]
+    codici_noti = {_codice_norm(str(v.get("codice") or "")) for v in voci}
+    orfani = [f for f in dalle_foto
+              if f.get("codice") and _codice_norm(f["codice"]) not in codici_noti]
+
+    # Per i pezzi senza bolla si pesca il prezzo dal catalogo: puo' essere vecchio, ma un
+    # prezzo vicino vale piu' di nessun prezzo. La bolla, quando c'e', ha sempre la
+    # precedenza perche' e' aggiornata.
+    catalogo = await _cerca_a_catalogo([f["codice"] for f in orfani])
+    senza_costo: list = []
+    for f in orfani:
+        rif = catalogo.get(_codice_norm(f["codice"]))
+        q = float(f.get("quantita") or 1)
+        if rif and rif.get("costo"):
+            costo = float(rif["costo"])
+            perc = _ricarico_per(costo, imp["scaglioni"])
+            prezzo = costo * (1 + perc / 100.0)
+            tot_costo += costo * q
+            tot_vendita += prezzo * q
+            giorni = (now_utc() - rif["aggiornato_il"]).days
+            voci.append({
+                "codice": f["codice"],
+                "descrizione": f.get("descrizione") or rif.get("descrizione"),
+                "quantita": q, "costo": round(costo, 2), "ricarico": perc,
+                "prezzo": round(prezzo, 2), "totale": round(prezzo * q, 2),
+                "listino_fornitore": None, "fornitore": rif.get("fornitore"),
+                "costo_era_ivato": False,
+                "da_catalogo": True, "prezzo_vecchio_di_giorni": giorni,
+            })
+        else:
+            senza_costo.append({
+                "codice": f["codice"], "descrizione": f.get("descrizione") or "",
+                "marca": f.get("marca") or "", "quantita": q,
+            })
 
     minuti = o["minutes_effective"] or 0
     ore = minuti / 60.0
@@ -3233,6 +3328,15 @@ async def carica_documento(file: UploadFile = File(...), admin: dict = Depends(r
         letto.get("imponibile"), letto.get("totale_documento"), json.dumps(verifica),
         content_type, admin["id"], admin["full_name"], now_utc(),
     )
+    # Ogni riga entra anche nel catalogo: cosi' un pezzo preso dal magazzino, senza bolla
+    # per quella commessa, un prezzo di riferimento ce l'ha comunque.
+    iva_inclusa = False
+    if codice:
+        f = await fetchrow("SELECT iva_inclusa FROM fornitori WHERE codice=$1", codice)
+        iva_inclusa = bool(f and f["iva_inclusa"])
+    imp = await _impostazioni_prezzi()
+    await _aggiorna_catalogo(righe, fornitore, iva_inclusa, imp["iva"])
+
     logger.info(f"documento {doc_id}: {len(righe)} righe, verifica {verifica.get('stato')}")
     return _riga_documento(dict(await fetchrow("SELECT * FROM documenti_fornitore WHERE id=$1", doc_id)))
 
@@ -3301,6 +3405,70 @@ async def elimina_documento(doc_id: str, admin: dict = Depends(require_admin)):
     await execute("DELETE FROM documenti_fornitore WHERE id=$1", doc_id)
     path = DOCS_DIR / f"{doc_id}.{_PHOTO_EXT.get(row['content_type'], 'jpg')}"
     path.unlink(missing_ok=True)
+    return {"ok": True}
+
+
+class VoceCatalogoIn(BaseModel):
+    codice: str
+    descrizione: Optional[str] = None
+    marca: Optional[str] = None
+    costo: float
+    fornitore: Optional[str] = None
+    iva_inclusa: bool = False
+
+
+@api.get("/catalogo")
+async def lista_catalogo(cerca: Optional[str] = None, limite: int = 100,
+                         admin: dict = Depends(require_admin)):
+    """Il catalogo dei prezzi di riferimento, usato quando la bolla non c'e'."""
+    if cerca:
+        righe = await fetch(
+            """SELECT * FROM catalogo_ricambi
+                WHERE codice_norm LIKE '%' || $1 || '%' OR descrizione ILIKE '%' || $2 || '%'
+                ORDER BY aggiornato_il DESC LIMIT $3""",
+            _codice_norm(cerca), cerca, max(1, min(limite, 500)))
+    else:
+        righe = await fetch(
+            "SELECT * FROM catalogo_ricambi ORDER BY aggiornato_il DESC LIMIT $1",
+            max(1, min(limite, 500)))
+    return [{**dict(r), "costo": float(r["costo"]) if r["costo"] is not None else None}
+            for r in righe]
+
+
+@api.post("/catalogo")
+async def salva_catalogo(voci: List[VoceCatalogoIn], admin: dict = Depends(require_admin)):
+    """Carica in blocco i prezzi di magazzino. Marcati come origine 'magazzino': restano
+    finche' una bolla vera non li sostituisce con un prezzo aggiornato."""
+    imp = await _impostazioni_prezzi()
+    inseriti = 0
+    for v in voci:
+        norm = _codice_norm(v.codice)
+        if not norm or v.costo <= 0:
+            continue
+        costo = v.costo / (1 + imp["iva"] / 100.0) if v.iva_inclusa else v.costo
+        await execute(
+            """INSERT INTO catalogo_ricambi
+                 (codice_norm, codice, descrizione, marca, costo, fornitore, origine, aggiornato_il)
+               VALUES ($1,$2,$3,$4,$5,$6,'magazzino',$7)
+               ON CONFLICT (codice_norm) DO UPDATE SET
+                 codice=$2,
+                 descrizione=COALESCE(NULLIF($3,''), catalogo_ricambi.descrizione),
+                 marca=COALESCE($4, catalogo_ricambi.marca),
+                 costo=$5, fornitore=$6, origine='magazzino', aggiornato_il=$7
+               WHERE catalogo_ricambi.origine <> 'bolla'
+                  OR catalogo_ricambi.aggiornato_il < $7""",
+            norm, v.codice.strip(), (v.descrizione or "").strip(),
+            (v.marca or "").strip() or None, round(costo, 2),
+            (v.fornitore or "").strip() or None, now_utc(),
+        )
+        inseriti += 1
+    totale = await fetchrow("SELECT count(*) AS n FROM catalogo_ricambi")
+    return {"ok": True, "caricate": inseriti, "totale_catalogo": totale["n"]}
+
+
+@api.delete("/catalogo/{codice}")
+async def elimina_da_catalogo(codice: str, admin: dict = Depends(require_admin)):
+    await execute("DELETE FROM catalogo_ricambi WHERE codice_norm=$1", _codice_norm(codice))
     return {"ok": True}
 
 

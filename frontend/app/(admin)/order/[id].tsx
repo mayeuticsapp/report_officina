@@ -124,8 +124,11 @@ export default function AdminOrderDetail() {
                     {r.descrizione || r.codice || "Ricambio"}
                     {r.quantita > 1 ? ` ×${r.quantita}` : ""}
                   </Text>
-                  <Text style={styles.prevSotto}>
+                  <Text style={[styles.prevSotto, r.da_catalogo && styles.prevSottoCatalogo]}>
                     {r.codice ? `${r.codice} · ` : ""}costo {r.costo.toFixed(2)} · +{r.ricarico}%
+                    {r.da_catalogo
+                      ? ` · da catalogo, ${r.prezzo_vecchio_di_giorni ?? 0} giorni fa`
+                      : ""}
                   </Text>
                 </View>
                 <Text style={styles.prevImporto}>{r.totale.toFixed(2)}</Text>
@@ -339,6 +342,7 @@ const styles = StyleSheet.create({
   prevImporto: { fontSize: 14, fontWeight: "800", color: colors.text },
   prevRigaSenzaCosto: { backgroundColor: colors.bgMuted, borderLeftWidth: 4, borderLeftColor: colors.idle },
   prevSottoManca: { fontSize: 11, color: colors.idle, marginTop: 1, fontWeight: "600" },
+  prevSottoCatalogo: { color: colors.primary, fontWeight: "600" },
   prevImportoManca: { fontSize: 16, fontWeight: "900", color: colors.idle },
   prevTotali: { padding: spacing.md, gap: 4 },
   prevTotRiga: { flexDirection: "row", justifyContent: "space-between" },

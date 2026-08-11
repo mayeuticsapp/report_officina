@@ -699,6 +699,9 @@ export type Preventivo = {
   ricambi: {
     codice?: string; descrizione?: string; quantita: number; costo: number;
     ricarico: number; prezzo: number; totale: number; listino_fornitore?: number | null;
+    /** true = prezzo preso dal catalogo perché la bolla non c'è */
+    da_catalogo?: boolean;
+    prezzo_vecchio_di_giorni?: number;
   }[];
   /** pezzi visti nelle foto ma senza costo: manca la bolla del fornitore */
   ricambi_senza_costo: { codice: string; descrizione?: string; marca?: string; quantita: number }[];
