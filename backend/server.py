@@ -188,8 +188,9 @@ PLACEHOLDER_VEICOLO = ("", "DA IDENTIFICARE", "VEICOLO DA DEFINIRE", "DA DEFINIR
 # funziona comunque lo faccia (entrando dopo, uscendo prima a pranzo o la sera).
 TARGET_FERIALE = 510
 TARGET_SABATO = 330
-# Sfrido fisiologico: i minuti in piu' fino a questa soglia non diventano credito.
-# Oltre, si conta solo l'eccedenza (18:45 su un'uscita alle 18:30 = 5 minuti maturati).
+# Sfrido fisiologico, in entrata e in uscita: gli scarti fino a questa soglia non
+# diventano ne' credito ne' debito. Oltre, conta solo l'eccedenza (18:45 su un'uscita
+# alle 18:30 = 5 minuti maturati).
 TOLLERANZA_MINUTI = int(os.environ.get("TOLLERANZA_MINUTI", "10"))
 RAGGIO_OFFICINA_M = 500
 
@@ -1442,16 +1443,20 @@ def _giornata(giorno: date, righe: List[dict], oggi: date) -> GiornataOut:
             incompleta = True
     target = _target_minuti(giorno)
     lorda = minuti - target
-    # I minuti in piu' fino alla tolleranza non maturano: restare qualche minuto oltre
-    # l'orario e' fisiologico in officina, e senza questo margine in due settimane si
-    # accumulano ore di credito che nessuno ha davvero voluto fare.
-    # Sopra la soglia si conta solo l'eccedenza: uscito alle 18:45 invece che alle 18:30,
-    # maturano 5 minuti, non 15.
-    netta = max(0, lorda - TOLLERANZA_MINUTI) if lorda > 0 else lorda
+    # Tolleranza in ENTRAMBE le direzioni. Qualche minuto in piu' o in meno e' fisiologico:
+    # ci si lava le mani, si finisce di parlare col cliente, si trova traffico. Senza margine
+    # quei minuti diventano credito o debito che nessuno ha voluto — a Luciano si erano
+    # accumulate 1h42m fatte di +9, +7, +1.
+    # Oltre la soglia conta solo l'eccedenza: uscito alle 18:45 su un'uscita alle 18:30
+    # maturano 5 minuti, non 15. Stesso trattamento per chi arriva tardi.
+    if lorda > 0:
+        netta = max(0, lorda - TOLLERANZA_MINUTI)
+    else:
+        netta = min(0, lorda + TOLLERANZA_MINUTI)
     return GiornataOut(
         giorno=giorno.isoformat(), minuti_presenza=minuti, minuti_target=target,
         differenza=netta, differenza_lorda=lorda,
-        tolleranza_applicata=lorda - netta if lorda > 0 else 0,
+        tolleranza_applicata=abs(lorda - netta),
         incompleta=incompleta,
         dentro_adesso=dentro and giorno == oggi,
         timbrature=[_riga_timbratura(r) for r in righe],

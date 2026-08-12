@@ -108,10 +108,13 @@ export default function PlanningAdmin() {
       });
       setScelto(null);
       await load();
+      // Si resta sul planning: chi smista assegna diverse auto di fila, e uscire dalla
+      // lista a ogni assegnazione costringeva a tornare indietro e ritrovare il punto.
+      // La riga si aggiorna da sola col nome del meccanico, quindi la conferma si vede.
       if (out.gia_esistente) {
-        showAlert("Già in officina", "Questa auto era già stata assegnata: apro la commessa esistente.");
+        showAlert("Già in officina",
+          "Questa auto era già stata assegnata: la commessa esisteva già ed è stata aggiornata.");
       }
-      router.push(`/(admin)/order/${out.work_order.id}` as any);
     } catch (e: any) {
       showAlert("Errore", e?.message || "Commessa non creata");
     } finally { setCreando(false); }
