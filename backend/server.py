@@ -2546,10 +2546,11 @@ async def _caption_photo(photo_id: str, data: bytes, content_type: str, kind: Op
                 campi, _ = await ai.leggi_ricambio(data_url, ripiega_su_vision=False)
                 if not (campi and campi.get("ricambi")) and caption:
                     campi = await ai.codici_da_testo(caption)
-                if campi and campi.get("ricambi"):
-                    await execute("UPDATE order_photos SET dati=$1::jsonb WHERE id=$2",
-                                  json.dumps(campi), photo_id)
-                    logger.info(f"foto {photo_id}: trovati {len(campi['ricambi'])} codici ricambio")
+                da_salvare = campi if (campi and campi.get("ricambi")) else {"ricambi": []}
+                await execute("UPDATE order_photos SET dati=$1::jsonb WHERE id=$2",
+                              json.dumps(da_salvare), photo_id)
+                if da_salvare["ricambi"]:
+                    logger.info(f"foto {photo_id}: trovati {len(da_salvare['ricambi'])} codici ricambio")
             except Exception as e:
                 logger.warning(f"lettura codici da foto {photo_id}: {e}")
         if caption:
@@ -2822,10 +2823,13 @@ async def _leggi_codici_arretrati(order_id: str):
                     data_url = (f"data:{f['content_type']};base64,"
                                 f"{base64.b64encode(path.read_bytes()).decode()}")
                     campi, _ = await ai.leggi_ricambio(data_url, ripiega_su_vision=False)
-                if campi and campi.get("ricambi"):
-                    await execute("UPDATE order_photos SET dati=$1::jsonb WHERE id=$2",
-                                  json.dumps(campi), f["id"])
+                # Si salva SEMPRE, anche la lista vuota: senza questo una foto senza
+                # codici resta con dati NULL e viene rianalizzata a ogni passaggio.
+                da_salvare = campi if (campi and campi.get("ricambi")) else {"ricambi": []}
+                await execute("UPDATE order_photos SET dati=$1::jsonb WHERE id=$2",
+                              json.dumps(da_salvare), f["id"])
             except Exception as e:
+                # se l'AI e' giu' NON si marca la foto: va riletta quando torna
                 logger.warning(f"codici arretrati, foto {f['id']}: {e}")
     except Exception as e:
         logger.warning(f"codici arretrati per {order_id}: {e}")
@@ -2837,9 +2841,10 @@ async def _ricambi_della_commessa(order_id: str, scheda: dict) -> tuple[list, li
     Ritorna (voci spuntate a mano, voci lette dalle foto)."""
     a_mano = [str(x).strip() for x in (scheda.get("ricambi_sostituiti") or []) if str(x).strip()]
 
-    # prima si recuperano le foto mai analizzate, poi si legge tutto
-    await _leggi_codici_arretrati(order_id)
-
+    # NIENTE analisi AI qui: questa funzione la chiama anche il calcolo del preventivo,
+    # che gira a ogni apertura di commessa e a ogni giro di Omnius. Rianalizzare le foto
+    # a ogni lettura ha prodotto 10.011 chiamate in un giorno e ha esaurito il credito.
+    # Le foto si analizzano una volta sola, alla chiusura del lavoro.
     dalle_foto: list = []
     try:
         # TUTTE le foto, non solo quelle scattate col pulsante RICAMBIO: il codice
@@ -2869,6 +2874,16 @@ async def _ricambi_della_commessa(order_id: str, scheda: dict) -> tuple[list, li
     except Exception as e:
         logger.warning(f"lettura ricambi da foto: {e}")
     return a_mano, dalle_foto
+
+
+async def _chiudi_e_avvisa(order_id: str, worker_name: str):
+    """Alla chiusura: prima si leggono i codici dalle foto mai analizzate, poi si avvisa.
+    E' l'unico punto in cui l'AI guarda le foto — tutte le altre strade sono letture."""
+    try:
+        await _leggi_codici_arretrati(order_id)
+    except Exception as e:
+        logger.warning(f"lettura foto alla chiusura di {order_id}: {e}")
+    await _avvisa_lavoro_completato(order_id, worker_name)
 
 
 async def _avvisa_lavoro_completato(order_id: str, worker_name: str):
@@ -4021,8 +4036,8 @@ async def add_event(order_id: str, body: WorkEventCreate, user: dict = Depends(g
     # A lavoro completato, il caso entra nella memoria storica dell'officina (in background)
     if body.type == "COMPLETE":
         asyncio.create_task(_upsert_case_embedding(order_id))
-        # ...e il titolare va avvisato subito: deve poter preparare la fattura
-        asyncio.create_task(_avvisa_lavoro_completato(order_id, user["full_name"] or user["username"]))
+        # le foto si leggono UNA VOLTA, qui, prima di comporre l'avviso col preventivo
+        asyncio.create_task(_chiudi_e_avvisa(order_id, user["full_name"] or user["username"]))
 
     return WorkEvent(
         id=event_id, work_order_id=order_id, worker_id=user["id"],
