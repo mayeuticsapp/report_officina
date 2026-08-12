@@ -188,6 +188,9 @@ PLACEHOLDER_VEICOLO = ("", "DA IDENTIFICARE", "VEICOLO DA DEFINIRE", "DA DEFINIR
 # funziona comunque lo faccia (entrando dopo, uscendo prima a pranzo o la sera).
 TARGET_FERIALE = 510
 TARGET_SABATO = 330
+# Sfrido fisiologico: i minuti in piu' fino a questa soglia non diventano credito.
+# Oltre, si conta solo l'eccedenza (18:45 su un'uscita alle 18:30 = 5 minuti maturati).
+TOLLERANZA_MINUTI = int(os.environ.get("TOLLERANZA_MINUTI", "10"))
 RAGGIO_OFFICINA_M = 500
 
 
@@ -228,6 +231,8 @@ class GiornataOut(BaseModel):
     minuti_presenza: int
     minuti_target: int
     differenza: int                 # + straordinario da recuperare, − da restituire
+    differenza_lorda: int = 0       # prima della tolleranza: quanto ha fatto davvero
+    tolleranza_applicata: int = 0   # minuti assorbiti dalla tolleranza
     incompleta: bool                # manca una timbratura di uscita
     dentro_adesso: bool
     timbrature: List[Timbratura]
@@ -1436,9 +1441,18 @@ def _giornata(giorno: date, righe: List[dict], oggi: date) -> GiornataOut:
         else:
             incompleta = True
     target = _target_minuti(giorno)
+    lorda = minuti - target
+    # I minuti in piu' fino alla tolleranza non maturano: restare qualche minuto oltre
+    # l'orario e' fisiologico in officina, e senza questo margine in due settimane si
+    # accumulano ore di credito che nessuno ha davvero voluto fare.
+    # Sopra la soglia si conta solo l'eccedenza: uscito alle 18:45 invece che alle 18:30,
+    # maturano 5 minuti, non 15.
+    netta = max(0, lorda - TOLLERANZA_MINUTI) if lorda > 0 else lorda
     return GiornataOut(
         giorno=giorno.isoformat(), minuti_presenza=minuti, minuti_target=target,
-        differenza=minuti - target, incompleta=incompleta,
+        differenza=netta, differenza_lorda=lorda,
+        tolleranza_applicata=lorda - netta if lorda > 0 else 0,
+        incompleta=incompleta,
         dentro_adesso=dentro and giorno == oggi,
         timbrature=[_riga_timbratura(r) for r in righe],
     )

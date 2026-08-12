@@ -498,7 +498,12 @@ export type Giornata = {
   giorno: string;
   minuti_presenza: number;
   minuti_target: number;
+  /** quello che matura davvero, tolleranza già applicata */
   differenza: number;
+  /** quanto ha fatto in più prima della tolleranza */
+  differenza_lorda?: number;
+  /** minuti assorbiti dallo sfrido fisiologico */
+  tolleranza_applicata?: number;
   incompleta: boolean;
   dentro_adesso: boolean;
   timbrature: Timbratura[];

@@ -587,9 +587,16 @@ function GiornataRiga({ g, onCorreggi, onElimina, onRifai }: {
             g.giorno === new Date().toLocaleDateString("sv-SE") ? (
               <Text style={styles.inCorso}>IN CORSO</Text>
             ) : (
-              <Text style={[styles.giornataDiff, g.differenza < 0 && { color: colors.stopped }]}>
-                {g.differenza >= 0 ? "+" : ""}{fmtDurata(g.differenza)}
-              </Text>
+              <View style={{ alignItems: "flex-end" }}>
+                <Text style={[styles.giornataDiff, g.differenza < 0 && { color: colors.stopped }]}>
+                  {g.differenza >= 0 ? "+" : ""}{fmtDurata(g.differenza)}
+                </Text>
+                {g.tolleranza_applicata ? (
+                  <Text style={styles.tolleranza}>
+                    ha fatto +{fmtDurata(g.differenza_lorda || 0)}
+                  </Text>
+                ) : null}
+              </View>
             )
           )}
         </View>
@@ -672,6 +679,7 @@ const styles = StyleSheet.create({
   giornataData: { fontSize: 13, fontWeight: "800", color: colors.text },
   giornataOre: { fontSize: 14, fontWeight: "900", color: colors.text },
   giornataDiff: { fontSize: 12, fontWeight: "800", color: colors.active },
+  tolleranza: { fontSize: 9, color: colors.textSecondary, marginTop: 1 },
   inCorso: { fontSize: 10, fontWeight: "900", letterSpacing: 0.8, color: colors.textSecondary },
   badgeIncompleta: { backgroundColor: colors.stopped, paddingHorizontal: 6, paddingVertical: 2 },
   badgeText: { color: colors.textInverse, fontSize: 8, fontWeight: "900", letterSpacing: 0.5 },
