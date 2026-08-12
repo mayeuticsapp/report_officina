@@ -37,6 +37,14 @@ type Planning = {
 
 type GiornoDisponibile = { giorno: string; appuntamenti: number; passato: boolean; oggi?: boolean };
 
+const STATI: Record<string, { c: string; label: string }> = {
+  pending: { c: colors.paused, label: "IN ATTESA" },
+  open: { c: colors.idle, label: "APERTA" },
+  in_progress: { c: colors.active, label: "IN CORSO" },
+  paused: { c: colors.paused, label: "IN PAUSA" },
+  completed: { c: colors.textSecondary, label: "COMPLETATA" },
+};
+
 const GIORNI = ["Domenica", "Lunedì", "Martedì", "Mercoledì", "Giovedì", "Venerdì", "Sabato"];
 const GIORNI_BREVI = ["DOM", "LUN", "MAR", "MER", "GIO", "VEN", "SAB"];
 
@@ -53,6 +61,7 @@ export default function PlanningAdmin() {
 
   // assegnazione di un'auto del planning a uno o più meccanici
   const [scelto, setScelto] = useState<Appuntamento | null>(null);
+  const [dettaglio, setDettaglio] = useState<WorkOrder | null>(null);  // la commessa vera, se esiste
   const [operai, setOperai] = useState<User[]>([]);
   const [selezionati, setSelezionati] = useState<string[]>([]);
   const [creando, setCreando] = useState(false);
@@ -76,18 +85,45 @@ export default function PlanningAdmin() {
   }, [giornoScelto]);
 
   const apriAssegnazione = async (a: Appuntamento) => {
-    if (a.commessa_id) {
-      router.push(`/(admin)/order/${a.commessa_id}` as any);
-      return;
-    }
     setScelto(a);
     setSelezionati([]);
+    setDettaglio(null);
     if (operai.length === 0) {
       try {
         const tutti = await api<User[]>("/users");
         setOperai(tutti.filter((u) => u.role === "worker"));
       } catch { /* la lista resta vuota: l'avviso lo dà il pulsante */ }
     }
+    // Se l'auto è già in officina si carica la commessa vera: così da qui si vede
+    // com'è messa e si può cambiare il meccanico, senza uscire dal planning.
+    if (a.commessa_id) {
+      try {
+        const o = await api<WorkOrder>(`/work-orders/${a.commessa_id}`);
+        setDettaglio(o);
+        setSelezionati(o.assigned_worker_ids || []);
+      } catch { /* se non si carica, resta la vista dell'appuntamento */ }
+    }
+  };
+
+  /** Cambia i meccanici su una commessa già creata, restando sul planning. */
+  const riassegna = async () => {
+    if (!dettaglio) return;
+    if (selezionati.length === 0) {
+      showAlert("Scegli il meccanico", "Seleziona almeno un meccanico.");
+      return;
+    }
+    setCreando(true);
+    try {
+      await api<WorkOrder>(`/work-orders/${dettaglio.id}`, {
+        method: "PUT",
+        body: { assigned_worker_ids: selezionati },
+      });
+      setScelto(null);
+      setDettaglio(null);
+      await load();
+    } catch (e: any) {
+      showAlert("Non salvato", e?.message || "Assegnazione non aggiornata");
+    } finally { setCreando(false); }
   };
 
   const creaCommessa = async () => {
@@ -291,7 +327,7 @@ export default function PlanningAdmin() {
                       <View style={styles.smistataRow}>
                         <Ionicons name="checkmark-circle" size={14} color={colors.active} />
                         <Text style={styles.smistataText}>
-                          GIÀ IN OFFICINA{a.assegnata_a?.length ? ` · ${a.assegnata_a.join(", ")}` : ""}
+                          GIÀ IN OFFICINA{a.assegnata_a?.length ? ` · ${a.assegnata_a.join(", ")}` : ""} · TOCCA PER VEDERLA
                         </Text>
                       </View>
                     ) : (
@@ -328,7 +364,38 @@ export default function PlanningAdmin() {
                   .filter(Boolean).join(" · ")}
               </Text>
 
-              <Text style={styles.mLabel}>MECCANICI</Text>
+              {/* Se l'auto è già in officina si vede com'è messa, senza uscire dal planning */}
+              {dettaglio ? (
+                <View style={styles.mCommessa}>
+                  <View style={styles.mCommessaTop}>
+                    <Text style={styles.mCommessaTitolo}>LA COMMESSA</Text>
+                    <View style={[styles.mStato, { backgroundColor: STATI[dettaglio.status]?.c || colors.idle }]}>
+                      <Text style={styles.mStatoText}>{STATI[dettaglio.status]?.label || dettaglio.status}</Text>
+                    </View>
+                  </View>
+                  <Text style={styles.mCommessaRiga}>{dettaglio.vehicle} · {dettaglio.customer}</Text>
+                  {dettaglio.description ? (
+                    <Text style={styles.mCommessaDesc}>{dettaglio.description}</Text>
+                  ) : null}
+                  <Text style={styles.mCommessaRiga}>
+                    Ore da fatturare: {dettaglio.minutes_effective != null
+                      ? `${Math.floor(dettaglio.minutes_effective / 60)}h ${dettaglio.minutes_effective % 60}m`
+                      : "non ancora confermate"}
+                  </Text>
+                  <TouchableOpacity
+                    testID="btn-apri-commessa"
+                    style={styles.mApriBtn}
+                    onPress={() => { setScelto(null); router.push(`/(admin)/order/${dettaglio.id}` as any); }}
+                  >
+                    <Ionicons name="open-outline" size={16} color={colors.text} />
+                    <Text style={styles.mApriText}>APRI LA COMMESSA PER INTERO</Text>
+                  </TouchableOpacity>
+                </View>
+              ) : null}
+
+              <Text style={styles.mLabel}>
+                {dettaglio ? "CAMBIA I MECCANICI" : "MECCANICI"}
+              </Text>
               {operai.length === 0 ? (
                 <Text style={styles.mVuoto}>Nessun meccanico trovato.</Text>
               ) : operai.map((w) => {
@@ -355,11 +422,13 @@ export default function PlanningAdmin() {
                 testID="btn-crea-commessa"
                 style={[styles.mCreaBtn, creando && { opacity: 0.6 }]}
                 disabled={creando}
-                onPress={creaCommessa}
+                onPress={dettaglio ? riassegna : creaCommessa}
               >
                 {creando
                   ? <ActivityIndicator color={colors.textInverse} />
-                  : <Text style={styles.mCreaText}>CREA COMMESSA</Text>}
+                  : <Text style={styles.mCreaText}>
+                      {dettaglio ? "SALVA I MECCANICI" : "CREA COMMESSA"}
+                    </Text>}
               </TouchableOpacity>
             </View>
           </View>
@@ -446,6 +515,23 @@ const styles = StyleSheet.create({
     marginTop: spacing.lg, marginBottom: 8,
   },
   mVuoto: { fontSize: 13, color: colors.textSecondary },
+
+  // La commessa già esistente, vista dal planning
+  mCommessa: {
+    marginTop: spacing.lg, borderWidth: 1, borderColor: colors.borderStrong,
+    padding: spacing.md, gap: 6,
+  },
+  mCommessaTop: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
+  mCommessaTitolo: { fontSize: 11, letterSpacing: 2, fontWeight: "900", color: colors.text },
+  mStato: { paddingHorizontal: 8, paddingVertical: 3 },
+  mStatoText: { fontSize: 9, fontWeight: "900", letterSpacing: 0.5, color: colors.textInverse },
+  mCommessaRiga: { fontSize: 13, color: colors.text },
+  mCommessaDesc: { fontSize: 13, color: colors.textSecondary, fontStyle: "italic" },
+  mApriBtn: {
+    flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8,
+    borderWidth: 1, borderColor: colors.borderStrong, paddingVertical: 12, marginTop: 6,
+  },
+  mApriText: { fontSize: 11, fontWeight: "900", letterSpacing: 1, color: colors.text },
   mWorker: {
     flexDirection: "row", alignItems: "center", gap: 10,
     borderWidth: 1, borderColor: colors.border, padding: spacing.md, marginBottom: 6,
