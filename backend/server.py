@@ -3222,7 +3222,9 @@ async def calcola_preventivo(order_id: str) -> dict:
     manodopera. Dice sempre cosa gli manca, perche' un totale credibile ma incompleto
     e' peggio di nessun totale."""
     o = await fetchrow(
-        "SELECT plate, minutes_effective, scheda_tecnica FROM work_orders WHERE id=$1", order_id)
+        # vehicle serve ai suggerimenti dal listino: senza, KeyError e preventivo a 500
+        "SELECT plate, vehicle, minutes_effective, scheda_tecnica FROM work_orders WHERE id=$1",
+        order_id)
     if not o:
         return {"disponibile": False, "motivo": "Commessa non trovata"}
 
