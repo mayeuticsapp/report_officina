@@ -709,7 +709,14 @@ export type Preventivo = {
     prezzo_vecchio_di_giorni?: number;
   }[];
   /** pezzi visti nelle foto ma senza costo: manca la bolla del fornitore */
-  ricambi_senza_costo: { codice: string; descrizione?: string; marca?: string; quantita: number }[];
+  ricambi_senza_costo: {
+    codice: string; descrizione?: string; marca?: string; quantita: number;
+    /** candidati dal listino di magazzino, da confermare */
+    suggerimenti?: {
+      codice: string; descrizione?: string; marca?: string | null;
+      prezzo?: number | null; costo?: number | null; aggancio_veicolo?: boolean;
+    }[];
+  }[];
   ricambi_costo: number; ricambi_vendita: number; margine_ricambi: number;
   consumabili: { nome: string; quantita: number; unita?: string | null; prezzo: number; totale: number }[];
   consumabili_totale: number;
@@ -720,6 +727,12 @@ export type Preventivo = {
 
 export async function preventivoCommessa(orderId: string): Promise<Preventivo> {
   return api<Preventivo>(`/work-orders/${orderId}/preventivo`);
+}
+
+/** «Questo codice sulla scatola è questo articolo del mio listino»: vale da qui in poi, ovunque. */
+export async function collegaCodici(codice_esterno: string, codice_catalogo: string) {
+  return api<{ ok: boolean; collegato_a: string; descrizione?: string }>(
+    "/catalogo/collega", { method: "POST", body: { codice_esterno, codice_catalogo } });
 }
 
 /* ---- Avvisi su Telegram ---- */

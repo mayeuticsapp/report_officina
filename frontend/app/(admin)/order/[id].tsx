@@ -3,7 +3,8 @@ import { View, Text, StyleSheet, ScrollView, TouchableOpacity, ActivityIndicator
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useLocalSearchParams, useRouter, useFocusEffect } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
-import { api, WorkOrder, WorkEvent, Preventivo, preventivoCommessa } from "@/src/api/client";
+import { api, WorkOrder, WorkEvent, Preventivo, preventivoCommessa, collegaCodici } from "@/src/api/client";
+import { confirmDialog, showAlert } from "@/src/utils/dialog";
 import { VoiceChat } from "@/src/components/VoiceChat";
 import { VehicleHistory } from "@/src/components/VehicleHistory";
 import { PhotoArchive } from "@/src/components/PhotoArchive";
@@ -24,8 +25,26 @@ export default function AdminOrderDetail() {
   const [order, setOrder] = useState<WorkOrder | null>(null);
   const [events, setEvents] = useState<WorkEvent[]>([]);
   const [prev, setPrev] = useState<Preventivo | null>(null);
+  const [collegando, setCollegando] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+
+  /** Il titolare conferma: questo codice sulla scatola è quell'articolo del listino. */
+  const collega = useCallback(async (esterno: string, catalogo: string, descr?: string) => {
+    const ok = await confirmDialog(
+      "Confermi la corrispondenza?",
+      `${esterno} è «${descr || catalogo}» del tuo listino.\n\n` +
+      "Da adesso l'app userà questo prezzo ogni volta che incontra quel codice, su qualsiasi commessa."
+    );
+    if (!ok) return;
+    setCollegando(esterno);
+    try {
+      await collegaCodici(esterno, catalogo);
+      if (id) setPrev(await preventivoCommessa(id));
+    } catch (e: any) {
+      showAlert("Non collegato", e?.message || "Riprova");
+    } finally { setCollegando(null); }
+  }, [id]);
 
   const load = useCallback(async () => {
     if (!id) return;
@@ -135,19 +154,51 @@ export default function AdminOrderDetail() {
               </View>
             ))}
 
-            {/* Pezzi montati di cui non conosciamo il prezzo: la bolla non e' stata caricata */}
+            {/* Pezzi montati di cui non conosciamo il prezzo: si propongono dal listino */}
             {(prev.ricambi_senza_costo || []).map((r, i) => (
-              <View key={`sc${i}`} style={[styles.prevRiga, styles.prevRigaSenzaCosto]}>
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.prevNome} numberOfLines={1}>
-                    {r.marca ? `${r.marca} ` : ""}{r.codice}
-                    {r.quantita > 1 ? ` ×${r.quantita}` : ""}
-                  </Text>
-                  <Text style={styles.prevSottoManca}>
-                    {r.descrizione ? `${r.descrizione} · ` : ""}visto nelle foto, manca la bolla
-                  </Text>
+              <View key={`sc${i}`}>
+                <View style={[styles.prevRiga, styles.prevRigaSenzaCosto]}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.prevNome} numberOfLines={1}>
+                      {r.marca ? `${r.marca} ` : ""}{r.codice}
+                      {r.quantita > 1 ? ` ×${r.quantita}` : ""}
+                    </Text>
+                    <Text style={styles.prevSottoManca}>
+                      {r.descrizione ? `${r.descrizione} · ` : ""}nessun prezzo
+                    </Text>
+                  </View>
+                  <Text style={styles.prevImportoManca}>?</Text>
                 </View>
-                <Text style={styles.prevImportoManca}>?</Text>
+
+                {(r.suggerimenti || []).length > 0 ? (
+                  <View style={styles.suggBox}>
+                    <Text style={styles.suggTitolo}>DAL TUO LISTINO — tocca quello giusto</Text>
+                    {(r.suggerimenti || []).map((s) => (
+                      <TouchableOpacity
+                        key={s.codice}
+                        testID={`collega-${r.codice}-${s.codice}`}
+                        style={styles.suggRiga}
+                        onPress={() => collega(r.codice, s.codice, s.descrizione)}
+                        disabled={collegando === r.codice}
+                      >
+                        <View style={{ flex: 1 }}>
+                          <Text style={styles.suggDescr} numberOfLines={1}>
+                            {s.descrizione || s.codice}
+                            {s.aggancio_veicolo ? "  ✓" : ""}
+                          </Text>
+                          <Text style={styles.suggCodice}>{s.codice}</Text>
+                        </View>
+                        <Text style={styles.suggPrezzo}>
+                          {s.prezzo != null ? `${s.prezzo.toFixed(2)} €` : "—"}
+                        </Text>
+                      </TouchableOpacity>
+                    ))}
+                    <Text style={styles.suggNota}>
+                      Confermando, l&apos;app ricorda che {r.codice} è quell&apos;articolo:
+                      la prossima volta lo prezza da sola.
+                    </Text>
+                  </View>
+                ) : null}
               </View>
             ))}
 
@@ -344,6 +395,24 @@ const styles = StyleSheet.create({
   prevSottoManca: { fontSize: 11, color: colors.idle, marginTop: 1, fontWeight: "600" },
   prevSottoCatalogo: { color: colors.primary, fontWeight: "600" },
   prevImportoManca: { fontSize: 16, fontWeight: "900", color: colors.idle },
+
+  // Candidati dal listino, da confermare
+  suggBox: {
+    backgroundColor: colors.bgMuted, paddingHorizontal: spacing.md, paddingVertical: spacing.sm,
+    borderBottomWidth: 1, borderBottomColor: colors.border, gap: 2,
+  },
+  suggTitolo: {
+    fontSize: 9, letterSpacing: 1.2, fontWeight: "900", color: colors.textSecondary,
+    marginBottom: 4,
+  },
+  suggRiga: {
+    flexDirection: "row", alignItems: "center", gap: spacing.sm,
+    paddingVertical: 7, borderTopWidth: 1, borderTopColor: colors.border,
+  },
+  suggDescr: { fontSize: 13, color: colors.text, fontWeight: "600" },
+  suggCodice: { fontSize: 10, color: colors.textSecondary, marginTop: 1 },
+  suggPrezzo: { fontSize: 13, fontWeight: "800", color: colors.primary },
+  suggNota: { fontSize: 10, color: colors.textSecondary, marginTop: 6, lineHeight: 14 },
   prevTotali: { padding: spacing.md, gap: 4 },
   prevTotRiga: { flexDirection: "row", justifyContent: "space-between" },
   prevTotLabel: { fontSize: 13, color: colors.textSecondary },

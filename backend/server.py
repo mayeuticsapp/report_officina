@@ -685,6 +685,22 @@ async def startup():
         await conn.execute(
             "ALTER TABLE catalogo_ricambi ADD COLUMN IF NOT EXISTS prezzo_vendita NUMERIC(10,2)")
 
+        # Corrispondenze fra il codice stampato sulla scatola (produttore: Bosch, NGK,
+        # Ferodo, originale casa) e il codice del catalogo del titolare. Sono due sistemi
+        # di numerazione diversi per lo stesso pezzo: qui si impara la coppia una volta
+        # sola, e da li' in poi il prezzo si trova da solo.
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS corrispondenze_codici (
+                codice_esterno_norm TEXT PRIMARY KEY,
+                codice_esterno TEXT NOT NULL,
+                codice_catalogo_norm TEXT NOT NULL,
+                descrizione TEXT,
+                confermata_da TEXT,
+                usata_volte INT NOT NULL DEFAULT 0,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """)
+
         # Le regole commerciali del titolare: ricarico a scaglioni, tariffa oraria, consumabili.
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS impostazioni_prezzi (
@@ -3084,13 +3100,91 @@ async def _aggiorna_catalogo(righe: list, fornitore: Optional[str], iva_inclusa:
 
 
 async def _cerca_a_catalogo(codici: list) -> dict:
-    """Il prezzo di riferimento per i codici dati. Ritorna {codice_norm: riga}."""
+    """Il prezzo di riferimento per i codici dati. Ritorna {codice_norm: riga}.
+
+    Due strade: il codice coincide col catalogo, oppure e' stato collegato in passato
+    dal titolare — la scatola dice Bosch, il magazzino usa un altro codice, e la
+    corrispondenza si impara una volta e vale per sempre."""
     norms = [_codice_norm(c) for c in codici if _codice_norm(c)]
     if not norms:
         return {}
-    righe = await fetch(
-        "SELECT * FROM catalogo_ricambi WHERE codice_norm = ANY($1)", norms)
-    return {r["codice_norm"]: dict(r) for r in righe}
+
+    fuori: dict = {}
+    righe = await fetch("SELECT * FROM catalogo_ricambi WHERE codice_norm = ANY($1)", norms)
+    for r in righe:
+        fuori[r["codice_norm"]] = dict(r)
+
+    mancanti = [n for n in norms if n not in fuori]
+    if mancanti:
+        collegati = await fetch(
+            """SELECT m.codice_esterno_norm, c.*
+                 FROM corrispondenze_codici m
+                 JOIN catalogo_ricambi c ON c.codice_norm = m.codice_catalogo_norm
+                WHERE m.codice_esterno_norm = ANY($1)""",
+            mancanti,
+        )
+        for r in collegati:
+            d = dict(r)
+            fuori[d.pop("codice_esterno_norm")] = d
+            await execute(
+                "UPDATE corrispondenze_codici SET usata_volte = usata_volte + 1 WHERE codice_esterno_norm=$1",
+                r["codice_esterno_norm"])
+    return fuori
+
+
+# Solo le parole che davvero non distinguono nulla. Attenzione a cosa si mette qui:
+# «filtro» sembra generico ma e' proprio la parola che separa un filtro da una
+# guarnizione, e «anteriori» separa le pastiglie davanti da quelle dietro.
+_RUMORE_DESCRIZIONE = {
+    "per", "con", "del", "della", "delle", "dei", "dal", "dalla",
+    "il", "lo", "la", "le", "un", "una", "uno", "gli",
+    "auto", "veicolo", "ricambio", "ricambi", "nuovo", "nuova",
+}
+
+
+async def _suggerisci_da_catalogo(descrizione: str, veicolo: str, limite: int = 5) -> list:
+    """Candidati dal catalogo quando il codice non si aggancia.
+
+    La scatola dice cos'e' il pezzo («filtro carburante») e il libretto dice su che auto
+    va: incrociando i due si restringono 6.000 articoli a una manciata. NON si sceglie
+    per conto del titolare — un prezzo sbagliato in fattura e' peggio di un prezzo
+    mancante — si propone e basta."""
+    parole = [p for p in re.split(r"[^a-zA-Zàèéìòù0-9]+", (descrizione or "").lower())
+              if len(p) > 2 and p not in _RUMORE_DESCRIZIONE]
+    if not parole:
+        return []
+
+    # le parole del veicolo aiutano a scegliere fra 300 filtri olio uguali
+    marca = [p for p in re.split(r"[^a-zA-Z0-9]+", (veicolo or "").lower()) if len(p) > 2][:2]
+
+    # Si ordina per quante parole combaciano, non si pretende che combacino tutte:
+    # «pastiglie freno anteriori» deve preferire chi dice anche «anteriori», ma non
+    # scartare chi scrive solo «pastiglie freno». La prima parola pero' e' obbligatoria,
+    # altrimenti su «filtro olio» tornerebbero anche le guarnizioni dell'olio.
+    try:
+        righe = await fetch(
+            """SELECT codice, descrizione, marca, costo, prezzo_vendita, aggiornato_il,
+                      (SELECT count(*) FROM unnest($1::text[]) p
+                        WHERE lower(descrizione) LIKE '%' || p || '%') AS punti_pezzo,
+                      (SELECT count(*) FROM unnest($2::text[]) w
+                        WHERE w <> '' AND lower(descrizione) LIKE '%' || w || '%') AS punti_veicolo
+                 FROM catalogo_ricambi
+                WHERE prezzo_vendita IS NOT NULL
+                  AND descrizione ~* ('\\m' || $4)
+                ORDER BY punti_pezzo DESC, punti_veicolo DESC, prezzo_vendita
+                LIMIT $3""",
+            parole[:4], marca or [""], max(1, min(limite, 10)), parole[0],
+        )
+    except Exception as e:
+        logger.warning(f"suggerimenti catalogo: {e}")
+        return []
+
+    return [{"codice": r["codice"], "descrizione": r["descrizione"],
+             "marca": r["marca"],
+             "prezzo": float(r["prezzo_vendita"]) if r["prezzo_vendita"] is not None else None,
+             "costo": float(r["costo"]) if r["costo"] is not None else None,
+             "aggancio_veicolo": r["punti_veicolo"] > 0}
+            for r in righe]
 
 
 async def _righe_documenti_per_targa(targa: str) -> list:
@@ -3208,9 +3302,14 @@ async def calcola_preventivo(order_id: str) -> dict:
                 "prezzo_vecchio_di_giorni": giorni,
             })
         else:
+            # niente prezzo: si propongono candidati dal catalogo, per descrizione.
+            # La scelta resta al titolare: si suggerisce, non si applica.
+            sugg = await _suggerisci_da_catalogo(
+                f.get("descrizione") or "", o["vehicle"] or "")
             senza_costo.append({
                 "codice": f["codice"], "descrizione": f.get("descrizione") or "",
                 "marca": f.get("marca") or "", "quantita": q,
+                "suggerimenti": sugg,
             })
 
     minuti = o["minutes_effective"] or 0
@@ -3520,6 +3619,54 @@ async def salva_catalogo(voci: List[VoceCatalogoIn], admin: dict = Depends(requi
         inseriti += 1
     totale = await fetchrow("SELECT count(*) AS n FROM catalogo_ricambi")
     return {"ok": True, "caricate": inseriti, "totale_catalogo": totale["n"]}
+
+
+class CollegaCodiciIn(BaseModel):
+    codice_esterno: str      # quello letto sulla scatola (Bosch, NGK, originale casa)
+    codice_catalogo: str     # quello con cui l'officina lo compra e lo vende
+
+
+@api.post("/catalogo/collega")
+async def collega_codici(body: CollegaCodiciIn, admin: dict = Depends(require_admin)):
+    """Il titolare dice: questo codice sulla scatola e' questo articolo del mio catalogo.
+
+    Da qui in poi il prezzo si trova da solo, su qualsiasi commessa. E' cosi' che il
+    sistema impara: non si compila una tabella di corrispondenze, si conferma un
+    suggerimento quando capita, e la volta dopo e' gia' saputo."""
+    est, cat = _codice_norm(body.codice_esterno), _codice_norm(body.codice_catalogo)
+    if not est or not cat:
+        raise HTTPException(status_code=400, detail="Servono entrambi i codici")
+    riga = await fetchrow("SELECT codice, descrizione FROM catalogo_ricambi WHERE codice_norm=$1", cat)
+    if not riga:
+        raise HTTPException(status_code=404, detail="Quel codice non è in catalogo")
+    await execute(
+        """INSERT INTO corrispondenze_codici
+             (codice_esterno_norm, codice_esterno, codice_catalogo_norm, descrizione, confermata_da)
+           VALUES ($1,$2,$3,$4,$5)
+           ON CONFLICT (codice_esterno_norm) DO UPDATE SET
+             codice_catalogo_norm=$3, descrizione=$4, confermata_da=$5""",
+        est, body.codice_esterno.strip(), cat, riga["descrizione"], admin["full_name"],
+    )
+    logger.info(f"corrispondenza imparata: {body.codice_esterno} → {riga['codice']}")
+    return {"ok": True, "collegato_a": riga["codice"], "descrizione": riga["descrizione"]}
+
+
+@api.get("/catalogo/corrispondenze")
+async def lista_corrispondenze(admin: dict = Depends(require_admin)):
+    """Le corrispondenze imparate finora, con quante volte hanno funzionato."""
+    righe = await fetch(
+        """SELECT m.codice_esterno, c.codice AS codice_catalogo, m.descrizione,
+                  m.usata_volte, m.confermata_da, m.created_at
+             FROM corrispondenze_codici m
+             LEFT JOIN catalogo_ricambi c ON c.codice_norm = m.codice_catalogo_norm
+            ORDER BY m.usata_volte DESC, m.created_at DESC""")
+    return [dict(r) for r in righe]
+
+
+@api.delete("/catalogo/corrispondenze/{codice}")
+async def elimina_corrispondenza(codice: str, admin: dict = Depends(require_admin)):
+    await execute("DELETE FROM corrispondenze_codici WHERE codice_esterno_norm=$1", _codice_norm(codice))
+    return {"ok": True}
 
 
 @api.delete("/catalogo/{codice}")

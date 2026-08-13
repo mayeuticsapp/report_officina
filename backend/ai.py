@@ -296,7 +296,11 @@ SYSTEM_RICAMBIO_CAMPI = (
     "5. DESCRIZIONE: che pezzo è, in italiano e in poche parole (pastiglie freno anteriori, "
     "filtro olio, cinghia distribuzione). Se non si capisce, null.\n"
     "6. QUANTITA: quante confezioni identiche si vedono. Se non è chiaro, 1.\n"
-    "7. Se nella foto non c'è nessun ricambio leggibile, rispondi {\"ricambi\": []}."
+    "7. LE TARGHE NON SONO RICAMBI. In officina la targa e' scritta ovunque: sul cartellino "
+    "appeso alla scatola, sul nastro adesivo, a pennarello sul cartone. Una targa italiana e' "
+    "2 lettere + 3 cifre + 2 lettere (GE878XZ, DK912LE): se leggi una sigla con quella forma, "
+    "NON metterla fra i ricambi.\n"
+    "8. Se nella foto non c'è nessun ricambio leggibile, rispondi {\"ricambi\": []}."
 )
 
 SYSTEM_RICAMBIO = (
@@ -311,6 +315,31 @@ SYSTEM_RICAMBIO = (
     "Inizia la risposta con 'RICAMBI: '. Se non leggi nessun codice, scrivi "
     "'RICAMBI: nessun codice leggibile'."
 )
+
+
+import re as _re
+
+_TARGA_IT = _re.compile(r"^[A-Z]{2}\d{3}[A-Z]{2}$")
+
+
+def scarta_targhe(dati: dict) -> dict:
+    """Toglie dai ricambi le sigle che sono targhe.
+
+    In officina la targa e' scritta ovunque: sul cartellino appeso alla scatola, sul
+    nastro, a pennarello sul cartone. Il prompt lo dice, ma una regola nel prompt si
+    puo' ignorare mentre questa no. Senza, la targa finisce in fattura come ricambio."""
+    if not isinstance(dati, dict) or not isinstance(dati.get("ricambi"), list):
+        return dati
+    tenuti = []
+    for v in dati["ricambi"]:
+        if not isinstance(v, dict):
+            continue
+        pulito = _re.sub(r"[^A-Z0-9]", "", str(v.get("codice") or "").upper())
+        if _TARGA_IT.match(pulito):
+            logger.info(f"scartato «{v.get('codice')}»: è una targa, non un ricambio")
+            continue
+        tenuti.append(v)
+    return {**dati, "ricambi": tenuti}
 
 
 def ricambi_in_riga(dati: dict) -> str:
@@ -540,7 +569,7 @@ async def codici_da_testo(testo: str) -> dict:
         )
         dati = _json.loads(resp.choices[0].message.content or "{}")
         if isinstance(dati, dict) and isinstance(dati.get("ricambi"), list):
-            return dati
+            return scarta_targhe(dati)
     except Exception:
         pass
     return {}
@@ -571,6 +600,7 @@ async def leggi_ricambio(data_url: str, ripiega_su_vision: bool = True) -> tuple
             )
             dati = _json.loads(resp.choices[0].message.content or "{}")
             if isinstance(dati, dict) and isinstance(dati.get("ricambi"), list):
+                dati = scarta_targhe(dati)
                 return dati, ricambi_in_riga(dati)
         except Exception:
             pass
