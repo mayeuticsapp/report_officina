@@ -20,6 +20,7 @@ ATTENZIONE — limiti noti del "cambio in un file solo":
    modello prima di andare in produzione.
 """
 import os
+import logging
 from pathlib import Path
 from typing import List, Optional
 
@@ -27,6 +28,8 @@ from dotenv import load_dotenv
 from mistralai.client import Mistral
 
 load_dotenv(Path(__file__).parent / ".env")
+
+logger = logging.getLogger(__name__)
 
 # ---------------- Modelli (override via .env) ----------------
 TEXT_MODEL = os.environ.get("MISTRAL_TEXT_MODEL", "mistral-large-latest")
@@ -337,6 +340,53 @@ def ricambi_in_riga(dati: dict) -> str:
             testo = f"{testo} ×{q}"
         pezzi.append(testo)
     return "RICAMBI: " + " · ".join(pezzi) if pezzi else "RICAMBI: nessun codice leggibile"
+
+
+BRAVE_API_KEY = os.environ.get("BRAVE_API_KEY", "")
+BRAVE_URL = "https://api.search.brave.com/res/v1/web/search"
+
+
+async def cerca_web(domanda: str, quanti: int = 4) -> list:
+    """Cerca sul web una risposta tecnica, con Brave.
+
+    Serve quando l'archivio dell'officina non ha il dato: coppie di serraggio,
+    capacita' olio, procedure, codici motore. Ritorna una lista di
+    {titolo, url, testo}, vuota se la ricerca non e' disponibile — l'AI deve
+    poter rispondere lo stesso, dicendo che non ha trovato fonti.
+
+    Piano gratuito: 5$/mese, circa 1.000 ricerche. Quando finiscono Brave
+    risponde 429 e qui si ritorna vuoto, senza far fallire la domanda."""
+    if not BRAVE_API_KEY or not (domanda or "").strip():
+        return []
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=12) as client:
+            r = await client.get(
+                BRAVE_URL,
+                headers={"X-Subscription-Token": BRAVE_API_KEY, "Accept": "application/json"},
+                params={"q": domanda[:380], "count": max(1, min(quanti, 10)),
+                        "country": "it", "search_lang": "it"},
+            )
+        if r.status_code == 429:
+            logger.warning("brave: quota mensile esaurita (429), la ricerca web resta ferma")
+            return []
+        if r.status_code != 200:
+            logger.warning(f"brave: risposta {r.status_code}: {r.text[:160]}")
+            return []
+        risultati = ((r.json() or {}).get("web") or {}).get("results") or []
+        fuori = []
+        for x in risultati[:quanti]:
+            testo = (x.get("description") or "").replace("<strong>", "").replace("</strong>", "")
+            if not testo.strip():
+                continue
+            fuori.append({"titolo": (x.get("title") or "").strip(),
+                          "url": (x.get("url") or "").strip(),
+                          "testo": testo.strip()[:600]})
+        logger.info(f"brave: {len(fuori)} risultati per «{domanda[:60]}»")
+        return fuori
+    except Exception as e:
+        logger.warning(f"brave: ricerca fallita: {e}")
+        return []
 
 
 SYSTEM_DOCUMENTO_FORNITORE = (

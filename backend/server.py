@@ -4912,6 +4912,35 @@ async def _store_knowledge_doc(title: str, content: str, author: str) -> Knowled
     return KnowledgeDocOut(doc_id=doc_id, title=title, chunks=len(chunks), created_by_name=author, created_at=now)
 
 
+def _domanda_da_cercare(testo: str) -> bool:
+    """Vale la pena spendere una ricerca web su questa frase?
+
+    In officina si scrive molto che non e' una domanda: «fatto», «ok finito»,
+    «manca il pezzo». Cercare su quelle brucerebbe le 1.000 ricerche gratuite del
+    mese in pochi giorni, per niente. Si cerca solo quando c'e' una domanda vera
+    e riguarda un dato tecnico che l'officina potrebbe non avere in casa."""
+    t = (testo or "").strip().lower()
+    if len(t) < 12:
+        return False
+    tecniche = (
+        "coppia", "serraggio", "nm", "torque", "capacit", "litri", "quanti litri",
+        "olio", "specifica", "viscosit", "5w", "10w", "0w", "acea", "api ",
+        "cinghia", "distribuzione", "catena", "fasatura", "gioco valvole",
+        "pressione", "bar", "candel", "elettrodo", "iniett", "turbina", "geometria",
+        "errore", "codice guasto", "p0", "p1", "p2", "spia", "centralina",
+        "schema", "pinout", "resistenza", "ohm", "voltaggio", "sensore",
+        "procedura", "come si", "come faccio", "quale", "quanto", "quanti",
+        "sostituzione", "smontaggio", "rigenerazione", "fap", "dpf", "egr", "adblue",
+    )
+    if not any(p in t for p in tecniche):
+        return False
+    # una domanda vera: o c'e' il punto interrogativo, o e' formulata come richiesta
+    return "?" in t or any(t.startswith(p) for p in (
+        "che ", "chi ", "come ", "cosa ", "quale", "quanto", "quanti", "quando",
+        "dove ", "perch", "mi serve", "serve ", "sai ", "dimmi", "trova",
+    ))
+
+
 async def _find_knowledge(query_text: str, limit: int = 3) -> List[dict]:
     """Cerca nell'Archivio Tecnico i blocchi più pertinenti alla domanda."""
     vec = await _embed_text(query_text)
@@ -5102,6 +5131,24 @@ async def voice_turn(order_id: str, body: VoiceTurnIn, user: dict = Depends(get_
                 "(usali solo se pertinenti; quando li richiami cita la targa del caso):\n" + casi
             )
             logger.info(f"memoria storica: {len(similar)} casi simili per {order_id}")
+
+        # Il web SOLO se in casa non c'e' niente di pertinente: l'archivio dell'officina
+        # e i casi gia' risolti valgono di piu' di un forum, sono piu' veloci e non
+        # consumano ricerche. Cosi' le 1.000 gratuite al mese bastano davvero.
+        if not docs and not similar and _domanda_da_cercare(user_text):
+            web = await ai.cerca_web(f"{row.get('vehicle') or ''} {user_text}".strip())
+            if web:
+                fonti = "\n---\n".join(
+                    f"[{w['titolo']}]\n{w['testo']}\nfonte: {w['url']}" for w in web
+                )
+                rag_block += (
+                    "\n\nRISULTATI DALLA RICERCA WEB — non sono documentazione ufficiale "
+                    "dell'officina. Usali per orientarti, ma DEVI dire da dove viene il dato "
+                    "citando la fonte, e avvertire che va verificato prima di applicarlo a "
+                    "un motore. Se i risultati non rispondono alla domanda, dillo invece di "
+                    "adattarli:\n" + fonti
+                )
+                logger.info(f"ricerca web: {len(web)} fonti per {order_id}")
     except Exception as e:
         logger.warning(f"recupero conoscenza fallito: {e}")
 
