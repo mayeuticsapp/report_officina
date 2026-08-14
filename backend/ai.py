@@ -279,7 +279,7 @@ SYSTEM_RICAMBIO_CAMPI = (
     "Rispondi SOLO con questo JSON, senza testo intorno:\n"
     "{\n"
     '  "ricambi": [\n'
-    '    {"codice": "…", "marca": "…", "descrizione": "…", "quantita": 1}\n'
+    '    {"codice": "…", "codici_alternativi": ["…"], "marca": "…", "descrizione": "…", "quantita": 1}\n'
     "  ]\n"
     "}\n"
     "REGOLE FERREE:\n"
@@ -296,6 +296,11 @@ SYSTEM_RICAMBIO_CAMPI = (
     "5. DESCRIZIONE: che pezzo è, in italiano e in poche parole (pastiglie freno anteriori, "
     "filtro olio, cinghia distribuzione). Se non si capisce, null.\n"
     "6. QUANTITA: quante confezioni identiche si vedono. Se non è chiaro, 1.\n"
+    "6-bis. UN PEZZO PUO' AVERE PIU' CODICI SULLA STESSA ETICHETTA, separati da $ / - o "
+    "spazi (es. 'WA445920S35$536758000'): uno e' il codice interno del produttore, l'altro "
+    "e' quello del catalogo o dell'originale. SERVONO ENTRAMBI. Metti il piu' completo in "
+    "\"codice\" e TUTTI gli altri in \"codici_alternativi\": [\"…\"]. E' spesso il secondo "
+    "quello con cui l'officina trova il pezzo a magazzino, quindi non scartarlo mai.\n"
     "7. LE TARGHE NON SONO RICAMBI. In officina la targa e' scritta ovunque: sul cartellino "
     "appeso alla scatola, sul nastro adesivo, a pennarello sul cartone. Una targa italiana e' "
     "2 lettere + 3 cifre + 2 lettere (GE878XZ, DK912LE): se leggi una sigla con quella forma, "
@@ -320,6 +325,64 @@ SYSTEM_RICAMBIO = (
 import re as _re
 
 _TARGA_IT = _re.compile(r"^[A-Z]{2}\d{3}[A-Z]{2}$")
+
+
+def recupera_codici_dal_testo(dati: dict, testo_ocr: str) -> dict:
+    """Ripesca dal testo grezzo dell'OCR i codici che il modello ha scartato.
+
+    Sull'etichetta Landi Renzo c'era 'WA445920S35$536758000': due codici attaccati.
+    Il modello restituisce solo il primo, buttando via proprio quello con cui il pezzo
+    sta a magazzino (LA536758000, 162 euro). Qui si cerca nel testo originale il token
+    che CONTIENE il codice estratto: se e' piu' lungo, i pezzi in piu' diventano
+    codici alternativi da provare a catalogo."""
+    if not isinstance(dati, dict) or not isinstance(dati.get("ricambi"), list) or not testo_ocr:
+        return dati
+    token = _re.findall(r"[A-Za-z0-9][A-Za-z0-9$/\\.\-]{5,}", testo_ocr)
+    for v in dati["ricambi"]:
+        if not isinstance(v, dict):
+            continue
+        cod = str(v.get("codice") or "").strip()
+        if not cod:
+            continue
+        secco = _re.sub(r"[^A-Z0-9]", "", cod.upper())
+        for t in token:
+            t_secco = _re.sub(r"[^A-Z0-9]", "", t.upper())
+            if secco and secco in t_secco and len(t_secco) > len(secco):
+                pezzi = [p.strip() for p in _re.split(r"[$|/\\]+", t) if len(p.strip()) >= 4]
+                extra = [p for p in pezzi
+                         if _re.sub(r"[^A-Z0-9]", "", p.upper()) != secco]
+                if extra:
+                    alt = [a for a in (v.get("codici_alternativi") or []) if a]
+                    v["codici_alternativi"] = list(dict.fromkeys([*extra, *alt]))
+                    logger.info(f"recuperati dal testo OCR per «{cod}»: {extra}")
+                break
+    return dati
+
+
+def espandi_codici(dati: dict) -> dict:
+    """Spezza i codici che ne contengono due.
+
+    Le etichette stampano spesso due codici attaccati da un separatore:
+    'WA445920S35$536758000' e' il codice interno Landi Renzo PIU' quello con cui il
+    pezzo sta a magazzino (LA536758000). Il modello li legge come un codice unico,
+    e cosi' il prezzo non si trova mai. Qui si separano: uno resta il principale,
+    gli altri diventano alternativi e vengono provati a catalogo.
+
+    Si fa in codice e non nel prompt perche' e' una regola meccanica: un separatore
+    e' un separatore, non c'e' niente da interpretare."""
+    if not isinstance(dati, dict) or not isinstance(dati.get("ricambi"), list):
+        return dati
+    for v in dati["ricambi"]:
+        if not isinstance(v, dict):
+            continue
+        grezzo = str(v.get("codice") or "")
+        pezzi = [p.strip() for p in _re.split(r"[$|/\\]+", grezzo) if len(p.strip()) >= 4]
+        if len(pezzi) > 1:
+            v["codice"] = pezzi[0]
+            alt = [a for a in (v.get("codici_alternativi") or []) if a]
+            v["codici_alternativi"] = list(dict.fromkeys([*pezzi[1:], *alt]))
+            logger.info(f"codice doppio «{grezzo}» separato in {pezzi}")
+    return dati
 
 
 def scarta_targhe(dati: dict) -> dict:
@@ -573,7 +636,7 @@ async def codici_da_testo(testo: str) -> dict:
     except Exception:
         return {}
     if isinstance(dati, dict) and isinstance(dati.get("ricambi"), list):
-        return scarta_targhe(dati)
+        return scarta_targhe(espandi_codici(dati))
     return {}
 
 
@@ -605,7 +668,8 @@ async def leggi_ricambio(data_url: str, ripiega_su_vision: bool = True) -> tuple
         except Exception:
             dati = {}                      # risposta non JSON: e' una lettura a vuoto, non un guasto
         if isinstance(dati, dict) and isinstance(dati.get("ricambi"), list):
-            dati = scarta_targhe(dati)
+            dati = recupera_codici_dal_testo(dati, testo)
+            dati = scarta_targhe(espandi_codici(dati))
             return dati, ricambi_in_riga(dati)
     if not ripiega_su_vision:
         return {}, ""

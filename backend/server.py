@@ -2884,8 +2884,13 @@ async def _ricambi_della_commessa(order_id: str, scheda: dict) -> tuple[list, li
                 if not codice or codice.upper() in visti:
                     continue
                 visti.add(codice.upper())
+                # I codici alternativi stampati sulla stessa etichetta: spesso e' uno di
+                # quelli, non il principale, quello con cui l'officina trova il pezzo.
+                alt = [str(a).strip() for a in (v.get("codici_alternativi") or [])
+                       if str(a).strip()]
                 dalle_foto.append({
                     "codice": codice,
+                    "codici_alternativi": alt,
                     "marca": (v.get("marca") or "").strip(),
                     "descrizione": (v.get("descrizione") or "").strip(),
                     "quantita": v.get("quantita") or 1,
@@ -3132,6 +3137,29 @@ async def _cerca_a_catalogo(codici: list) -> dict:
             await execute(
                 "UPDATE corrispondenze_codici SET usata_volte = usata_volte + 1 WHERE codice_esterno_norm=$1",
                 r["codice_esterno_norm"])
+
+    # Terza strada: il codice del catalogo e' lo stesso con un prefisso del fornitore
+    # davanti. Sull'etichetta Landi Renzo c'era 536758000 e a magazzino sta come
+    # LA536758000: lo stesso pezzo, con due lettere in piu'.
+    # Solo per codici lunghi almeno 7 caratteri: sotto, il rischio di prendere il pezzo
+    # sbagliato supera l'utilita' — il catalogo ha 2.285 codici di 5-6 caratteri.
+    ancora = [n for n in norms if n not in fuori and len(n) >= 7]
+    for n in ancora:
+        r = await fetchrow(
+            """SELECT * FROM catalogo_ricambi
+                WHERE codice_norm LIKE '%' || $1
+                  AND length(codice_norm) - length($1) BETWEEN 1 AND 3
+                ORDER BY length(codice_norm) LIMIT 2""",
+            n)
+        if r:
+            # se ce n'e' piu' d'uno non si sceglie: meglio nessun prezzo che quello sbagliato
+            quanti = await fetchrow(
+                """SELECT count(*) AS n FROM catalogo_ricambi
+                    WHERE codice_norm LIKE '%' || $1
+                      AND length(codice_norm) - length($1) BETWEEN 1 AND 3""", n)
+            if quanti["n"] == 1:
+                fuori[n] = dict(r)
+                logger.info(f"catalogo: {n} agganciato a {r['codice']} (prefisso fornitore)")
     return fuori
 
 
@@ -3275,10 +3303,20 @@ async def calcola_preventivo(order_id: str) -> dict:
     # Per i pezzi senza bolla si pesca il prezzo dal catalogo: puo' essere vecchio, ma un
     # prezzo vicino vale piu' di nessun prezzo. La bolla, quando c'e', ha sempre la
     # precedenza perche' e' aggiornata.
-    catalogo = await _cerca_a_catalogo([f["codice"] for f in orfani])
+    # si provano TUTTI i codici stampati sull'etichetta, non solo il principale
+    da_cercare: list = []
+    for f in orfani:
+        da_cercare.append(f["codice"])
+        da_cercare.extend(f.get("codici_alternativi") or [])
+    catalogo = await _cerca_a_catalogo(da_cercare)
+
     senza_costo: list = []
     for f in orfani:
-        rif = catalogo.get(_codice_norm(f["codice"]))
+        rif = None
+        for c in [f["codice"], *(f.get("codici_alternativi") or [])]:
+            rif = catalogo.get(_codice_norm(c))
+            if rif:
+                break
         q = float(f.get("quantita") or 1)
         if rif and (rif.get("prezzo_vendita") or rif.get("costo")):
             giorni = (now_utc() - rif["aggiornato_il"]).days
