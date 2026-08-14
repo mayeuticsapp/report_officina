@@ -2562,13 +2562,16 @@ async def _caption_photo(photo_id: str, data: bytes, content_type: str, kind: Op
                 campi, _ = await ai.leggi_ricambio(data_url, ripiega_su_vision=False)
                 if not (campi and campi.get("ricambi")) and caption:
                     campi = await ai.codici_da_testo(caption)
+                # Si arriva qui SOLO se l'AI ha risposto: allora "nessun codice" e' un
+                # esito vero e la foto si puo' marcare. Se l'AI e' giu' l'eccezione
+                # sale e la foto resta da leggere.
                 da_salvare = campi if (campi and campi.get("ricambi")) else {"ricambi": []}
                 await execute("UPDATE order_photos SET dati=$1::jsonb WHERE id=$2",
                               json.dumps(da_salvare), photo_id)
                 if da_salvare["ricambi"]:
                     logger.info(f"foto {photo_id}: trovati {len(da_salvare['ricambi'])} codici ricambio")
             except Exception as e:
-                logger.warning(f"lettura codici da foto {photo_id}: {e}")
+                logger.warning(f"lettura codici da foto {photo_id} rimandata (AI non disponibile?): {e}")
         if caption:
             await execute("UPDATE order_photos SET caption=$1 WHERE id=$2", caption[:800], photo_id)
             logger.info(f"didascalia foto {photo_id}: {caption[:60]}")

@@ -559,19 +559,21 @@ async def codici_da_testo(testo: str) -> dict:
     import json as _json
     if not (testo or "").strip():
         return {}
+    # Come in leggi_ricambio: un guasto dell'AI deve uscire, altrimenti si confonde
+    # con "ho letto e non c'era niente" e la foto viene marcata a torto.
+    resp = await _client.chat.complete_async(
+        model=TEXT_MODEL,
+        messages=[{"role": "system", "content": SYSTEM_RICAMBIO_CAMPI},
+                  {"role": "user", "content": testo[:12000]}],
+        response_format={"type": "json_object"},
+        max_tokens=800,
+    )
     try:
-        resp = await _client.chat.complete_async(
-            model=TEXT_MODEL,
-            messages=[{"role": "system", "content": SYSTEM_RICAMBIO_CAMPI},
-                      {"role": "user", "content": testo[:12000]}],
-            response_format={"type": "json_object"},
-            max_tokens=800,
-        )
         dati = _json.loads(resp.choices[0].message.content or "{}")
-        if isinstance(dati, dict) and isinstance(dati.get("ricambi"), list):
-            return scarta_targhe(dati)
     except Exception:
-        pass
+        return {}
+    if isinstance(dati, dict) and isinstance(dati.get("ricambi"), list):
+        return scarta_targhe(dati)
     return {}
 
 
@@ -584,26 +586,27 @@ async def leggi_ricambio(data_url: str, ripiega_su_vision: bool = True) -> tuple
     si passa comunque l'OCR (le scatole nelle foto di lavorazione hanno il codice bene in
     vista), ma senza spendere una seconda chiamata a guardare l'immagine se non c'e' testo."""
     import json as _json
-    testo = ""
-    try:
-        testo = await ocr_image(data_url)
-    except Exception:
-        testo = ""
+    # ATTENZIONE: se la chiamata all'AI FALLISCE l'errore deve USCIRE, non essere
+    # inghiottito. Inghiottendolo, "l'AI e' giu'" diventava indistinguibile da "letta,
+    # nessun codice" — e il chiamante marcava la foto come analizzata per sempre.
+    # Durante il blocco Mistral del 12-13 agosto 15 foto sono state perse cosi'.
+    # Una lista vuota qui deve voler dire SOLO: ho guardato, non c'era niente.
+    testo = await ocr_image(data_url)      # se fallisce, l'eccezione sale
     if testo.strip():
+        resp = await _client.chat.complete_async(
+            model=TEXT_MODEL,
+            messages=[{"role": "system", "content": SYSTEM_RICAMBIO_CAMPI},
+                      {"role": "user", "content": testo[:12000]}],
+            response_format={"type": "json_object"},
+            max_tokens=800,
+        )
         try:
-            resp = await _client.chat.complete_async(
-                model=TEXT_MODEL,
-                messages=[{"role": "system", "content": SYSTEM_RICAMBIO_CAMPI},
-                          {"role": "user", "content": testo[:12000]}],
-                response_format={"type": "json_object"},
-                max_tokens=800,
-            )
             dati = _json.loads(resp.choices[0].message.content or "{}")
-            if isinstance(dati, dict) and isinstance(dati.get("ricambi"), list):
-                dati = scarta_targhe(dati)
-                return dati, ricambi_in_riga(dati)
         except Exception:
-            pass
+            dati = {}                      # risposta non JSON: e' una lettura a vuoto, non un guasto
+        if isinstance(dati, dict) and isinstance(dati.get("ricambi"), list):
+            dati = scarta_targhe(dati)
+            return dati, ricambi_in_riga(dati)
     if not ripiega_su_vision:
         return {}, ""
     # niente OCR: si torna a guardare la foto
