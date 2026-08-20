@@ -6,6 +6,7 @@ import os
 import uuid
 import asyncio
 import logging
+import html as _html
 import json
 import re
 import base64
@@ -353,6 +354,13 @@ class WorkOrder(BaseModel):
     # fatturazione: NULL = completata ma ancora da fatturare, resta nella lista dei sospesi
     fatturata_il: Optional[datetime] = None
     fatturata_da_nome: Optional[str] = None
+    # incasso: indipendente dalla fattura. incassato e residuo sono CALCOLATI dai pagamenti,
+    # non salvati: cosi non possono divergere dalla lista che li ha prodotti.
+    totale_dovuto: Optional[float] = None
+    pagamenti: List[dict] = []
+    incassato: float = 0.0
+    residuo: Optional[float] = None
+    saldata_il: Optional[datetime] = None
     created_at: datetime
     updated_at: datetime
 
@@ -487,6 +495,43 @@ def _workorder_for_user(wo: WorkOrder, user: dict) -> WorkOrder:
     return wo.model_copy(update={"scheda_tecnica": _scheda_for_user(wo.scheda_tecnica, user)})
 
 
+def _num(v) -> Optional[float]:
+    """Numeric di Postgres -> float. None resta None: «non lo so» e «zero» sono diversi."""
+    return None if v is None else float(v)
+
+
+def _pagamenti(row: dict) -> list:
+    """La lista degli incassi di una commessa, sempre una lista anche se il campo e' vuoto."""
+    p = row.get("pagamenti") or []
+    if isinstance(p, str):
+        try:
+            p = json.loads(p)
+        except Exception:
+            return []
+    return [x for x in p if isinstance(x, dict)]
+
+
+def _incassato(row: dict) -> float:
+    """Quanto e' entrato in cassa su questa commessa: la somma degli acconti.
+    Si ricalcola sempre dalla lista, non si tiene un totale a parte che puo' sfasarsi."""
+    tot = 0.0
+    for x in _pagamenti(row):
+        try:
+            tot += float(x.get("importo") or 0)
+        except (TypeError, ValueError):
+            continue
+    return round(tot, 2)
+
+
+def _residuo(row: dict) -> Optional[float]:
+    """Quanto deve ancora dare il cliente. None se non sappiamo quanto costa il lavoro:
+    meglio non dire niente che dire un residuo inventato."""
+    dovuto = _num(row.get("totale_dovuto"))
+    if dovuto is None:
+        return None
+    return round(dovuto - _incassato(row), 2)
+
+
 def row_to_workorder(row: dict) -> WorkOrder:
     scheda = row.get("scheda_tecnica") or {}
     if isinstance(scheda, str):
@@ -512,6 +557,11 @@ def row_to_workorder(row: dict) -> WorkOrder:
         approvata_da_nome=row.get("approvata_da_nome"),
         fatturata_il=row.get("fatturata_il"),
         fatturata_da_nome=row.get("fatturata_da_nome"),
+        totale_dovuto=_num(row.get("totale_dovuto")),
+        pagamenti=_pagamenti(row),
+        incassato=_incassato(row),
+        residuo=_residuo(row),
+        saldata_il=row.get("saldata_il"),
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
@@ -623,6 +673,14 @@ async def startup():
         await conn.execute("ALTER TABLE work_orders ADD COLUMN IF NOT EXISTS preventivo_star_id TEXT")
         await conn.execute("ALTER TABLE work_orders ADD COLUMN IF NOT EXISTS fatturata_il TIMESTAMPTZ")
         await conn.execute("ALTER TABLE work_orders ADD COLUMN IF NOT EXISTS fatturata_da_nome TEXT")
+        # INCASSO. Separato dalla fattura, perche' in officina succedono in ordine diverso:
+        # la diagnosi si paga in contanti sul posto senza fattura, la commessa di un'azienda
+        # si fattura e si incassa venti giorni dopo. Sono due spunte indipendenti, non una fila.
+        # I pagamenti sono una LISTA, non un totale: qui si lavora ad acconti («rimane 150»,
+        # «deve dare ancora 10»), e con un solo numero il residuo si perde.
+        await conn.execute("ALTER TABLE work_orders ADD COLUMN IF NOT EXISTS totale_dovuto NUMERIC(10,2)")
+        await conn.execute("ALTER TABLE work_orders ADD COLUMN IF NOT EXISTS pagamenti JSONB NOT NULL DEFAULT '[]'::jsonb")
+        await conn.execute("ALTER TABLE work_orders ADD COLUMN IF NOT EXISTS saldata_il TIMESTAMPTZ")
         # Fornitori: il titolare scrive a penna F1, F2... sul documento per dire da chi arriva.
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS fornitori (
@@ -1129,6 +1187,95 @@ async def annulla_fatturata(order_id: str, admin: dict = Depends(require_admin))
         "UPDATE work_orders SET fatturata_il=NULL, fatturata_da_nome=NULL, updated_at=$1 WHERE id=$2",
         now_utc(), order_id,
     )
+    aggiornata = await fetchrow("SELECT * FROM work_orders WHERE id=$1", order_id)
+    return _workorder_for_user(row_to_workorder(aggiornata), admin)
+
+
+class IncassoIn(BaseModel):
+    importo: float
+    # quanto costa il lavoro in tutto. Si manda la prima volta; dopo resta quello,
+    # a meno che non lo si voglia correggere.
+    totale_dovuto: Optional[float] = None
+    mezzo: Optional[str] = None       # contanti, bancomat, bonifico... testo libero
+    nota: Optional[str] = None
+
+
+@api.post("/work-orders/{order_id}/incasso", response_model=WorkOrder)
+async def registra_incasso(order_id: str, body: IncassoIn, admin: dict = Depends(require_admin)):
+    """Registra i soldi entrati per questa commessa. Lo possono fare tutti i titolari.
+
+    E' un ACCONTO, non un interruttore: se l'importo copre il totale la commessa risulta
+    saldata, se copre solo una parte resta il residuo. In officina si lavora cosi — «rimane
+    150», «deve dare ancora 10» — e con una spunta sola quei casi si perderebbero.
+
+    Non tocca ne' lo stato del lavoro ne' la fattura: incasso e fattura sono cose diverse
+    e capitano anche in ordine inverso (la diagnosi si paga in contanti e basta)."""
+    row = await fetchrow("SELECT * FROM work_orders WHERE id=$1", order_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Commessa non trovata")
+    try:
+        importo = round(float(body.importo), 2)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Importo non valido")
+    if importo <= 0:
+        raise HTTPException(status_code=400, detail="L'importo dev'essere maggiore di zero")
+
+    dovuto = _num(row.get("totale_dovuto"))
+    if body.totale_dovuto is not None:
+        try:
+            dovuto = round(float(body.totale_dovuto), 2)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="Totale non valido")
+        if dovuto < 0:
+            raise HTTPException(status_code=400, detail="Il totale non puo' essere negativo")
+
+    ora = now_utc()
+    pagamenti = _pagamenti(row) + [{
+        "il": ora.isoformat(),
+        "importo": importo,
+        "da_nome": admin["full_name"],
+        "mezzo": (body.mezzo or "").strip() or None,
+        "nota": (body.nota or "").strip() or None,
+    }]
+    incassato = round(sum(float(p.get("importo") or 0) for p in pagamenti), 2)
+    # saldata solo se sappiamo quanto costa E l'abbiamo coperto. Senza il totale non si
+    # puo' dire che e' saldata: si sa solo che qualcosa e' entrato.
+    saldata = ora if (dovuto is not None and incassato + 0.005 >= dovuto) else None
+
+    await execute(
+        """UPDATE work_orders
+              SET pagamenti=$1::jsonb, totale_dovuto=$2, saldata_il=$3, updated_at=$4
+            WHERE id=$5""",
+        json.dumps(pagamenti), dovuto, saldata, ora, order_id,
+    )
+    logger.info(f"incasso {order_id}: +{importo:.2f} da {admin['full_name']}, "
+                f"totale incassato {incassato:.2f}" + (" — SALDATA" if saldata else ""))
+    aggiornata = await fetchrow("SELECT * FROM work_orders WHERE id=$1", order_id)
+    return _workorder_for_user(row_to_workorder(aggiornata), admin)
+
+
+@api.post("/work-orders/{order_id}/annulla-incasso", response_model=WorkOrder)
+async def annulla_incasso(order_id: str, admin: dict = Depends(require_admin)):
+    """Toglie l'ultimo incasso registrato: capita di sbagliare cifra o commessa.
+    Si toglie solo l'ultimo, non si azzera tutto: gli acconti precedenti sono veri."""
+    row = await fetchrow("SELECT * FROM work_orders WHERE id=$1", order_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Commessa non trovata")
+    pagamenti = _pagamenti(row)
+    if not pagamenti:
+        raise HTTPException(status_code=400, detail="Nessun incasso da annullare")
+    tolto = pagamenti.pop()
+    ora = now_utc()
+    dovuto = _num(row.get("totale_dovuto"))
+    incassato = round(sum(float(p.get("importo") or 0) for p in pagamenti), 2)
+    saldata = row.get("saldata_il") if (dovuto is not None and incassato + 0.005 >= dovuto) else None
+    await execute(
+        """UPDATE work_orders
+              SET pagamenti=$1::jsonb, saldata_il=$2, updated_at=$3
+            WHERE id=$4""",
+        json.dumps(pagamenti), saldata, ora, order_id,
+    )
+    logger.info(f"incasso annullato su {order_id}: -{tolto.get('importo')} da {admin['full_name']}")
     aggiornata = await fetchrow("SELECT * FROM work_orders WHERE id=$1", order_id)
     return _workorder_for_user(row_to_workorder(aggiornata), admin)
 
@@ -2069,6 +2216,14 @@ class OmniusPreventivoOut(BaseModel):
     iva: float
     totale: float
     dati_mancanti: List[str] = Field(default_factory=list)
+    # Stato dei soldi, per chi tiene la contabilita' dall'altra parte. Sono due cose
+    # distinte e possono succedere in ordine inverso: la diagnosi si paga in contanti
+    # senza fattura, la commessa aziendale si fattura e si incassa settimane dopo.
+    fatturata_il: Optional[datetime] = None
+    saldata_il: Optional[datetime] = None
+    totale_dovuto: Optional[float] = None
+    incassato: float = 0.0
+    residuo: Optional[float] = None
 
 
 @api.get("/v1/omnius/preventivi", response_model=List[OmniusPreventivoOut],
@@ -2086,7 +2241,8 @@ async def omnius_preventivi(solo_nuovi: bool = True, limit: int = 20):
     if solo_nuovi:
         conds.append("preventivo_inviato_il IS NULL")
     rows = await fetch(
-        f"""SELECT id, plate, customer, vehicle, description, star_doc_id, updated_at
+        f"""SELECT id, plate, customer, vehicle, description, star_doc_id, updated_at,
+                   fatturata_il, saldata_il, totale_dovuto, pagamenti
               FROM work_orders WHERE {' AND '.join(conds)}
              ORDER BY updated_at DESC LIMIT $1""",
         max(1, min(limit, 100)),
@@ -2126,6 +2282,8 @@ async def omnius_preventivi(solo_nuovi: bool = True, limit: int = 20):
             work_order_id=w["id"], star_doc_id=w["star_doc_id"], plate=w["plate"],
             customer=w["customer"], vehicle=w["vehicle"], lavoro=w["description"],
             completata_il=w["updated_at"], righe=righe,
+            fatturata_il=w["fatturata_il"], saldata_il=w["saldata_il"],
+            totale_dovuto=_num(w["totale_dovuto"]), incassato=_incassato(w), residuo=_residuo(w),
             imponibile=p["imponibile"], iva_perc=p["iva_perc"], iva=p["iva"],
             totale=p["totale"], dati_mancanti=p.get("mancanze") or [],
         ))
@@ -2560,8 +2718,12 @@ async def _caption_photo(photo_id: str, data: bytes, content_type: str, kind: Op
             # del carrello dietro e perde l'etichetta, mentre la vista il codice l'ha letto.
             try:
                 campi, _ = await ai.leggi_ricambio(data_url, ripiega_su_vision=False)
-                if not (campi and campi.get("ricambi")) and caption:
-                    campi = await ai.codici_da_testo(caption)
+                # Le due letture si SOMMANO, non si sostituiscono. Prima la didascalia
+                # si leggeva solo se l'OCR non trovava nulla: sulla scatola del cuscinetto
+                # l'OCR leggeva SCIT-7A506 e cosi' 512 0359 10, che la vista aveva letto
+                # benissimo e scritto in didascalia, spariva. Persi meta' dei codici.
+                if caption:
+                    campi = ai.unisci_ricambi(campi, await ai.codici_da_testo(caption))
                 # Si arriva qui SOLO se l'AI ha risposto: allora "nessun codice" e' un
                 # esito vero e la foto si puo' marcare. Se l'AI e' giu' l'eccezione
                 # sale e la foto resta da leggere.
@@ -2773,9 +2935,14 @@ def fmt_durata_minuti(minuti: Optional[int]) -> str:
     return f"{h}h" if h else f"{m}m"
 
 
-async def _telegram_notify(text: str):
+async def _telegram_notify(text: str, apri_url: Optional[str] = None, apri_testo: str = "APRI COMMESSA"):
     """Manda un messaggio a ogni titolare agganciato al bot. Soft-fail: se Telegram non
-    risponde o non e' configurato, il lavoro del meccanico non ne risente in alcun modo."""
+    risponde o non e' configurato, il lavoro del meccanico non ne risente in alcun modo.
+
+    apri_url mette sotto al messaggio un bottone che APRE un indirizzo. E' di proposito
+    un bottone-link e non un bottone-comando: i comandi richiederebbero un webhook, cioe'
+    un indirizzo pubblico che chiunque puo' chiamare fingendosi Telegram. Il link invece
+    porta il titolare dentro l'app, dove e' gia' riconosciuto, e li' preme il tasto vero."""
     if not TELEGRAM_BOT_TOKEN:
         return
     try:
@@ -2794,6 +2961,8 @@ async def _telegram_notify(text: str):
                             "text": text,
                             "parse_mode": "HTML",
                             "disable_web_page_preview": True,
+                            **({"reply_markup": {"inline_keyboard": [[
+                                {"text": apri_testo, "url": apri_url}]]}} if apri_url else {}),
                         },
                     )
                     if resp.status_code == 403:
@@ -2832,16 +3001,19 @@ async def _leggi_codici_arretrati(order_id: str):
         for f in foto:
             try:
                 campi = {}
-                # la didascalia c'e' gia': si guarda prima quella, non costa una lettura nuova
+                # la didascalia c'e' gia': si legge quella, non costa una lettura nuova
                 if f["caption"]:
                     campi = await ai.codici_da_testo(f["caption"])
-                if not (campi and campi.get("ricambi")):
-                    path = _photo_path(order_id, f["id"], f["content_type"])
-                    if not path.exists():
-                        continue
+                # ...ma si legge ANCHE la foto e si sommano: occhio e OCR vedono cose
+                # diverse sulla stessa etichetta, e tenerne una sola butta via l'altra.
+                path = _photo_path(order_id, f["id"], f["content_type"])
+                if path.exists():
                     data_url = (f"data:{f['content_type']};base64,"
                                 f"{base64.b64encode(path.read_bytes()).decode()}")
-                    campi, _ = await ai.leggi_ricambio(data_url, ripiega_su_vision=False)
+                    da_ocr, _ = await ai.leggi_ricambio(data_url, ripiega_su_vision=False)
+                    campi = ai.unisci_ricambi(campi, da_ocr)
+                elif not campi:
+                    continue
                 # Si salva SEMPRE, anche la lista vuota: senza questo una foto senza
                 # codici resta con dati NULL e viene rianalizzata a ogni passaggio.
                 da_salvare = campi if (campi and campi.get("ricambi")) else {"ricambi": []}
@@ -2869,32 +3041,54 @@ async def _ricambi_della_commessa(order_id: str, scheda: dict) -> tuple[list, li
         # TUTTE le foto, non solo quelle scattate col pulsante RICAMBIO: il codice
         # sta spesso in una foto qualsiasi della lavorazione
         foto = await fetch(
-            "SELECT dati FROM order_photos WHERE work_order_id=$1 AND dati IS NOT NULL",
+            "SELECT dati, caption FROM order_photos WHERE work_order_id=$1 AND dati IS NOT NULL",
             order_id,
         )
+        # UNA FOTO = UN PEZZO. I codici letti nella STESSA foto non sono ricambi
+        # diversi: sono lo stesso articolo scritto in modi diversi sulla stessa
+        # etichetta (il marchio, il modello, il codice a listino, il lotto). Sulla
+        # scatola del cuscinetto ne uscivano tre — 42S25, 6022161/26, 511 0095 10 —
+        # e diventavano tre righe: tre volte gli stessi suggerimenti, e soprattutto
+        # tre ricambi da pagare al posto di uno. Il pezzo e' UNO, i codici sono le
+        # sue chiavi: si tiene la voce piu' descrittiva e le altre diventano
+        # codici alternativi, che e' esattamente quello che servira' per prezzarlo.
         visti = set()
         for f in foto:
             dati = f["dati"]
             if isinstance(dati, str):
                 dati = json.loads(dati)
-            for v in (dati or {}).get("ricambi") or []:
-                if not isinstance(v, dict):
-                    continue
-                codice = (v.get("codice") or "").strip()
-                if not codice or codice.upper() in visti:
-                    continue
-                visti.add(codice.upper())
-                # I codici alternativi stampati sulla stessa etichetta: spesso e' uno di
-                # quelli, non il principale, quello con cui l'officina trova il pezzo.
-                alt = [str(a).strip() for a in (v.get("codici_alternativi") or [])
-                       if str(a).strip()]
-                dalle_foto.append({
-                    "codice": codice,
-                    "codici_alternativi": alt,
-                    "marca": (v.get("marca") or "").strip(),
-                    "descrizione": (v.get("descrizione") or "").strip(),
-                    "quantita": v.get("quantita") or 1,
-                })
+            voci = [v for v in ((dati or {}).get("ricambi") or []) if isinstance(v, dict)
+                    and _codice_norm(v.get("codice") or "")]
+            if not voci:
+                continue
+            # capofila: quella che dice cos'e' il pezzo; a pari merito la prima letta
+            voci.sort(key=lambda v: (not (v.get("descrizione") or "").strip(),))
+            capo, altre = voci[0], voci[1:]
+
+            chiavi = {_codice_norm(v.get("codice")) for v in voci}
+            chiavi |= {_codice_norm(a) for v in voci for a in (v.get("codici_alternativi") or [])}
+            chiavi.discard("")
+            if chiavi & visti:      # pezzo gia' visto in un'altra foto: non si raddoppia
+                continue
+            visti |= chiavi
+
+            alt = [str(v.get("codice")).strip() for v in altre if str(v.get("codice") or "").strip()]
+            alt += [str(a).strip() for v in voci for a in (v.get("codici_alternativi") or [])
+                    if str(a).strip()]
+            dalle_foto.append({
+                "codice": (capo.get("codice") or "").strip(),
+                # tutti gli altri codici della stessa etichetta: spesso e' uno di loro,
+                # non il principale, quello con cui il pezzo si trova a listino
+                "codici_alternativi": list(dict.fromkeys(alt)),
+                "marca": (capo.get("marca") or "").strip(),
+                "descrizione": (capo.get("descrizione") or "").strip(),
+                # Su 152 codici, 32 arrivano senza descrizione e restavano senza
+                # suggerimenti: la ricerca a listino parte da cosa E' il pezzo.
+                # La didascalia della foto lo dice comunque («cuscinetto a sfere»,
+                # «braccio di comando acceleratore»), quindi si tiene come ripiego.
+                "didascalia": (f["caption"] or "").strip(),
+                "quantita": capo.get("quantita") or 1,
+            })
     except Exception as e:
         logger.warning(f"lettura ricambi da foto: {e}")
     return a_mano, dalle_foto
@@ -3032,8 +3226,10 @@ async def _avvisa_lavoro_completato(order_id: str, worker_name: str):
         except Exception as e:
             logger.warning(f"preventivo per il messaggio: {e}")
 
-        righe += ["", f"{PUBLIC_BASE_URL}/order/{order_id}"]
-        await _telegram_notify("\n".join(righe))
+        # l'indirizzo non si scrive piu' nel testo: sta nel bottone qui sotto
+        await _telegram_notify("\n".join(righe),
+                               apri_url=f"{PUBLIC_BASE_URL}/order/{order_id}",
+                               apri_testo="APRI E REGISTRA L'INCASSO")
     except Exception as e:
         logger.warning(f"avviso completamento fallito: {e}")
 
@@ -3100,7 +3296,7 @@ async def _aggiorna_catalogo(righe: list, fornitore: Optional[str], iva_inclusa:
                      codice=$2,
                      descrizione=COALESCE(NULLIF($3,''), catalogo_ricambi.descrizione),
                      costo=$5, fornitore=$6, origine='bolla', aggiornato_il=$7""",
-                norm, codice, (r.get("descrizione") or "").strip(), (r.get("marca") or "").strip() or None,
+                norm, codice, _html.unescape((r.get("descrizione") or "").strip()), (r.get("marca") or "").strip() or None,
                 round(costo, 2), fornitore, now_utc(),
             )
         except Exception as e:
@@ -3188,6 +3384,30 @@ async def _suggerisci_da_catalogo(descrizione: str, veicolo: str, limite: int = 
     # le parole del veicolo aiutano a scegliere fra 300 filtri olio uguali
     marca = [p for p in re.split(r"[^a-zA-Z0-9]+", (veicolo or "").lower()) if len(p) > 2][:2]
 
+    # QUAL E' LA PAROLA CHE CONTA. Quando arriva una descrizione secca («filtro
+    # carburante») e' la prima. Ma qui arriva anche la didascalia della foto, che e'
+    # una frase: «Nella foto si vede un cuscinetto a sfere...». Li' la prima parola e'
+    # "foto", e siccome e' obbligatoria azzerava ogni risultato.
+    # A dire qual e' il nome del pezzo e' il listino stesso: le sue descrizioni
+    # cominciano col pezzo (CUSCINETTO..., FILTRO ARIA...). Si prende quindi la prima
+    # parola del testo che nel listino apre almeno una descrizione. "foto" e "vede"
+    # non aprono niente, "cuscinetto" si'.
+    obbligatoria = parole[0]
+    try:
+        r = await fetchrow(
+            """SELECT t.p FROM unnest($1::text[]) WITH ORDINALITY AS t(p, ord)
+                WHERE EXISTS (SELECT 1 FROM catalogo_ricambi c
+                               WHERE lower(c.descrizione) LIKE t.p || '%')
+                ORDER BY t.ord LIMIT 1""",
+            parole[:12],
+        )
+        if r and r["p"]:
+            obbligatoria = r["p"]
+    except Exception as e:
+        logger.warning(f"parola pezzo: {e}")
+    # le parole per il punteggio partono da quella: quelle prima sono chiacchiera
+    parole = parole[parole.index(obbligatoria):] if obbligatoria in parole else parole
+
     # Si ordina per quante parole combaciano, non si pretende che combacino tutte:
     # «pastiglie freno anteriori» deve preferire chi dice anche «anteriori», ma non
     # scartare chi scrive solo «pastiglie freno». La prima parola pero' e' obbligatoria,
@@ -3204,7 +3424,7 @@ async def _suggerisci_da_catalogo(descrizione: str, veicolo: str, limite: int = 
                   AND descrizione ~* ('\\m' || $4)
                 ORDER BY punti_pezzo DESC, punti_veicolo DESC, prezzo_vendita
                 LIMIT $3""",
-            parole[:4], marca or [""], max(1, min(limite, 10)), parole[0],
+            parole[:4], marca or [""], max(1, min(limite, 10)), obbligatoria,
         )
     except Exception as e:
         logger.warning(f"suggerimenti catalogo: {e}")
@@ -3348,10 +3568,13 @@ async def calcola_preventivo(order_id: str) -> dict:
             # niente prezzo: si propongono candidati dal catalogo, per descrizione.
             # La scelta resta al titolare: si suggerisce, non si applica.
             sugg = await _suggerisci_da_catalogo(
-                f.get("descrizione") or "", o["vehicle"] or "")
+                f.get("descrizione") or f.get("didascalia") or "", o["vehicle"] or "")
             senza_costo.append({
                 "codice": f["codice"], "descrizione": f.get("descrizione") or "",
                 "marca": f.get("marca") or "", "quantita": q,
+                # gli altri codici letti sulla stessa etichetta: se il titolare
+                # riconosce il pezzo da uno di quelli, deve poterlo vedere
+                "codici_alternativi": f.get("codici_alternativi") or [],
                 "suggerimenti": sugg,
             })
 
@@ -3587,6 +3810,19 @@ async def correggi_documento(doc_id: str, body: DocumentoUpdate, admin: dict = D
     parti.append(f"updated_at=${i}"); vals.append(now_utc()); i += 1
     vals.append(doc_id)
     await execute(f"UPDATE documenti_fornitore SET {', '.join(parti)} WHERE id=${i}", *vals)
+
+    # Anche la CORREZIONE deve aggiornare il listino, non solo il primo caricamento.
+    # Il titolare corregge proprio quando l'AI ha sbagliato a leggere un prezzo: se il
+    # listino resta col numero vecchio, la correzione non serve a niente.
+    if body.righe is not None:
+        doc = await fetchrow("SELECT fornitore, codice_fornitore FROM documenti_fornitore WHERE id=$1", doc_id)
+        iva_inclusa = False
+        if doc and doc["codice_fornitore"]:
+            f = await fetchrow("SELECT iva_inclusa FROM fornitori WHERE codice=$1", doc["codice_fornitore"])
+            iva_inclusa = bool(f and f["iva_inclusa"])
+        imp = await _impostazioni_prezzi()
+        await _aggiorna_catalogo(righe, (doc or {}).get("fornitore"), iva_inclusa, imp["iva"])
+
     return _riga_documento(dict(await fetchrow("SELECT * FROM documenti_fornitore WHERE id=$1", doc_id)))
 
 
@@ -3655,7 +3891,7 @@ async def salva_catalogo(voci: List[VoceCatalogoIn], admin: dict = Depends(requi
                  prezzo_vendita=COALESCE($6, catalogo_ricambi.prezzo_vendita),
                  fornitore=COALESCE($7, catalogo_ricambi.fornitore),
                  origine='magazzino', aggiornato_il=$8""",
-            norm, v.codice.strip(), (v.descrizione or "").strip(),
+            norm, v.codice.strip(), _html.unescape((v.descrizione or "").strip()),
             (v.marca or "").strip() or None, costo, vendita,
             (v.fornitore or "").strip() or None, now_utc(),
         )

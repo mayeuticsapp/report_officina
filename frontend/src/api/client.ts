@@ -85,9 +85,24 @@ export type WorkOrder = {
   /** null su una commessa completata = fattura ancora da preparare */
   fatturata_il?: string | null;
   fatturata_da_nome?: string | null;
+  /** Incasso: indipendente dalla fattura, perché in officina capitano in ordine diverso.
+   *  incassato e residuo li calcola il server dai pagamenti, non si sommano qui. */
+  totale_dovuto?: number | null;
+  pagamenti?: { il: string; importo: number; da_nome?: string; mezzo?: string | null; nota?: string | null }[];
+  incassato?: number;
+  residuo?: number | null;
+  saldata_il?: string | null;
   created_at: string;
   updated_at: string;
 };
+
+/** Le commesse finite e non ancora saldate: i soldi che l'officina deve ancora vedere.
+ *  Restano in lista finché non sono coperte — una notifica si perde, una lista no. */
+export function daIncassare(orders: WorkOrder[]): WorkOrder[] {
+  return orders
+    .filter((o) => o.status === "completed" && !o.saldata_il)
+    .sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime());
+}
 
 /** Le commesse finite di cui il titolare non ha ancora preparato la fattura. */
 export function daFatturare(orders: WorkOrder[]): WorkOrder[] {
@@ -625,6 +640,25 @@ export async function segnaFatturata(orderId: string): Promise<WorkOrder> {
   return api<WorkOrder>(`/work-orders/${orderId}/fatturata`, { method: "POST" });
 }
 
+/** Registra i soldi entrati. È un acconto: se copre il totale la commessa risulta saldata,
+ *  altrimenti resta il residuo. Il totale si manda la prima volta e poi resta quello. */
+export async function registraIncasso(
+  orderId: string,
+  importo: number,
+  totaleDovuto?: number,
+  mezzo?: string,
+): Promise<WorkOrder> {
+  return api<WorkOrder>(`/work-orders/${orderId}/incasso`, {
+    method: "POST",
+    body: JSON.stringify({ importo, totale_dovuto: totaleDovuto, mezzo }),
+  });
+}
+
+/** Toglie l'ultimo incasso registrato: capita di sbagliare cifra o commessa. */
+export async function annullaIncasso(orderId: string): Promise<WorkOrder> {
+  return api<WorkOrder>(`/work-orders/${orderId}/annulla-incasso`, { method: "POST" });
+}
+
 /* ---- Documenti dei fornitori: da qui arrivano i costi ---- */
 
 export type RigaDocumento = {
@@ -711,6 +745,8 @@ export type Preventivo = {
   /** pezzi visti nelle foto ma senza costo: manca la bolla del fornitore */
   ricambi_senza_costo: {
     codice: string; descrizione?: string; marca?: string; quantita: number;
+    /** gli altri codici stampati sulla stessa etichetta: il pezzo è uno solo */
+    codici_alternativi?: string[];
     /** candidati dal listino di magazzino, da confermare */
     suggerimenti?: {
       codice: string; descrizione?: string; marca?: string | null;

@@ -4,6 +4,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { useLocalSearchParams, useRouter, useFocusEffect } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { api, WorkOrder, WorkEvent, Preventivo, preventivoCommessa, collegaCodici } from "@/src/api/client";
+import { IncassoModal } from "@/src/components/IncassoModal";
 import { confirmDialog, showAlert } from "@/src/utils/dialog";
 import { VoiceChat } from "@/src/components/VoiceChat";
 import { VehicleHistory } from "@/src/components/VehicleHistory";
@@ -26,6 +27,7 @@ export default function AdminOrderDetail() {
   const [events, setEvents] = useState<WorkEvent[]>([]);
   const [prev, setPrev] = useState<Preventivo | null>(null);
   const [collegando, setCollegando] = useState<string | null>(null);
+  const [incasso, setIncasso] = useState<WorkOrder | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
 
@@ -166,6 +168,14 @@ export default function AdminOrderDetail() {
                     <Text style={styles.prevSottoManca}>
                       {r.descrizione ? `${r.descrizione} · ` : ""}nessun prezzo
                     </Text>
+                    {/* Gli altri codici stampati sulla stessa etichetta. Il pezzo e' uno
+                        solo: spesso il titolare lo riconosce da uno di questi, non dal
+                        principale. */}
+                    {(r.codici_alternativi || []).length > 0 ? (
+                      <Text style={styles.prevAltriCodici} numberOfLines={2}>
+                        sulla scatola anche: {(r.codici_alternativi || []).join(" · ")}
+                      </Text>
+                    ) : null}
                   </View>
                   <Text style={styles.prevImportoManca}>?</Text>
                 </View>
@@ -255,6 +265,49 @@ export default function AdminOrderDetail() {
           </View>
         ) : null}
 
+        {/* CASSA. Solo su lavoro finito: prima non c'e' niente da incassare.
+            Si arriva qui dal bottone del messaggio Telegram, quindi il tasto dev'essere
+            grande e subito sotto il totale, senza doverlo cercare. */}
+        {order.status === "completed" ? (
+          <View style={styles.cassaCard}>
+            {order.saldata_il ? (
+              <View style={styles.cassaSaldata}>
+                <Ionicons name="checkmark-circle" size={20} color={colors.active} />
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.cassaSaldataTxt}>SALDATA</Text>
+                  <Text style={styles.cassaSotto}>
+                    incassati {(order.incassato || 0).toFixed(2)} €
+                    {order.pagamenti && order.pagamenti.length > 1
+                      ? ` in ${order.pagamenti.length} volte` : ""}
+                  </Text>
+                </View>
+                <TouchableOpacity testID="btn-cassa-correggi" onPress={() => setIncasso(order)}>
+                  <Text style={styles.cassaCorreggi}>CORREGGI</Text>
+                </TouchableOpacity>
+              </View>
+            ) : (
+              <>
+                <View style={styles.cassaTesta}>
+                  <Text style={styles.cassaLabel}>CASSA</Text>
+                  <Text style={styles.cassaStato}>
+                    {(order.incassato || 0) > 0
+                      ? `acconto ${(order.incassato || 0).toFixed(2)} € · restano ${(order.residuo ?? 0).toFixed(2)} €`
+                      : "nessun incasso registrato"}
+                  </Text>
+                </View>
+                <TouchableOpacity
+                  testID="btn-incassato"
+                  style={styles.cassaBtn}
+                  onPress={() => setIncasso(order)}
+                >
+                  <Ionicons name="cash-outline" size={20} color={colors.textInverse} />
+                  <Text style={styles.cassaBtnTxt}>INCASSATO</Text>
+                </TouchableOpacity>
+              </>
+            )}
+          </View>
+        ) : null}
+
         <View style={styles.detailsCard}>
           <Row label="VEICOLO" value={order.vehicle} />
           <Row label="CLIENTE" value={order.customer} />
@@ -280,6 +333,12 @@ export default function AdminOrderDetail() {
           events.map((e) => <TimelineItem key={e.id} ev={e} />)
         )}
       </ScrollView>
+
+      <IncassoModal
+        commessa={incasso}
+        onChiudi={() => setIncasso(null)}
+        onFatto={(agg) => { setOrder(agg); setIncasso(agg); }}
+      />
     </SafeAreaView>
   );
 }
@@ -393,6 +452,23 @@ const styles = StyleSheet.create({
   prevImporto: { fontSize: 14, fontWeight: "800", color: colors.text },
   prevRigaSenzaCosto: { backgroundColor: colors.bgMuted, borderLeftWidth: 4, borderLeftColor: colors.idle },
   prevSottoManca: { fontSize: 11, color: colors.idle, marginTop: 1, fontWeight: "600" },
+  prevAltriCodici: { fontSize: 10, color: colors.textSecondary, marginTop: 2 },
+  cassaCard: {
+    borderWidth: 2, borderColor: colors.borderStrong, margin: spacing.md,
+    marginTop: 0, padding: spacing.md,
+  },
+  cassaTesta: { marginBottom: spacing.md },
+  cassaLabel: { fontSize: 11, letterSpacing: 2, fontWeight: "800", color: colors.textSecondary },
+  cassaStato: { fontSize: 14, fontWeight: "800", color: colors.text, marginTop: 4 },
+  cassaBtn: {
+    flexDirection: "row", gap: 10, alignItems: "center", justifyContent: "center",
+    backgroundColor: colors.active, paddingVertical: 16,
+  },
+  cassaBtnTxt: { color: colors.textInverse, fontWeight: "900", letterSpacing: 2, fontSize: 15 },
+  cassaSaldata: { flexDirection: "row", gap: 10, alignItems: "center" },
+  cassaSaldataTxt: { fontSize: 15, fontWeight: "900", letterSpacing: 1.5, color: colors.active },
+  cassaSotto: { fontSize: 12, color: colors.textSecondary, marginTop: 2 },
+  cassaCorreggi: { fontSize: 11, fontWeight: "800", letterSpacing: 1, color: colors.textSecondary },
   prevSottoCatalogo: { color: colors.primary, fontWeight: "600" },
   prevImportoManca: { fontSize: 16, fontWeight: "900", color: colors.idle },
 

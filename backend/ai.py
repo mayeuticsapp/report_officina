@@ -19,6 +19,7 @@ ATTENZIONE — limiti noti del "cambio in un file solo":
    il cambio e' facile, non indolore — serve un test di qualita' sul nuovo
    modello prima di andare in produzione.
 """
+import asyncio
 import os
 import logging
 from pathlib import Path
@@ -181,13 +182,39 @@ SYSTEM_DAILY_REPORT = (
 )
 
 
+async def _chat_ai(**kwargs):
+    return await con_ritenta(lambda: _client.chat.complete_async(**kwargs))
+
+
+async def con_ritenta(chiamata, *, tentativi: int = 4, attesa: float = 2.0):
+    """Esegue una chiamata all'AI ritentando quando risponde 429 (troppe richieste).
+
+    Serve perche' le foto arrivano a raffica: il meccanico ne carica sei di fila e
+    dalla terza in poi il servizio comincia a rifiutare. Senza ritenta il codice di
+    quelle foto e' perso. L'attesa raddoppia a ogni giro (2s, 4s, 8s).
+
+    Ritenta SOLO sul 429: un errore vero deve continuare a uscire, altrimenti torna
+    il guaio di prima — 'AI guasta' confuso con 'letto, nessun codice'."""
+    for giro in range(tentativi):
+        try:
+            return await chiamata()
+        except Exception as e:
+            testo = str(e)
+            ultimo = giro == tentativi - 1
+            if ultimo or ("429" not in testo and "rate limit" not in testo.lower()):
+                raise
+            pausa = attesa * (2 ** giro)
+            logger.info(f"AI ha risposto 429, riprovo tra {pausa:.0f}s (giro {giro + 1}/{tentativi})")
+            await asyncio.sleep(pausa)
+
+
 # ---------------- Wrapper (le uniche funzioni che il resto dell'app usa) ----------------
 async def chat(messages: list, *, json: bool = False, max_tokens: int = 800) -> str:
     """Chat di testo. json=True forza una risposta JSON. Ritorna il contenuto del messaggio."""
     kwargs = {"model": TEXT_MODEL, "messages": messages, "max_tokens": max_tokens}
     if json:
         kwargs["response_format"] = {"type": "json_object"}
-    resp = await _client.chat.complete_async(**kwargs)
+    resp = await _chat_ai(**kwargs)
     return resp.choices[0].message.content or ""
 
 
@@ -199,9 +226,9 @@ async def embed(inputs: List[str]) -> List[list]:
 
 async def ocr_image(data_url: str) -> str:
     """OCR di un'immagine (data: URL) -> testo estratto (markdown concatenato)."""
-    resp = await _client.ocr.process_async(
+    resp = await con_ritenta(lambda: _client.ocr.process_async(
         model=OCR_MODEL, document={"type": "image_url", "image_url": data_url}
-    )
+    ))
     return " ".join((p.markdown or "") for p in (resp.pages or []))
 
 
@@ -325,6 +352,37 @@ SYSTEM_RICAMBIO = (
 import re as _re
 
 _TARGA_IT = _re.compile(r"^[A-Z]{2}\d{3}[A-Z]{2}$")
+
+
+def unisci_ricambi(*insiemi: dict) -> dict:
+    """Mette insieme i ricambi letti da fonti diverse, senza doppioni.
+
+    L'OCR e l'occhio che guarda la foto sbagliano in modo diverso e vedono cose
+    diverse: sulla stessa scatola l'OCR ha letto SCIT-7A506 mentre la vista leggeva
+    512 0359 10. Prima erano alternative — si usava la seconda solo se la prima non
+    trovava niente — e meta' dei codici andava persa. Vanno unite.
+
+    A parita' di codice vince la voce piu' completa: quella con la descrizione."""
+    fuori: dict = {}
+    for ins in insiemi:
+        for v in ((ins or {}).get("ricambi") or []):
+            if not isinstance(v, dict):
+                continue
+            chiave = _re.sub(r"[^A-Z0-9]", "", str(v.get("codice") or "").upper())
+            if not chiave:
+                continue
+            gia = fuori.get(chiave)
+            if not gia:
+                fuori[chiave] = v
+                continue
+            # tiene quella che dice di piu'
+            if not (gia.get("descrizione") or "").strip() and (v.get("descrizione") or "").strip():
+                fuori[chiave] = {**v, "codici_alternativi": list(dict.fromkeys(
+                    [*(gia.get("codici_alternativi") or []), *(v.get("codici_alternativi") or [])]))}
+            elif v.get("codici_alternativi"):
+                gia["codici_alternativi"] = list(dict.fromkeys(
+                    [*(gia.get("codici_alternativi") or []), *v["codici_alternativi"]]))
+    return {"ricambi": list(fuori.values())}
 
 
 def recupera_codici_dal_testo(dati: dict, testo_ocr: str) -> dict:
@@ -539,7 +597,7 @@ async def leggi_documento_fornitore(data_url: str) -> dict:
     if not testo.strip():
         return {"errore": "Non riesco a leggere il documento: rifai la foto con piu' luce."}
 
-    resp = await _client.chat.complete_async(
+    resp = await _chat_ai(
         model=TEXT_MODEL,
         messages=[{"role": "system", "content": SYSTEM_DOCUMENTO_FORNITORE},
                   {"role": "user", "content": testo[:16000]}],
@@ -624,7 +682,7 @@ async def codici_da_testo(testo: str) -> dict:
         return {}
     # Come in leggi_ricambio: un guasto dell'AI deve uscire, altrimenti si confonde
     # con "ho letto e non c'era niente" e la foto viene marcata a torto.
-    resp = await _client.chat.complete_async(
+    resp = await _chat_ai(
         model=TEXT_MODEL,
         messages=[{"role": "system", "content": SYSTEM_RICAMBIO_CAMPI},
                   {"role": "user", "content": testo[:12000]}],
@@ -656,7 +714,7 @@ async def leggi_ricambio(data_url: str, ripiega_su_vision: bool = True) -> tuple
     # Una lista vuota qui deve voler dire SOLO: ho guardato, non c'era niente.
     testo = await ocr_image(data_url)      # se fallisce, l'eccezione sale
     if testo.strip():
-        resp = await _client.chat.complete_async(
+        resp = await _chat_ai(
             model=TEXT_MODEL,
             messages=[{"role": "system", "content": SYSTEM_RICAMBIO_CAMPI},
                       {"role": "user", "content": testo[:12000]}],
@@ -685,7 +743,7 @@ async def describe_image(data_url: str, kind: Optional[str] = None) -> str:
         else SYSTEM_RICAMBIO if kind == "ricambio"
         else SYSTEM_PHOTO_CAPTION
     )
-    resp = await _client.chat.complete_async(
+    resp = await _chat_ai(
         model=VISION_MODEL,
         messages=[{"role": "user", "content": [
             {"type": "text", "text": istruzione},
@@ -731,7 +789,7 @@ async def leggi_libretto(data_url: str) -> tuple[dict, str]:
     except Exception:
         testo = ""
     if testo.strip():
-        resp = await _client.chat.complete_async(
+        resp = await _chat_ai(
             model=TEXT_MODEL,
             messages=[{"role": "system", "content": SYSTEM_LIBRETTO_CAMPI},
                       {"role": "user", "content": testo[:12000]}],

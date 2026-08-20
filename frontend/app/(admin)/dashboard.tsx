@@ -3,7 +3,8 @@ import { View, Text, StyleSheet, ScrollView, RefreshControl, ActivityIndicator, 
 import { Ionicons } from "@expo/vector-icons";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useRouter } from "expo-router";
-import { api, LiveStatus, WorkEvent, WorkOrder, daFatturare, segnaFatturata, fmtDurata } from "@/src/api/client";
+import { api, LiveStatus, WorkEvent, WorkOrder, daFatturare, daIncassare, segnaFatturata, fmtDurata } from "@/src/api/client";
+import { IncassoModal } from "@/src/components/IncassoModal";
 import { useAutoRefresh } from "@/src/hooks/use-auto-refresh";
 import { avviaAllarme, fermaAllarme, preparaAudio } from "@/src/utils/allarme";
 import { colors, spacing } from "@/src/theme";
@@ -13,6 +14,10 @@ export default function Dashboard() {
   const [live, setLive] = useState<LiveStatus[]>([]);
   const [recent, setRecent] = useState<WorkEvent[]>([]);
   const [sospese, setSospese] = useState<WorkOrder[]>([]);
+  // I soldi che l'officina deve ancora vedere. Lista separata da quella delle fatture:
+  // incasso e fattura non vanno in fila, capitano anche in ordine inverso.
+  const [scoperte, setScoperte] = useState<WorkOrder[]>([]);
+  const [incasso, setIncasso] = useState<WorkOrder | null>(null);
   const [allarme, setAllarme] = useState(false);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -34,6 +39,7 @@ export default function Dashboard() {
 
       const daFare = daFatturare(ords);
       setSospese(daFare);
+      setScoperte(daIncassare(ords));
 
       const ids = new Set(daFare.map((o) => o.id));
       if (vistiRef.current === null) {
@@ -56,6 +62,13 @@ export default function Dashboard() {
     setSospese((s) => s.filter((o) => o.id !== id));   // sparisce subito, senza attese
     try { await segnaFatturata(id); } catch (e) { console.warn(e); load(); }
   }, [load]);
+
+  /** Dopo un incasso la riga sparisce solo se e' stata coperta del tutto. */
+  const incassato = useCallback((agg: WorkOrder) => {
+    setScoperte((s) => (agg.saldata_il ? s.filter((o) => o.id !== agg.id)
+                                       : s.map((o) => (o.id === agg.id ? agg : o))));
+    setIncasso((c) => (c && c.id === agg.id ? agg : c));
+  }, []);
 
   useAutoRefresh(useCallback(() => { load(); setTick((x) => x + 1); }, [load]));
 
@@ -149,6 +162,43 @@ export default function Dashboard() {
           </>
         ) : null}
 
+        {/* Da incassare: i soldi che devono ancora entrare. Sta sotto le fatture perche'
+            il lavoro si fattura prima, ma non e' una fila: si puo' incassare senza fattura
+            (la diagnosi pagata in contanti) e fatturare senza aver incassato (le aziende). */}
+        {scoperte.length > 0 ? (
+          <>
+            <Text style={styles.sectionLabel}>DA INCASSARE ({scoperte.length})</Text>
+            {scoperte.map((o) => {
+              const parziale = (o.incassato || 0) > 0;
+              return (
+                <View key={o.id} testID={`da-incassare-${o.id}`} style={styles.fattRow}>
+                  <TouchableOpacity style={{ flex: 1 }} onPress={() => router.push(`/(admin)/order/${o.id}` as any)}>
+                    <Text style={styles.fattTarga}>{o.plate?.toUpperCase()}</Text>
+                    <Text style={styles.fattSub} numberOfLines={1}>
+                      {[o.vehicle, o.customer].filter(Boolean).join(" \u00b7 ")}
+                    </Text>
+                    <Text style={[styles.fattOre, parziale && styles.incassoParziale]}>
+                      {parziale
+                        ? `acconto ${(o.incassato || 0).toFixed(2)} \u00b7 restano ${(o.residuo ?? 0).toFixed(2)} \u20ac`
+                        : o.totale_dovuto != null
+                          ? `${o.totale_dovuto.toFixed(2)} \u20ac da avere`
+                          : "importo da definire"}
+                    </Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    testID={`btn-incassa-${o.id}`}
+                    style={[styles.fattBtn, styles.incassaBtn]}
+                    onPress={() => setIncasso(o)}
+                  >
+                    <Ionicons name="cash-outline" size={16} color={colors.textInverse} />
+                    <Text style={styles.fattBtnText}>INCASSATO</Text>
+                  </TouchableOpacity>
+                </View>
+              );
+            })}
+          </>
+        ) : null}
+
         {/* Workers live */}
         <Text style={styles.sectionLabel}>OPERAI IN TEMPO REALE</Text>
         {live.length === 0 ? (
@@ -165,6 +215,8 @@ export default function Dashboard() {
           recent.map((e) => <RecentRow key={e.id} e={e} />)
         )}
       </ScrollView>
+
+      <IncassoModal commessa={incasso} onChiudi={() => setIncasso(null)} onFatto={incassato} />
     </SafeAreaView>
   );
 }
@@ -260,6 +312,9 @@ const styles = StyleSheet.create({
     flexDirection: "row", alignItems: "center", gap: 6,
   },
   fattBtnText: { fontSize: 11, fontWeight: "800", letterSpacing: 1, color: colors.textInverse },
+  // il verde dei soldi: si distingue a colpo d'occhio dalla spunta della fattura
+  incassaBtn: { backgroundColor: colors.active },
+  incassoParziale: { color: colors.idle },
   liveRow: {
     marginHorizontal: spacing.lg, marginBottom: spacing.sm, padding: spacing.md,
     borderWidth: 1, borderColor: colors.border, flexDirection: "row", alignItems: "center",
