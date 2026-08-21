@@ -276,9 +276,7 @@ export default function AdminOrderDetail() {
                 <View style={{ flex: 1 }}>
                   <Text style={styles.cassaSaldataTxt}>SALDATA</Text>
                   <Text style={styles.cassaSotto}>
-                    incassati {(order.incassato || 0).toFixed(2)} €
-                    {order.pagamenti && order.pagamenti.length > 1
-                      ? ` in ${order.pagamenti.length} volte` : ""}
+                    {(order.incassato || 0).toFixed(2)} € il {fmtQuando(order.saldata_il)}
                   </Text>
                 </View>
                 <TouchableOpacity testID="btn-cassa-correggi" onPress={() => setIncasso(order)}>
@@ -294,6 +292,11 @@ export default function AdminOrderDetail() {
                       ? `acconto ${(order.incassato || 0).toFixed(2)} € · restano ${(order.residuo ?? 0).toFixed(2)} €`
                       : "nessun incasso registrato"}
                   </Text>
+                  {(order.pagamenti || []).map((p, i) => (
+                    <Text key={i} style={styles.cassaMovimento}>
+                      {p.importo.toFixed(2)} € {p.mezzo ? `· ${p.mezzo} ` : ""}· {fmtQuando(p.il)}
+                    </Text>
+                  ))}
                 </View>
                 <TouchableOpacity
                   testID="btn-incassato"
@@ -341,6 +344,16 @@ export default function AdminOrderDetail() {
       />
     </SafeAreaView>
   );
+}
+
+/** «20/08/26 22:16»: la data dell'incasso, come si legge su una ricevuta. */
+function fmtQuando(iso?: string | null): string {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  const due = (n: number) => String(n).padStart(2, "0");
+  return `${due(d.getDate())}/${due(d.getMonth() + 1)}/${String(d.getFullYear()).slice(2)} ` +
+         `${due(d.getHours())}:${due(d.getMinutes())}`;
 }
 
 function fmtMin(m: number) {
@@ -469,6 +482,7 @@ const styles = StyleSheet.create({
   cassaSaldataTxt: { fontSize: 15, fontWeight: "900", letterSpacing: 1.5, color: colors.active },
   cassaSotto: { fontSize: 12, color: colors.textSecondary, marginTop: 2 },
   cassaCorreggi: { fontSize: 11, fontWeight: "800", letterSpacing: 1, color: colors.textSecondary },
+  cassaMovimento: { fontSize: 11, color: colors.textSecondary, marginTop: 3 },
   prevSottoCatalogo: { color: colors.primary, fontWeight: "600" },
   prevImportoManca: { fontSize: 16, fontWeight: "900", color: colors.idle },
 

@@ -644,13 +644,15 @@ export async function segnaFatturata(orderId: string): Promise<WorkOrder> {
  *  altrimenti resta il residuo. Il totale si manda la prima volta e poi resta quello. */
 export async function registraIncasso(
   orderId: string,
-  importo: number,
+  /** una o più righe: metà contanti e metà carta è un incasso solo, diviso in due */
+  voci: { importo: number; mezzo?: string }[],
   totaleDovuto?: number,
-  mezzo?: string,
 ): Promise<WorkOrder> {
+  // il body va passato come OGGETTO: ci pensa api() a convertirlo.
+  // Convertendolo anche qui il server riceveva una stringa e rifiutava tutto con 422.
   return api<WorkOrder>(`/work-orders/${orderId}/incasso`, {
     method: "POST",
-    body: JSON.stringify({ importo, totale_dovuto: totaleDovuto, mezzo }),
+    body: { voci, totale_dovuto: totaleDovuto },
   });
 }
 

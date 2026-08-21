@@ -1191,13 +1191,32 @@ async def annulla_fatturata(order_id: str, admin: dict = Depends(require_admin))
     return _workorder_for_user(row_to_workorder(aggiornata), admin)
 
 
-class IncassoIn(BaseModel):
+class VoceIncasso(BaseModel):
+    """Una riga di pagamento: quanto e con che mezzo."""
     importo: float
+    mezzo: Optional[str] = None
+
+
+class IncassoIn(BaseModel):
+    # UNA riga sola: la strada semplice, resta valida.
+    importo: Optional[float] = None
+    mezzo: Optional[str] = None       # contanti, bancomat, carta, scalapay... testo libero
+    # PIU' righe insieme: capita spesso che uno paghi meta' in contanti e meta' con la
+    # carta. Registrarle in due volte funzionava ma costringeva a riaprire la schermata,
+    # e le due meta' finivano con orari diversi come se fossero due incassi distinti.
+    voci: Optional[List[VoceIncasso]] = None
     # quanto costa il lavoro in tutto. Si manda la prima volta; dopo resta quello,
     # a meno che non lo si voglia correggere.
     totale_dovuto: Optional[float] = None
-    mezzo: Optional[str] = None       # contanti, bancomat, bonifico... testo libero
     nota: Optional[str] = None
+
+    def righe(self) -> List[VoceIncasso]:
+        """Le righe da registrare, comunque siano arrivate."""
+        if self.voci:
+            return self.voci
+        if self.importo is not None:
+            return [VoceIncasso(importo=self.importo, mezzo=self.mezzo)]
+        return []
 
 
 @api.post("/work-orders/{order_id}/incasso", response_model=WorkOrder)
@@ -1213,12 +1232,19 @@ async def registra_incasso(order_id: str, body: IncassoIn, admin: dict = Depends
     row = await fetchrow("SELECT * FROM work_orders WHERE id=$1", order_id)
     if not row:
         raise HTTPException(status_code=404, detail="Commessa non trovata")
-    try:
-        importo = round(float(body.importo), 2)
-    except (TypeError, ValueError):
-        raise HTTPException(status_code=400, detail="Importo non valido")
-    if importo <= 0:
-        raise HTTPException(status_code=400, detail="L'importo dev'essere maggiore di zero")
+    voci = body.righe()
+    if not voci:
+        raise HTTPException(status_code=400, detail="Nessun importo da registrare")
+    pulite = []
+    for v in voci:
+        try:
+            imp = round(float(v.importo), 2)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="Importo non valido")
+        if imp <= 0:
+            raise HTTPException(status_code=400, detail="Ogni importo dev'essere maggiore di zero")
+        pulite.append((imp, (v.mezzo or "").strip() or None))
+    importo = round(sum(i for i, _ in pulite), 2)
 
     dovuto = _num(row.get("totale_dovuto"))
     if body.totale_dovuto is not None:
@@ -1229,14 +1255,17 @@ async def registra_incasso(order_id: str, body: IncassoIn, admin: dict = Depends
         if dovuto < 0:
             raise HTTPException(status_code=400, detail="Il totale non puo' essere negativo")
 
+    # stesso istante per tutte le righe dello stesso incasso: meta' contanti e meta'
+    # carta sono UN pagamento diviso in due, non due pagamenti in momenti diversi.
     ora = now_utc()
+    nota = (body.nota or "").strip() or None
     pagamenti = _pagamenti(row) + [{
         "il": ora.isoformat(),
-        "importo": importo,
+        "importo": imp,
         "da_nome": admin["full_name"],
-        "mezzo": (body.mezzo or "").strip() or None,
-        "nota": (body.nota or "").strip() or None,
-    }]
+        "mezzo": mezzo,
+        "nota": nota,
+    } for imp, mezzo in pulite]
     incassato = round(sum(float(p.get("importo") or 0) for p in pagamenti), 2)
     # saldata solo se sappiamo quanto costa E l'abbiamo coperto. Senza il totale non si
     # puo' dire che e' saldata: si sa solo che qualcosa e' entrato.
@@ -1248,7 +1277,8 @@ async def registra_incasso(order_id: str, body: IncassoIn, admin: dict = Depends
             WHERE id=$5""",
         json.dumps(pagamenti), dovuto, saldata, ora, order_id,
     )
-    logger.info(f"incasso {order_id}: +{importo:.2f} da {admin['full_name']}, "
+    dettaglio = " + ".join(f"{i:.2f} {m or 'non specificato'}" for i, m in pulite)
+    logger.info(f"incasso {order_id}: +{importo:.2f} ({dettaglio}) da {admin['full_name']}, "
                 f"totale incassato {incassato:.2f}" + (" — SALDATA" if saldata else ""))
     aggiornata = await fetchrow("SELECT * FROM work_orders WHERE id=$1", order_id)
     return _workorder_for_user(row_to_workorder(aggiornata), admin)
@@ -1264,7 +1294,12 @@ async def annulla_incasso(order_id: str, admin: dict = Depends(require_admin)):
     pagamenti = _pagamenti(row)
     if not pagamenti:
         raise HTTPException(status_code=400, detail="Nessun incasso da annullare")
-    tolto = pagamenti.pop()
+    # Si toglie l'INCASSO, non la riga: se ha pagato meta' contanti e meta' carta sono
+    # due righe con lo stesso istante, e togliendone una sola resterebbe mezzo pagamento.
+    ultimo_istante = pagamenti[-1].get("il")
+    tolte = [p for p in pagamenti if p.get("il") == ultimo_istante]
+    pagamenti = [p for p in pagamenti if p.get("il") != ultimo_istante]
+    tolto = {"importo": round(sum(float(p.get("importo") or 0) for p in tolte), 2)}
     ora = now_utc()
     dovuto = _num(row.get("totale_dovuto"))
     incassato = round(sum(float(p.get("importo") or 0) for p in pagamenti), 2)
